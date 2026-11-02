@@ -1,0 +1,16 @@
+name: Self-hosted probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - run: |
+          echo "host=$(hostname)"
+          echo "user=$(whoami)"
+          uname -a
