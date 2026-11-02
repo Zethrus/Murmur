@@ -29,6 +29,13 @@ jobs:
         run: mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
       - name: Provision runner dependencies
         run: |
+          set -euo pipefail
+          # Hosted runners start bare; a self-hosted machine usually already has the stack and
+          # must not require passwordless sudo.
+          if pkg-config --exists webkit2gtk-4.1 libsoup-3.0 alsa; then
+            echo "Build dependencies already present; skipping apt install."
+            exit 0
+          fi
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
             libayatana-appindicator3-dev librsvg2-dev libasound2-dev \
