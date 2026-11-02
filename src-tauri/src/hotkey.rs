@@ -1,4 +1,4 @@
-use crate::{app::AppState, controller::Action};
+use crate::{app::AppState, config::General, controller::Action};
 use anyhow::{bail, Context, Result};
 use std::{
     str::FromStr,
@@ -48,7 +48,7 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
     let shortcut = parse(accel)?;
     let pressed = Arc::new(AtomicBool::new(false));
     app.global_shortcut()
-        .on_shortcut(shortcut, move |app, _, event| {
+        .on_shortcut(shortcut, move |app, shortcut, event| {
             let down = event.state == ShortcutState::Pressed;
             if pressed.swap(down, Ordering::Relaxed) == down {
                 return;
@@ -58,12 +58,8 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
                 return;
             }
             if let Ok(config) = state.config() {
-                let action = match (config.general.hotkey_mode.as_str(), down) {
-                    ("hold", true) => Some(Action::Start),
-                    ("hold", false) => Some(Action::Stop),
-                    ("toggle", true) => Some(Action::Toggle),
-                    _ => None,
-                };
+                let code = parse(&config.general.hotkey_code).is_ok_and(|key| key == *shortcut);
+                let action = action_for(&config.general.hotkey_mode, down, code);
                 if let Some(action) = action {
                     if let Err(error) = state.send(action) {
                         state.error(&error.to_string());
@@ -74,16 +70,54 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
         .with_context(|| format!("Shortcut {} is unavailable (another app may own it)", serialize(&shortcut)))?;
     Ok(())
 }
-pub fn rebind(app: &AppHandle, old: &str, new: &str) -> Result<()> {
-    if parse(old)? == parse(new)? && app.global_shortcut().is_registered(parse(new)?) {
-        return Ok(());
+fn action_for(mode: &str, down: bool, code: bool) -> Option<Action> {
+    match (mode, down) {
+        ("hold", true) => Some(if code { Action::StartCode } else { Action::Start }),
+        ("hold", false) => Some(Action::Stop),
+        ("toggle", true) => Some(if code { Action::ToggleCode } else { Action::Toggle }),
+        _ => None,
     }
+}
+fn shortcuts(general: &General) -> Result<Vec<Shortcut>> {
+    let mut keys = vec![parse(&general.hotkey)?];
+    if !general.hotkey_code.is_empty() {
+        let code = parse(&general.hotkey_code)?;
+        if keys.contains(&code) {
+            bail!("Dictation and code shortcuts must be different");
+        }
+        keys.push(code);
+    }
+    Ok(keys)
+}
+pub fn rebind(app: &AppHandle, old: &General, new: &General) -> Result<()> {
+    let before = shortcuts(old)?;
+    let after = shortcuts(new)?;
     let start = Instant::now();
-    register(app, new)?;
-    if parse(old)? != parse(new)? && app.global_shortcut().is_registered(parse(old)?) {
-        if let Err(error) = app.global_shortcut().unregister(parse(old)?) {
-            let _ = app.global_shortcut().unregister(parse(new)?);
-            return Err(error).context("Unregister old shortcut");
+    let mut added = Vec::new();
+    for key in &after {
+        if !app.global_shortcut().is_registered(*key) {
+            if let Err(error) = register(app, &serialize(key)) {
+                for key in added {
+                    let _ = app.global_shortcut().unregister(key);
+                }
+                return Err(error);
+            }
+            added.push(*key);
+        }
+    }
+    let mut removed = Vec::new();
+    for key in &before {
+        if !after.contains(key) && app.global_shortcut().is_registered(*key) {
+            if let Err(error) = app.global_shortcut().unregister(*key) {
+                for key in removed {
+                    let _ = register(app, &serialize(&key));
+                }
+                for key in added {
+                    let _ = app.global_shortcut().unregister(key);
+                }
+                return Err(error).context("Unregister old shortcut");
+            }
+            removed.push(*key);
         }
     }
     if start.elapsed().as_millis() > 100 {
@@ -108,6 +142,15 @@ pub fn escape(app: &AppHandle, enabled: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn code_shortcut_routes_hold_and_toggle() {
+        assert!(matches!(action_for("hold", true, true), Some(Action::StartCode)));
+        assert!(matches!(action_for("hold", false, true), Some(Action::Stop)));
+        assert!(matches!(action_for("toggle", true, true), Some(Action::ToggleCode)));
+        assert!(action_for("toggle", false, true).is_none());
+        assert!(matches!(action_for("hold", true, false), Some(Action::Start)));
+        assert!(matches!(action_for("toggle", true, false), Some(Action::Toggle)));
+    }
     #[test]
     fn accelerator_roundtrip() -> Result<()> {
         let shortcut = parse("Ctrl+Alt+D")?;

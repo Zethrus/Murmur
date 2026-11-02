@@ -7,7 +7,8 @@ from murmur_engine.models import Models, explicit_network
 
 def test_list_is_offline_and_complete(models: Models) -> None:
     items = models.list()
-    assert len(items) == 6 and len({item["name"] for item in items}) == 6
+    assert len(items) == 7 and len({item["name"] for item in items}) == 7
+    assert any(item["name"] == "large-v3-turbo" for item in items)
     assert not any(item["installed"] for item in items)
     assert not models.directory.exists()
 

@@ -72,3 +72,20 @@ def test_remove_unloads_selected_model(models: Models) -> None:
     rpc.handle('{"id":1,"method":"models.remove","params":{"name":"distil-small.en"}}')
     assert rpc.speech._session is None
     assert json.loads(out.getvalue())["ok"]
+
+
+def test_ninety_second_pcm_crosses_rpc_without_truncation(models: Models) -> None:
+    import base64
+    rpc, out = server(models)
+    encoded = base64.b64encode(bytes(16000 * 90 * 4 + 4000 * 4)).decode()
+    rpc.speech.transcribe = Mock(return_value={"text": "long local prompt"})
+    params = {"sample_rate": 16000, "pcm_b64": encoded}
+    rpc.run(StringIO(json.dumps({"id": 1, "method": "transcribe", "params": params}) + "\n"))
+    assert json.loads(out.getvalue())["ok"]
+    rpc.speech.transcribe.assert_called_once_with(params)
+
+
+def test_rpc_still_rejects_oversize_requests(models: Models) -> None:
+    rpc, out = server(models)
+    rpc.run(StringIO("x" * 8_000_000))
+    assert json.loads(out.getvalue())["error"]["message"] == "Request too large"

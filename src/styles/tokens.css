@@ -67,6 +67,43 @@
   --banner-inset: var(--sp-3); --banner-radius: var(--r-md);
   --focus-ring: var(--border-focus) solid var(--accent); --focus-offset: var(--border-focus);
   --meter-bars: 24; --meter-bar-radius: var(--r-sm); --meter-gap: var(--sp-1);
+  --space-none: 0; --gap-xs: var(--sp-1); --gap-sm: var(--sp-2); --gap-md: var(--sp-3);
+  --gap-lg: var(--sp-4); --gap-xl: var(--sp-6); --gap-section: var(--sp-8);
+  --layout-full: 100%; --viewport-height: 100vh; --content-min-w: 440px;
+  --sidebar-inset: var(--sp-6) var(--sp-4); --sidebar-brand-inset: var(--sp-2) var(--sp-3) var(--sp-8);
+  --sidebar-footer-inset: var(--sp-4) var(--sp-3); --nav-inset: var(--sp-3);
+  --brand-size: var(--fs-22); --brand-mark-size: 32px; --brand-mark-radius: var(--r-md);
+  --brand-mark-weight: var(--weight-semibold); --nav-number-size: var(--fs-11); --nav-number-w: 20px;
+  --nav-active-bg: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  --nav-hover-bg: var(--surface-raised); --nav-radius: var(--r-md); --footer-size: var(--fs-11);
+  --page-title-gap: var(--sp-2); --page-title-size: 28px; --page-title-height: var(--lh-tight);
+  --notice-h: 28px; --notice-size: var(--fs-12); --notice-inset: var(--sp-1) 0;
+  --card-title-inset: var(--sp-4) var(--sp-5); --card-note-inset: 0 var(--sp-5) var(--sp-4);
+  --row-inset: var(--sp-4) var(--sp-5); --row-gap: var(--sp-6); --row-control-w: 260px;
+  --row-label-weight: var(--weight-medium); --hint-height: var(--lh-body); --hint-body-size: var(--fs-12);
+  --field-error-size: var(--fs-11); --control-height: 36px; --control-min-w: 140px;
+  --control-border: var(--hairline) solid var(--border); --control-weight: var(--weight-medium);
+  --disabled-opacity: 0.45; --button-danger-bg: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  --input-inset: var(--sp-2) var(--sp-3); --select-inset: var(--sp-2) var(--sp-8) var(--sp-2) var(--sp-3);
+  --select-arrow-right: 12px; --select-arrow-top: 8px; --model-card-min-w: 220px; --switch-thumb-size: 14px; --switch-thumb-offset: 2px;
+  --switch-thumb-travel: 12px; --switch-off: var(--text-muted); --switch-on: var(--accent);
+  --switch-thumb: var(--surface); --switch-border: var(--hairline) solid var(--border);
+  --slider-output-w: 60px; --slider-hit-h: 28px; --slider-thumb-shadow: var(--shadow-1);
+  --key-inset: var(--sp-1) var(--sp-2); --key-size: var(--fs-12); --key-radius: var(--r-sm);
+  --meter-height: 28px; --meter-min-w: 160px; --chip-inset: var(--sp-1) var(--sp-2);
+  --chip-radius: var(--r-sm); --chip-size: var(--fs-12); --icon-button-size: 24px;
+  --list-editor-w: 100%; --model-grid-inset: 0 var(--sp-5) var(--sp-4); --model-title-size: var(--fs-14);
+  --model-card-inset: var(--sp-4); --model-card-radius: var(--r-md); --model-card-min-h: 160px;
+  --badge-inset: var(--sp-1) var(--sp-2); --badge-radius: var(--r-pill); --badge-size: var(--fs-11);
+  --progress-height: 6px; --progress-radius: var(--r-pill); --progress-inset: var(--sp-4) var(--sp-5);
+  --history-max-h: 360px; --transcript-min-h: 96px; --transcript-max-h: 240px;
+  --transcript-inset: var(--sp-5); --privacy-size: var(--fs-15); --table-cell-inset: var(--sp-1);
+  --boot-inset: var(--sp-8); --pill-border: var(--hairline) solid var(--border);
+  --pill-expanded-radius: 24px; --pill-state-gap: var(--sp-3); --pill-compact-w: 200px;
+  --pill-transition: width var(--dur-base) var(--ease-out), border-radius var(--dur-base) var(--ease-out);
+  --pill-canvas-inset: 20px; --overlay-canvas-padding: calc(var(--pill-canvas-inset) * var(--overlay-scale)); --pill-error-w: 480px; --pill-preview-height: 40px;
+  --pill-status-size: var(--fs-16); --pill-label-max-w: 440px;
+
 }
 :root {
   color-scheme: light;

@@ -10,6 +10,9 @@ fn protected(token: &str) -> bool {
         || clean.chars().skip(1).any(char::is_uppercase)
         || clean.contains('.')
 }
+fn protected_style(token: &str, style: Style) -> bool {
+    protected(token) || (style == Style::Code && token.chars().any(|c| "_./(){}<>".contains(c)))
+}
 fn substitute(text: &str, phrase: &str, replacement: &str) -> String {
     let punctuation = if replacement.is_empty() { "[,;]?" } else { "" };
     let pattern = format!(r"\b{}\b{}", regex::escape(phrase), punctuation);
@@ -25,8 +28,42 @@ fn replacement_for(cap: &Captures<'_>, replacement: &str) -> String {
         replacement.to_owned()
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    Prose,
+    Code,
+}
+pub fn resolve_style(cfg: &Config, focused: &str, force: bool) -> Style {
+    let app = focused.to_lowercase();
+    if force
+        || cfg.postproc.style == "code"
+        || (cfg.postproc.style == "auto"
+            && cfg.postproc.code_apps.iter().any(|s| !s.trim().is_empty() && app.contains(&s.to_lowercase())))
+    {
+        Style::Code
+    } else {
+        Style::Prose
+    }
+}
+#[cfg(test)]
 pub fn process(text: &str, cfg: &Config) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    process_style(text, cfg, resolve_style(cfg, "", false))
+}
+fn normalize(text: &str, newlines: bool) -> String {
+    if newlines {
+        text.replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .split('\n')
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+}
+pub fn process_style(text: &str, cfg: &Config, style: Style) -> String {
+    let normalized = normalize(text, cfg.postproc.allow_newlines);
+    let normalized = normalized.replace('\n', " \u{e020} ");
     // Protect complete tokens, not just regex matches inside URLs or code.
     let mut saved = Vec::new();
     let mut in_code = false;
@@ -37,7 +74,25 @@ pub fn process(text: &str, cfg: &Config) -> String {
             if token.matches('`').count() % 2 == 1 {
                 in_code = !in_code;
             }
-            if code || protected(token) {
+            let spoken_word = cfg.postproc.spoken_punctuation && crate::punctuation::command_word(token);
+            if code || (protected_style(token, style) && !spoken_word) {
+                let marker = format!("\u{e000}{}\u{e001}", saved.len());
+                saved.push(token.to_owned());
+                marker
+            } else {
+                token.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cfg.postproc.spoken_punctuation {
+        text = crate::punctuation::spoken(&text, cfg.postproc.allow_newlines);
+    }
+    text = text.replace('\n', " \u{e020} ");
+    text = text
+        .split(' ')
+        .map(|token| {
+            if !token.contains('\u{e000}') && protected_style(token, style) {
                 let marker = format!("\u{e000}{}\u{e001}", saved.len());
                 saved.push(token.to_owned());
                 marker
@@ -62,10 +117,10 @@ pub fn process(text: &str, cfg: &Config) -> String {
         text = next;
     }
     text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    for (i, original) in saved.iter().enumerate() {
+    for (i, original) in saved.iter().enumerate().rev() {
         text = text.replace(&format!("\u{e000}{i}\u{e001}"), original);
     }
-    if cfg.injection.capitalize {
+    if cfg.injection.capitalize && style == Style::Prose {
         let mut in_code = false;
         let mut sentence = true;
         text = text
@@ -94,6 +149,8 @@ pub fn process(text: &str, cfg: &Config) -> String {
             .collect::<Vec<_>>()
             .join(" ");
     }
+    let text = text.replace(" \u{e020} ", "\n").replace('\u{e020}', "\n");
+    let text = normalize(&text, cfg.postproc.allow_newlines);
     let text = text.trim();
     if text.is_empty() {
         String::new()

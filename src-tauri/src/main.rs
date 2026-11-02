@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
 mod audio;
+#[cfg(test)]
+mod coding_tests;
 mod config;
 mod controller;
 mod engine;
@@ -11,6 +13,7 @@ mod ipc;
 mod overlay;
 mod platform;
 mod postproc;
+mod punctuation;
 mod sound;
 
 use tauri::{
@@ -26,7 +29,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let state = app.state::<app::AppState>();
     // Recoverable desktop limitations/conflicts must not prevent opening Settings.
     for result in [
-        hotkey::register(&handle, &state.config()?.general.hotkey),
+        hotkey::rebind(&handle, &state.config()?.general, &state.config()?.general),
         overlay::apply(&handle, &state.config()?.overlay),
         platform::set_autostart(&handle, state.config()?.general.autostart),
     ] {

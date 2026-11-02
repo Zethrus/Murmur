@@ -186,11 +186,11 @@ impl AppState {
         }
     }
     fn apply_runtime(&self, old: &Config, new: &Config) -> Result<()> {
-        hotkey::rebind(&self.app, &old.general.hotkey, &new.general.hotkey)?;
+        hotkey::rebind(&self.app, &old.general, &new.general)?;
         if let Err(error) = platform::set_autostart(&self.app, new.general.autostart)
             .and_then(|_| overlay::apply(&self.app, &new.overlay))
         {
-            let _ = hotkey::rebind(&self.app, &new.general.hotkey, &old.general.hotkey);
+            let _ = hotkey::rebind(&self.app, &new.general, &old.general);
             let _ = platform::set_autostart(&self.app, old.general.autostart);
             let _ = overlay::apply(&self.app, &old.overlay);
             return Err(error);

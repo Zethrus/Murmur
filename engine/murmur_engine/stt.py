@@ -85,14 +85,14 @@ class Speech:
         if params.get("sample_rate") != 16000:
             raise ValueError("Only mono 16000 Hz little-endian float32 PCM is supported")
         encoded = params.get("pcm_b64", "")
-        if not isinstance(encoded, str) or len(encoded) > 5_120_000:
-            raise ValueError("PCM payload exceeds 60 seconds")
+        if not isinstance(encoded, str) or len(encoded) > ((16000 * 91 * 4 + 2) // 3) * 4:
+            raise ValueError("PCM payload exceeds 91 seconds (90 seconds plus capture headroom)")
         try:
             raw = base64.b64decode(encoded, validate=True)
         except (ValueError, binascii.Error) as exc:
             raise ValueError("Invalid PCM base64") from exc
-        if len(raw) % 4 or not raw or len(raw) > 16000 * 60 * 4:
-            raise ValueError("PCM must contain 1–960000 float32 samples")
+        if len(raw) % 4 or not raw or len(raw) > 16000 * 91 * 4:
+            raise ValueError("PCM must contain between one sample and 91 seconds of float32 audio")
         pcm = np.frombuffer(raw, dtype="<f4")
         if not np.isfinite(pcm).all():
             raise ValueError("PCM contains non-finite samples")

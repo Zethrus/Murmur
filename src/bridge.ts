@@ -1,5 +1,8 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+export const appVersion = (): Promise<string> => getVersion();
 
 export type DictationState = "idle" | "listening" | "transcribing" | "done" | "error";
 export interface Status {
@@ -7,14 +10,14 @@ export interface Status {
   sidecar_alive: boolean; model_available: boolean; error: string | null;
 }
 export interface Config {
-  general: { hotkey: string; hotkey_mode: "hold" | "toggle"; language: string; translate: boolean;
+  general: { hotkey_code: string; hotkey: string; hotkey_mode: "hold" | "toggle"; language: string; translate: boolean;
     autostart: boolean; theme: "light" | "dark" | "auto" };
   overlay: { enabled: boolean; position: "top-center" | "bottom-center"; scale: number; show_preview: boolean; idle_hide: boolean };
   sounds: { enabled: boolean; volume: number; muted: boolean };
   engine: { model: string; device: "auto" | "cpu" | "cuda"; compute_type: string; beam_size: number; vad_filter: boolean; dictionary: string[] };
   audio: { device: string; gain: number; silence_threshold: number; silence_timeout_ms: number; max_utterance_s: number; min_utterance_ms: number };
-  injection: { method: "auto" | "type" | "clipboard"; clipboard_only: boolean; trailing_space: boolean; capitalize: boolean; remove_fillers: boolean; exclude_apps: string[] };
-  postproc: { replacements: Record<string, string>; fillers: string[] };
+  injection: { prefer_paste: boolean; method: "auto" | "type" | "clipboard"; clipboard_only: boolean; trailing_space: boolean; capitalize: boolean; remove_fillers: boolean; exclude_apps: string[] };
+  postproc: { style: "prose" | "code" | "auto"; code_apps: string[]; spoken_punctuation: boolean; allow_newlines: boolean; replacements: Record<string, string>; fillers: string[] };
   privacy: { history_enabled: boolean; history_retention_days: number };
 }
 export type ConfigPatch = { [K in keyof Config]?: Partial<Config[K]> };
@@ -25,7 +28,7 @@ export interface HistoryEntry { id: number; ts: number; text: string; app: strin
 export interface Download { name: string; phase: "starting" | "downloading" | "complete" | "error"; progress?: number; file?: string }
 export interface Events {
   state: { state: DictationState }; level: { rms: number }; partial: { text: string };
-  latency: { latency_ms: number }; error: { message: string; persistent?: boolean };
+  latency: { latency_ms: number; text?: string }; error: { message: string; persistent?: boolean };
   download: Download; config: Config;
 }
 interface Commands {

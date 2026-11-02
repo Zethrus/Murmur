@@ -62,7 +62,9 @@ pub async fn test_engine(app: AppHandle) -> Reply<Value> {
         let state = app.state::<AppState>();
         let config = state.config()?;
         // A repeatable three-second silent inference probe; VAD may correctly return empty text.
-        state.engine.request("transcribe", controller::params(&vec![0.0; 48_000], &config))
+        let result = state.engine.request("transcribe", controller::params(&vec![0.0; 48_000], &config))?;
+        state.refresh_engine()?;
+        Ok(result)
     })
     .await
 }

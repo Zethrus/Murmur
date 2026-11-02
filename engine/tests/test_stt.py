@@ -111,3 +111,20 @@ def test_invalid_pcm_or_options(models: Models, patch: dict[str, object]) -> Non
     params.update(patch)
     with pytest.raises(ValueError):
         Speech(models).transcribe(params)
+
+
+@pytest.mark.parametrize("seconds", [90.25, 91])
+def test_long_coding_prompt_fits(models: Models, monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    samples = np.zeros(int(seconds * 16000), dtype="<f4")
+    infer = Mock(return_value=("long prompt", "en"))
+    speech = Speech(models)
+    monkeypatch.setattr(speech, "_infer", infer)
+    result = speech.transcribe({"sample_rate": 16000, "pcm_b64": base64.b64encode(samples).decode()})
+    assert result["duration_ms"] == seconds * 1000
+    assert len(infer.call_args.args[0]) == len(samples)
+
+
+def test_overlong_coding_prompt_rejected(models: Models) -> None:
+    encoded = base64.b64encode(np.zeros(16000 * 91 + 1, dtype="<f4")).decode()
+    with pytest.raises(ValueError, match="91 seconds"):
+        Speech(models).transcribe({"sample_rate": 16000, "pcm_b64": encoded})

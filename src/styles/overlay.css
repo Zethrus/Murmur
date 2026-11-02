@@ -1,18 +1,21 @@
 body[data-window="overlay"] { background: var(--overlay-canvas-bg); overflow: hidden; color: var(--text); }
-body[data-window="overlay"] #app { height: 100vh; display: flex; align-items: flex-end; justify-content: center; padding: var(--overlay-inset); pointer-events: none; }
+body[data-window="overlay"] #app { height: var(--viewport-height); display: flex; align-items: flex-end; justify-content: center; padding: var(--overlay-canvas-padding); pointer-events: none; }
 body[data-window="overlay"] #app[data-position="top-center"] { align-items: flex-start; }
-.pill { display: flex; align-items: center; gap: var(--pill-gap); min-height: var(--pill-h); min-width: var(--pill-min-w); max-width: var(--pill-max-w); padding: var(--pill-inset); border-radius: var(--pill-radius); border: var(--card-border); background: var(--overlay-bg); box-shadow: var(--pill-shadow); transform: scale(var(--overlay-scale)); transform-origin: bottom center; font-size: var(--pill-label-size); font-weight: var(--pill-weight); }
+.pill { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--pill-preview-gap); min-height: var(--pill-h); width: var(--pill-compact-w); max-width: var(--pill-max-w); padding: var(--pill-inset); border-radius: var(--pill-radius); border: var(--pill-border); background: var(--overlay-bg); box-shadow: var(--pill-shadow); transform: scale(var(--overlay-scale)); transform-origin: bottom center; font-size: var(--pill-label-size); font-weight: var(--pill-weight); transition: var(--pill-transition); flex-shrink: 0; text-align: center; }
 [data-position="top-center"] .pill { transform-origin: top center; }
-.pill-content { min-width: 0; display: flex; flex-direction: column; gap: var(--pill-preview-gap); }
-.pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill-state { display: flex; align-items: center; justify-content: center; gap: var(--pill-state-gap); max-width: var(--layout-full); min-height: var(--bar-h); }
+.pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: var(--pill-label-max-w); }
 .indicator { flex-shrink: 0; width: var(--dot-size); height: var(--dot-size); border-radius: var(--dot-radius); background: var(--text-muted); }
 .bars { display: none; align-items: center; gap: var(--bar-gap); height: var(--bar-h); }
 .bars i { display: block; width: var(--bar-w); height: var(--bar-h); border-radius: var(--bar-radius); background: var(--meter-fill); transform: scaleY(var(--level, var(--bar-level))); transition: var(--bar-transition); }
-.preview { display: -webkit-box; -webkit-line-clamp: var(--pill-preview-lines); -webkit-box-orient: vertical; overflow: hidden; max-width: var(--pill-preview-w); font-size: var(--pill-preview-size); color: var(--text-muted); overflow-wrap: anywhere; }
+.preview { display: -webkit-box; -webkit-line-clamp: var(--pill-preview-lines); -webkit-box-orient: vertical; overflow: hidden; width: var(--pill-preview-w); max-width: var(--layout-full); min-height: var(--pill-preview-height); font-size: var(--pill-preview-size); color: var(--text-muted); overflow-wrap: anywhere; white-space: pre-wrap; }
 .preview:empty, [data-preview="false"] .preview { display: none; }
+[data-expanded="true"] .pill { width: var(--pill-max-w); border-radius: var(--pill-expanded-radius); }
+[data-state="idle"] .pill { width: var(--pill-min-w); }
 [data-state="listening"] .bars { display: flex; }
 [data-state="listening"] .indicator { display: none; }
 [data-state="transcribing"] .indicator { width: var(--dots-w); height: var(--bar-h); background: var(--overlay-canvas-bg); color: var(--accent); letter-spacing: var(--dots-gap); animation: pulse var(--pulse-duration) infinite alternate; }
-[data-state="done"] .indicator { background: var(--ok); }
+[data-state="done"] .indicator { width: var(--bar-h); height: var(--bar-h); background: var(--overlay-canvas-bg); color: var(--ok); font-size: var(--pill-status-size); }
 [data-state="error"] .indicator { background: var(--warn); }
+[data-state="error"] .pill { width: var(--pill-error-w); }
 @keyframes pulse { from { opacity: var(--pulse-low); } to { opacity: var(--pulse-high); } }

@@ -1,11 +1,11 @@
-# Murmur — phase 1
+# Murmur — phase 2
 
-Local, private dictation for Linux/X11 and Windows 10/11 x64. This implementation targets
-the committed SPEC.md contract at 4de9f8a; later spec additions are not implied complete.
-This phase includes the Rust backend, isolated Python engine, live overlay, typed IPC,
-full design tokens, and build plumbing. Settings intentionally contains only status JSON,
-a missing-model banner and a theme selector. The five settings pages, CI/release workflows,
-and Windows packaging script are later-phase work, not placeholders claimed as complete.
+Local, private dictation for Linux/X11 and Windows 10/11 x64. Phase 2 adds the coding-mode
+pipeline, five complete settings pages, and the event-driven overlay to the Rust backend,
+isolated Python engine, typed IPC, shared light/dark tokens, and build plumbing.
+CI/release workflows and the Windows packaging script remain later-phase work.
+Desktop interactions and visual parity remain unverified: this phase was implemented and
+tested without launching the GUI or downloading speech models.
 
 ## Development
 
@@ -32,9 +32,9 @@ route is `?window=overlay`. Closing Settings hides it; Quit stops and joins work
 The dev launcher executes `engine/.venv/bin/python -m murmur_engine`; on Windows,
 create `engine/.venv` with Python and the backend uses `.venv/Scripts/python.exe`.
 No model is downloaded or loaded on startup. The default model name is
-`distil-small.en`, but a missing installation is explicitly reported. Until the Engine
-settings page exists, model management is available through the typed bridge commands
-`list_models`, `install_model({name})` and `set_config({patch: {engine: {model: name}}})`.
+`distil-small.en`, but a missing installation is explicitly reported. Open Engine in Settings
+to install a model and choose **Use model**. Installation progress reports completed files,
+not individual bytes; large weight files may spend a while at the same percentage.
 Installation is always explicit, never triggered by a hotkey or transcription request.
 
 ## Build and checks
@@ -42,6 +42,7 @@ Installation is always explicit, never triggered by a hotkey or transcription re
 ```sh
 npm run build               # TypeScript + token lint + Vite
 npm run test:tokens         # positive and negative token-linter fixtures
+npm run test:ui             # DOM contract tests with mocked IPC; no GUI or network
 (cd src-tauri && cargo build)
 (cd src-tauri && cargo test)
 (cd engine && .venv/bin/python -m pytest -q)
@@ -75,16 +76,64 @@ Default hotkey: Ctrl+Alt+D, hold to record and release to transcribe. Toggle mod
 and stops on successive presses and stops after sustained silence following speech.
 Escape cancels only while recording, with no cancellation sound. Very short taps are
 ignored. Rebinding reports invalid/conflicting accelerators; the 100 ms target needs
-measurement on each desktop. Capture includes 250 ms pre-roll, a 60 s in-memory ring,
-16 kHz mono resampling and a configurable maximum utterance. No audio files are saved.
+measurement on each desktop. Capture includes 250 ms pre-roll, a 91 s in-memory ring,
+16 kHz mono resampling and a configurable maximum utterance. The sidecar accepts 91 seconds
+of PCM to include the 90-second utterance plus pre-roll/callback headroom. No audio files are saved.
 
-ASCII text up to 1500 characters uses typing in auto mode; other text uses clipboard
-paste. Previous clipboard text is restored after 300 ms unless the user changed it.
+With **Prefer paste** enabled (the default), code style or more than 200 characters uses
+clipboard paste, even if the method is set to Type. Disable Prefer paste to use the legacy
+method selection (Auto types ASCII up to 1500 bytes; other text uses paste). Linux terminal
+windows use Ctrl+Shift+V; other windows use Ctrl+V. Terminal output always flattens newlines,
+even when newlines are enabled. Previous clipboard text is restored after 300 ms unless the user changed it.
 Non-text clipboard data cannot be restored by this text-only snapshot; when no previous
 text exists, the transcript remains on the clipboard. Clipboard-only/excluded apps never
 receive keystrokes, and Murmur's own windows are skipped. Clipboard ownership stays alive
 on X11 for later pasting. The exclusion picker hides Settings for three seconds so the
 user can focus the desired application.
+
+## Vibecoding workflow
+
+1. In Engine, install **large-v3-turbo** for technical prompts, then choose **Use model**.
+   The catalog contains a CTranslate2 conversion; model weights are fetched only on Install.
+2. In General, choose **Press to start / stop** (toggle mode). Long prompts can run for
+   90 seconds; silence auto-stop still applies. Adjust the silence timeout in Audio if needed.
+3. Keep Behavior → **Dictation style: Auto**. VS Code, Cursor, JetBrains, Zed, Sublime and
+   the listed terminals use code style. Edit Code apps to match your window classes.
+4. Keep the overlay's **Live preview** enabled to catch misheard identifiers before they land.
+   Press **Escape** while listening to cancel. The preview is recognition text, not a code validator.
+5. Optionally bind a **Code shortcut** to force code style for one dictation, regardless of
+   the focused app. It uses the same hold/toggle semantics as the main shortcut.
+
+Say “foo underscore bar”, “double equals”, “fat arrow”, or “quote hello unquote”. Spoken
+punctuation is case-insensitive, whole-word and longest-match first. “Dot” joins identifiers
+(`foo dot rs` → `foo.rs`); “period” / “full stop” ends a sentence. Code style never capitalises
+or rewrites existing code-like/mixed-case tokens. Fillers are kept unless removal is enabled.
+“Newline” / “next line” becomes a space by default. Even with Allow newlines enabled,
+terminal windows always receive one paragraph to avoid executing a line accidentally.
+
+The editable dictionary starts with coding vocabulary (Tauri, CTranslate2, TypeScript,
+JSON-RPC, and others). Existing explicit dictionary lists, including an empty list, are
+preserved when upgrading; defaults only fill missing fields.
+
+## Settings guide
+
+- **General:** both hotkeys, hold/toggle, language/translation, overlay, sounds, theme and autostart.
+- **Engine:** offline model catalog, explicit install/remove/select, file-level progress,
+  compute device/precision, beam/VAD, a measured silent 3-second test, and dictionary editor.
+- **Audio:** input selection/refresh, idle live meter, gain, silence and utterance durations.
+- **Behavior:** coding style/app matching, spoken punctuation/newlines, injection preferences,
+  exclusions/picker, filler words, editable replacement rules, and the last session transcript.
+- **Privacy:** local-only explanation, opt-in retention, debounced history search/delete-all,
+  conventional OS paths and Open folder buttons (which resolve actual XDG/Windows paths).
+
+The DOM tests exercise page rendering, saved controls, conflicts, empty/offline states,
+model/history actions, event cleanup and overlay timing with explicit mock IPC. They do not
+render pixels or replace desktop integration/visual parity checks.
+
+Settings use only the typed bridge. All settings saves go through the Rust config transaction;
+rejected hotkeys or invalid values show errors and retain the last saved value. Removing a
+replacement requires saving the whole replacement table. History deletion and model removal
+ask for confirmation. Themes are shared with the overlay; reduced motion is respected.
 
 ## Privacy
 
@@ -122,9 +171,9 @@ MURMUR_QA_WAV="$PWD/.cache/qa/speech.wav" npm run tauri dev
 QA WAV input accepts PCM or float WAV, downmixes/resamples, feeds at real-time cadence,
 and rewinds at each dictation. It bypasses microphone hardware and stops at EOF.
 The test-engine IPC performs a repeatable three-second silent inference probe (VAD may
-return empty text). Real transcription/injection performance is not measured in phase 1.
+return empty text). Real transcription/injection performance has not been measured in this phase.
 
-Manual parity (not executed in phase 1): open Settings and the idle/listening overlay on
+Manual parity (not executed in either implementation phase): open Settings and the idle/listening overlay on
 Linux and Windows with the same theme and scaling. Compare spacing, type sizes and colour
 roles; only font-family resolution should differ. Save screenshots in `docs/parity/`.
 Do not infer live hotkey, tray, audio, CUDA, injection, packaging or Windows success from

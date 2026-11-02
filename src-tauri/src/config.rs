@@ -19,7 +19,8 @@ section!(General {
     language: String = "en".into(),
     translate: bool = false,
     autostart: bool = false,
-    theme: String = "auto".into()
+    theme: String = "auto".into(),
+    hotkey_code: String = "".into()
 });
 section!(Overlay {
     enabled: bool = true,
@@ -32,23 +33,27 @@ section!(Sounds { enabled: bool = true, volume: f32 = 0.6, muted: bool = false }
 section!(Engine {
     model: String = "distil-small.en".into(), device: String = "auto".into(),
     compute_type: String = "auto".into(), beam_size: u32 = 1, vad_filter: bool = true,
-    dictionary: Vec<String> = Vec::new()
+    dictionary: Vec<String> = ["Tauri", "faster-whisper", "CTranslate2", "WebKitGTK", "WebView2", "serde", "tokio", "enigo", "cpal", "rodio", "Murmur", "zethrus", "Python", "TypeScript", "npm", "cargo", "git", "stdin", "stdout", "JSON-RPC", "hotkey", "overlay", "systemd", "Wayland", "X11", "pip", "venv", "regex", "null", "boolean"].map(String::from).to_vec()
 });
 section!(Audio {
     device: String = "default".into(),
     gain: f32 = 1.0,
     silence_threshold: f32 = 0.012,
     silence_timeout_ms: u64 = 1200,
-    max_utterance_s: u64 = 45,
+    max_utterance_s: u64 = 90,
     min_utterance_ms: u64 = 250
 });
 section!(Injection {
     method: String = "auto".into(), clipboard_only: bool = false, trailing_space: bool = true,
-    capitalize: bool = true, remove_fillers: bool = false, exclude_apps: Vec<String> = Vec::new()
+    capitalize: bool = true, remove_fillers: bool = false, exclude_apps: Vec<String> = Vec::new(), prefer_paste: bool = true
 });
 section!(Postproc {
     replacements: BTreeMap<String, String> = BTreeMap::from([("mur mur".into(), "Murmur".into())]),
-    fillers: Vec<String> = ["um", "uh", "er", "hmm"].map(String::from).to_vec()
+    fillers: Vec<String> = ["um", "uh", "er", "hmm"].map(String::from).to_vec(),
+    style: String = "auto".into(),
+    code_apps: Vec<String> = ["code","cursor","vscode","code-oss","jetbrains","zed","sublime","gnome-terminal","konsole","alacritty","kitty","wezterm","windowsterminal","mintty"].map(String::from).to_vec(),
+    spoken_punctuation: bool = true,
+    allow_newlines: bool = false
 });
 section!(Privacy { history_enabled: bool = false, history_retention_days: u32 = 7 });
 section!(Config {
@@ -66,7 +71,11 @@ fn merge(target: &mut toml::Value, patch: toml::Value) {
     if let (Some(dst), Some(src)) = (target.as_table_mut(), patch.as_table()) {
         for (key, value) in src {
             if let Some(old) = dst.get_mut(key) {
-                merge(old, value.clone());
+                if key == "replacements" {
+                    *old = value.clone();
+                } else {
+                    merge(old, value.clone());
+                }
             } else {
                 dst.insert(key.clone(), value.clone());
             }
@@ -96,7 +105,10 @@ impl Config {
         Ok(result)
     }
     pub fn validate(&self) -> Result<()> {
-        crate::hotkey::parse(&self.general.hotkey)?;
+        let primary = crate::hotkey::parse(&self.general.hotkey)?;
+        if !self.general.hotkey_code.is_empty() && crate::hotkey::parse(&self.general.hotkey_code)? == primary {
+            bail!("Dictation and code shortcuts must be different");
+        }
         for (value, choices) in [
             (self.general.hotkey_mode.as_str(), &["hold", "toggle"][..]),
             (self.general.theme.as_str(), &["auto", "light", "dark"][..]),
@@ -107,6 +119,7 @@ impl Config {
                 &["auto", "int8", "int8_float16", "float16", "float32", "int8_float32"][..],
             ),
             (self.injection.method.as_str(), &["auto", "type", "clipboard"][..]),
+            (self.postproc.style.as_str(), &["prose", "code", "auto"][..]),
         ] {
             if !choices.contains(&value) {
                 bail!("Unsupported configuration value: {value}");
@@ -124,12 +137,12 @@ impl Config {
         if !(0.0..=1.0).contains(&self.audio.silence_threshold) {
             bail!("Invalid silence threshold");
         }
-        if !(1..=55).contains(&self.audio.max_utterance_s)
+        if !(1..=90).contains(&self.audio.max_utterance_s)
             || self.audio.min_utterance_ms == 0
             || self.audio.min_utterance_ms > self.audio.max_utterance_s * 1000
             || !(100..=60_000).contains(&self.audio.silence_timeout_ms)
         {
-            bail!("Invalid audio duration limits (maximum 55 seconds)");
+            bail!("Invalid audio duration limits (maximum 90 seconds)");
         }
         if !(1..=10).contains(&self.engine.beam_size) {
             bail!("Beam size must be 1–10");

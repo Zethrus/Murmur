@@ -61,10 +61,10 @@ class Server:
 
     def run(self, source: TextIO) -> None:
         while not self.stopping:
-            line = source.readline(5_300_000)
+            line = source.readline(8_000_000)
             if not line:
                 break
-            if len(line) >= 5_300_000 and not line.endswith("\n"):
+            if len(line) >= 8_000_000 and not line.endswith("\n"):
                 self.emit({"id": None, "ok": False, "error": {"message": "Request too large"}})
                 break
             if line.strip():

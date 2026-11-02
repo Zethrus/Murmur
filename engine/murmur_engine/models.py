@@ -23,6 +23,7 @@ def catalog() -> tuple[Model, ...]:
         Model("distil-small.en", "Systran/faster-distil-whisper-small.en", 335, "balanced"),
         Model("distil-large-v3", "Systran/faster-distil-whisper-large-v3", 1520, "high"),
         Model("large-v3", "Systran/faster-whisper-large-v3", 3100, "highest"),
+        Model("large-v3-turbo", "dropbox-dash/faster-whisper-large-v3-turbo", 1620, "high"),
     )
 
 

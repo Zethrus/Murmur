@@ -17,6 +17,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub enum Action {
     Start,
+    StartCode,
+    ToggleCode,
     Stop,
     Cancel,
     Toggle,
@@ -43,6 +45,7 @@ struct Controller {
     audio: Option<AudioCapture>,
     injector: inject::Injector,
     active: bool,
+    force_code: bool,
     epoch: u64,
     started: Instant,
     reset_at: Option<Instant>,
@@ -58,6 +61,7 @@ impl Controller {
             audio: None,
             injector: inject::Injector::default(),
             active: false,
+            force_code: false,
             epoch: 0,
             started: Instant::now(),
             reset_at: None,
@@ -85,11 +89,12 @@ impl Controller {
         })?);
         Ok(())
     }
-    fn start(&mut self, state: &AppState) -> Result<()> {
+    fn start(&mut self, state: &AppState, code: bool) -> Result<()> {
         if self.active || state.status()?.state == "transcribing" {
             return Ok(());
         }
         self.config = state.config()?;
+        self.force_code = code;
         if !state.status()?.model_available {
             state.refresh_engine()?;
         }
@@ -145,12 +150,13 @@ impl Controller {
         let start = Instant::now();
         let result = state.engine.request("transcribe", params(&pcm, &self.config))?;
         let text = result["text"].as_str().context("Engine response lacks transcript")?;
-        let text = postproc::process(text, &self.config);
+        let focused = platform::focused_app(&state.app)?;
+        let style = postproc::resolve_style(&self.config, &focused, self.force_code);
+        let text = inject::safe_text(&postproc::process_style(text, &self.config, style), &focused);
         if !text.is_empty() {
-            let focused = platform::focused_app(&state.app)?;
-            self.injector.inject(&text, &self.config.injection, &focused)?;
+            self.injector.inject(&text, &self.config.injection, &focused, style)?;
             let latency = start.elapsed().as_millis() as u64;
-            state.app.emit("latency", json!({"latency_ms":latency}))?;
+            state.app.emit("latency", json!({"latency_ms":latency,"text":text}))?;
             if state.config()?.privacy.history_enabled {
                 state.history(|history| {
                     if let Some(h) = history {
@@ -224,17 +230,18 @@ impl Controller {
     }
     fn action(&mut self, state: &AppState, action: Action) -> Result<()> {
         match action {
-            Action::Start => self.start(state)?,
+            Action::Start => self.start(state, false)?,
+            Action::StartCode => self.start(state, true)?,
             Action::Stop => self.stop(state)?,
             Action::Cancel => self.cancel(state)?,
-            Action::Toggle => {
+            Action::Toggle | Action::ToggleCode => {
                 if self.active {
                     self.stop(state)?;
                 } else {
-                    self.start(state)?;
+                    self.start(state, matches!(action, Action::ToggleCode))?;
                 }
             }
-            Action::Level(rms) if self.active => {
+            Action::Level(rms) => {
                 state.app.emit("level", json!({"rms":rms}))?;
             }
             Action::Endpoint if self.active && self.config.general.hotkey_mode == "toggle" => self.stop(state)?,
@@ -262,11 +269,14 @@ impl Controller {
                 let audio_changed = serde_json::to_value(&next.audio)? != serde_json::to_value(&self.config.audio)?;
                 let engine_changed = serde_json::to_value(&next.engine)? != serde_json::to_value(&self.config.engine)?;
                 let hotkey_changed = next.general.hotkey != self.config.general.hotkey
-                    || next.general.hotkey_mode != self.config.general.hotkey_mode;
+                    || next.general.hotkey_mode != self.config.general.hotkey_mode
+                    || next.general.hotkey_code != self.config.general.hotkey_code;
                 if audio_changed || engine_changed || hotkey_changed {
                     self.cancel(state)?;
                 }
-                self.config = next;
+                if !self.active {
+                    self.config = next;
+                }
                 if audio_changed {
                     self.audio = None;
                     self.prepare_audio(state)?;
@@ -277,7 +287,7 @@ impl Controller {
                 if !self.active {
                     self.hide_at = Some(Instant::now() + Duration::from_millis(1500));
                 }
-                overlay::apply(&state.app, &self.config.overlay)?;
+                overlay::apply(&state.app, &state.config()?.overlay)?;
             }
             _ => {}
         }
