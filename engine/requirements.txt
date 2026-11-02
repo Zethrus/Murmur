@@ -2,3 +2,6 @@ faster-whisper==1.2.1
 ctranslate2==4.6.3
 numpy>=1.26,<3
 huggingface_hub>=0.34,<2
+# CUDA runtime for faster-whisper on NVIDIA GPUs (opt-in hardware; CPU still works without it).
+nvidia-cublas-cu12>=12.4 ; sys_platform == "linux" or sys_platform == "win32"
+nvidia-cudnn-cu12>=9.1 ; sys_platform == "linux" or sys_platform == "win32"

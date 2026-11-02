@@ -143,19 +143,27 @@ impl Controller {
         let duration = self.started.elapsed().as_millis() as u64;
         let pcm = self.audio.as_mut().context("Microphone unavailable")?.stop()?;
         if duration < self.config.audio.min_utterance_ms || pcm.is_empty() {
+            tracing::info!(duration_ms = duration, samples = pcm.len(), "utterance discarded");
             return self.idle(state);
         }
+        tracing::info!(duration_ms = duration, samples = pcm.len(), "utterance captured");
         state.cue(Cue::Stop);
         state.transition("transcribing")?;
         let start = Instant::now();
         let result = state.engine.request("transcribe", params(&pcm, &self.config))?;
         let text = result["text"].as_str().context("Engine response lacks transcript")?;
+        tracing::info!(
+            infer_ms = result["infer_ms"].as_f64().unwrap_or(0.0),
+            chars = text.len(),
+            "transcript received"
+        );
         let focused = platform::focused_app(&state.app)?;
         let style = postproc::resolve_style(&self.config, &focused, self.force_code);
         let text = inject::safe_text(&postproc::process_style(text, &self.config, style), &focused);
         if !text.is_empty() {
             self.injector.inject(&text, &self.config.injection, &focused, style)?;
             let latency = start.elapsed().as_millis() as u64;
+            tracing::info!(latency_ms = latency, app = %focused, style = ?style, chars = text.len(), "transcript delivered");
             state.app.emit("latency", json!({"latency_ms":latency,"text":text}))?;
             if state.config()?.privacy.history_enabled {
                 state.history(|history| {

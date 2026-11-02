@@ -83,11 +83,15 @@ impl Process {
             .name("murmur-engine-stderr".into())
             .spawn(move || {
                 for line in BufReader::new(stderr).lines() {
-                    if line.is_err() {
+                    let Ok(line) = line else {
                         break;
+                    };
+                    if line.trim().is_empty() {
+                        continue;
                     }
-                    // Third-party libraries can include sensitive values; never forward raw stderr.
-                    tracing::debug!("Engine diagnostic received on stderr");
+                    // Engine stderr is our only view into Python failures; keep it short and local.
+                    let line: String = line.chars().take(400).collect();
+                    tracing::debug!(target: "murmur::engine", "stderr: {line}");
                 }
             })
             .context("Start sidecar diagnostic reader");

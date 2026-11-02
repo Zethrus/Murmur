@@ -1,191 +1,324 @@
-# Murmur — phase 2
+# Murmur
 
-Local, private dictation for Linux/X11 and Windows 10/11 x64. Phase 2 adds the coding-mode
-pipeline, five complete settings pages, and the event-driven overlay to the Rust backend,
-isolated Python engine, typed IPC, shared light/dark tokens, and build plumbing.
-CI/release workflows and the Windows packaging script remain later-phase work.
-Desktop interactions and visual parity remain unverified: this phase was implemented and
-tested without launching the GUI or downloading speech models.
+Local, private dictation for Linux/X11 and Windows 10/11 x64. Hold a global hotkey,
+speak, and Murmur inserts the transcript into the focused application. A small
+click-through overlay shows recording, preview and completion; the tray opens
+Settings. Coding mode handles technical vocabulary and spoken punctuation for
+editor prompts, chat boxes and terminals.
 
-## Development
+Tauri v2 + TypeScript provide the UI; Rust handles audio, hotkeys and injection;
+a separate frozen Python engine runs faster-whisper/CTranslate2. Models load on
+first use and remain warm. Linux has been verified end-to-end. Windows builds
+and runtime are **unverified on real Windows hardware**; CI compilation is not a
+substitute for microphone, GPU, hotkey and desktop testing.
 
-Prerequisites: Node 22+, npm, Rust/Cargo 1.92+, Python 3.10+ with venv; on Linux, the
-WebKitGTK 4.1, GTK3, ALSA, libappindicator and XKB development libraries, plus xprop.
-No sudo or apt is used by the project scripts. Enigo uses its x11rb/XTEST backend,
-not libxdo. Native Wayland capture/injection is not supported; failures are reported,
-not panics. Windows uses WebView2 and Enigo's Unicode SendInput implementation.
+Screenshots: placeholders pending a matched Linux/Windows capture set. See the
+[design-parity checklist and capture instructions](docs/parity/README.md).
+
+## Linux installation
+
+Use a regular user account, not sudo. Prerequisites must already be installed:
+
+- Node.js 22+, npm, Rust stable/Cargo (1.92+ recommended), Python 3.10+ with venv/pip.
+- C/C++ build tools, pkg-config, WebKitGTK 4.1, libsoup 3, GTK3,
+  Ayatana AppIndicator, librsvg, ALSA, X11 and XKB development libraries.
+- `patchelf`, `file` and librsvg tools for bundles; `xprop` for focused-window detection.
+- An X11 desktop, working microphone/audio stack and tray support. Native Wayland
+  injection is unverified; use an X11 session if compositor restrictions interfere.
 
 From the repository root:
 
 ```sh
-mkdir -p .cache/tmp .cache/pip
-export TMPDIR="$PWD/.cache/tmp" PIP_CACHE_DIR="$PWD/.cache/pip"
-/usr/bin/python3 -m venv --system-site-packages engine/.venv
-engine/.venv/bin/python -m pip install -r engine/requirements.txt pytest pyinstaller
-npm ci
-npm run dev                 # web-only development, no Rust IPC
-npm run tauri dev           # actual desktop app + local Python sidecar
+./install.sh
+~/.local/bin/murmur
 ```
 
-The desktop app starts hidden in the tray; click its icon for Settings. The overlay
-route is `?window=overlay`. Closing Settings hides it; Quit stops and joins workers.
-The dev launcher executes `engine/.venv/bin/python -m murmur_engine`; on Windows,
-create `engine/.venv` with Python and the backend uses `.venv/Scripts/python.exe`.
-No model is downloaded or loaded on startup. The default model name is
-`distil-small.en`, but a missing installation is explicitly reported. Open Engine in Settings
-to install a model and choose **Use model**. Installation progress reports completed files,
-not individual bytes; large weight files may spend a while at the same percentage.
-Installation is always explicit, never triggered by a hotkey or transcription request.
+The installer creates/reuses `engine/.venv` with `--system-site-packages`, installs
+`engine/requirements.txt` and PyInstaller, runs `npm ci`, freezes the sidecar, then
+runs `npx tauri build` (which also builds the frontend). NVIDIA runtime wheels can
+make the download and frozen engine large; allow several GB of free build space.
+It fails on missing prerequisites or build/copy verification errors. It does not
+install system packages, fetch models, launch the app, or elevate privileges.
 
-## Build and checks
+Installed layout (default XDG directories):
+
+| Path | Purpose |
+| --- | --- |
+| `~/.local/bin/murmur` | Launcher; add `~/.local/bin` to PATH if needed |
+| `~/.local/share/murmur/bin/murmur` | App binary |
+| `~/.local/share/murmur/bin/murmur-engine` | Required adjacent frozen sidecar |
+| `~/.local/share/murmur/icons/<size>/murmur.png` | Private icon copies |
+| `~/.local/share/icons/hicolor/*/apps/murmur.png` | Desktop-theme icons |
+| `~/.local/share/applications/murmur.desktop` | Application-menu entry |
+| `~/.config/autostart/murmur.desktop` | Login startup entry |
+
+Application-menu and autostart entries follow `XDG_DATA_HOME` and `XDG_CONFIG_HOME`
+when set; executable/icon files always use `~/.local`. Re-running updates files
+without duplicating entries or replacing existing preferences/models. Atomic file
+replacement supports updating installed binaries, but quit the old process before
+launching the new version. Symlinked installation paths are rejected for safety.
+Fresh installs create a minimal config with autostart enabled. Existing config is
+preserved: its `general.autostart` preference takes precedence on app startup.
+Use Settings → General to change it. Closing Settings leaves Murmur in the tray;
+use tray → Quit to stop it. Install and select a model in Settings → Engine.
+
+### Uninstall
+
+Quit Murmur first (otherwise it can recreate data), then from the checkout:
 
 ```sh
-npm run build               # TypeScript + token lint + Vite
-npm run test:tokens         # positive and negative token-linter fixtures
-npm run test:ui             # DOM contract tests with mocked IPC; no GUI or network
-(cd src-tauri && cargo build)
-(cd src-tauri && cargo test)
-(cd engine && .venv/bin/python -m pytest -q)
-scripts/engine-sidecar.sh --build  # PyInstaller onefile engine, no model downloads
-scripts/build-linux.sh      # frozen sidecar, app binary, .deb; optional AppImage
+./uninstall.sh                    # binaries, icons, menu and startup entries only
+./install.sh --uninstall          # same operation
+./uninstall.sh --purge            # ALSO deletes config, models, history and logs
 ```
 
-Linux packaging uses the project-pinned `npx tauri` CLI rather than assuming a globally
-installed `cargo tauri`. `src-tauri/tauri.conf.json` declares the external sidecar and
-Linux bundle targets. `tauri.windows.conf.json` automatically overrides targets to NSIS;
-Windows builds need a frozen `src-tauri/binaries/murmur-engine-x86_64-pc-windows-msvc.exe`
-made from `engine/murmur_engine/__main__.py` with the engine package on PyInstaller's path.
-Windows packaging and runtime remain unverified until run on Windows.
+Uninstallation is idempotent. Purge covers the default and current XDG Murmur
+config/data directories; former custom XDG locations cannot be discovered.
+Neither form removes the source checkout, build caches, or `engine/.venv`.
+Unrelated applications' files are not removed. No privileged install is supported.
 
-Plain debug cargo builds generate a gitignored development externalBin launcher so
-Tauri's resource validation succeeds without freezing Python. Release packaging must
-use the actual frozen engine. Generated icons are committed; regenerate with
-`npx tauri icon assets/murmur.png`. Audio cues are synthesized at runtime: rising/falling
-660/880 Hz tones with 8 ms envelopes, and a two-buzz 180 Hz error cue.
+### Manual run / development
 
-## Configuration and operation
+```sh
+mkdir -p .cache/tmp .cache/pip
+export TMPDIR="$PWD/.cache/tmp" PIP_CACHE_DIR="$PWD/.cache/pip"
+python3 -m venv --system-site-packages engine/.venv
+engine/.venv/bin/python -m pip install -r engine/requirements.txt pyinstaller
+npm ci
+npm run tauri dev                # desktop app; source Python engine from the venv
+# npm run dev                   # browser UI only: no Rust IPC
+```
 
-Linux paths: `$XDG_CONFIG_HOME/murmur/config.toml` (default `~/.config/murmur`) and
-`$XDG_DATA_HOME/murmur` (default `~/.local/share/murmur`). Windows paths:
-`%APPDATA%\Murmur\config.toml` and `%LOCALAPPDATA%\Murmur`.
-The data directory contains models, optional history, and `murmur.log` plus two rotations
-(maximum 2 MiB each). The backend owns atomic TOML writes and preserves unknown keys.
-External edits are watched; invalid edits report an error and retain the last valid config.
+For a release build without installing into your home directory:
 
-Default hotkey: Ctrl+Alt+D, hold to record and release to transcribe. Toggle mode starts
-and stops on successive presses and stops after sustained silence following speech.
-Escape cancels only while recording, with no cancellation sound. Very short taps are
-ignored. Rebinding reports invalid/conflicting accelerators; the 100 ms target needs
-measurement on each desktop. Capture includes 250 ms pre-roll, a 91 s in-memory ring,
-16 kHz mono resampling and a configurable maximum utterance. The sidecar accepts 91 seconds
-of PCM to include the 90-second utterance plus pre-roll/callback headroom. No audio files are saved.
+```sh
+scripts/build-linux.sh          # frozen sidecar + app + deb; AppImage best-effort
+# Keep the engine beside the raw release binary for manual execution:
+cp engine/dist/murmur-engine src-tauri/target/release/murmur-engine
+src-tauri/target/release/murmur
+```
 
-With **Prefer paste** enabled (the default), code style or more than 200 characters uses
-clipboard paste, even if the method is set to Type. Disable Prefer paste to use the legacy
-method selection (Auto types ASCII up to 1500 bytes; other text uses paste). Linux terminal
-windows use Ctrl+Shift+V; other windows use Ctrl+V. Terminal output always flattens newlines,
-even when newlines are enabled. Previous clipboard text is restored after 300 ms unless the user changed it.
-Non-text clipboard data cannot be restored by this text-only snapshot; when no previous
-text exists, the transcript remains on the clipboard. Clipboard-only/excluded apps never
-receive keystrokes, and Murmur's own windows are skipped. Clipboard ownership stays alive
-on X11 for later pasting. The exclusion picker hides Settings for three seconds so the
-user can focus the desired application.
+The default build directory is `src-tauri/target`; manual build-linux.sh honors
+Cargo target overrides. The installer and CI deliberately pin that directory.
+An extracted portable Linux archive includes the executable pair. A raw CI
+artifact download can lose executable bits: run `chmod +x murmur murmur-engine`
+or use the `.tar.gz`, which preserves permissions. Linux bundles need compatible
+system webview/audio libraries; portable does not mean a fully static application.
 
-## Vibecoding workflow
+## Windows build
 
-1. In Engine, install **large-v3-turbo** for technical prompts, then choose **Use model**.
-   The catalog contains a CTranslate2 conversion; model weights are fetched only on Install.
-2. In General, choose **Press to start / stop** (toggle mode). Long prompts can run for
-   90 seconds; silence auto-stop still applies. Adjust the silence timeout in Audio if needed.
-3. Keep Behavior → **Dictation style: Auto**. VS Code, Cursor, JetBrains, Zed, Sublime and
-   the listed terminals use code style. Edit Code apps to match your window classes.
-4. Keep the overlay's **Live preview** enabled to catch misheard identifiers before they land.
-   Press **Escape** while listening to cancel. The preview is recognition text, not a code validator.
-5. Optionally bind a **Code shortcut** to force code style for one dictation, regardless of
-   the focused app. It uses the same hold/toggle semantics as the main shortcut.
+**Unverified on real Windows hardware.** Use x64 Windows 10/11 with Python 3.12
+(recommended), Node 22, Rust stable with the MSVC toolchain, Visual Studio C++ Build
+Tools/Windows SDK, and WebView2. Those prerequisites must already be available;
+the script itself requires no administrator rights. Use a developer PowerShell
+if the linker/SDK is not discoverable from a normal shell.
 
-Say “foo underscore bar”, “double equals”, “fat arrow”, or “quote hello unquote”. Spoken
-punctuation is case-insensitive, whole-word and longest-match first. “Dot” joins identifiers
-(`foo dot rs` → `foo.rs`); “period” / “full stop” ends a sentence. Code style never capitalises
-or rewrites existing code-like/mixed-case tokens. Fillers are kept unless removal is enabled.
-“Newline” / “next line” becomes a space by default. Even with Allow newlines enabled,
-terminal windows always receive one paragraph to avoid executing a line accidentally.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
+```
 
-The editable dictionary starts with coding vocabulary (Tauri, CTranslate2, TypeScript,
-JSON-RPC, and others). Existing explicit dictionary lists, including an empty list, are
-preserved when upgrading; defaults only fill missing fields.
+This process-scoped execution-policy override does not change the machine policy.
+The script creates `engine\.venv`, installs requirements + PyInstaller, freezes
+`murmur-engine.exe` with the CUDA runtime hook and any installed NVIDIA modules,
+and copies the target-suffixed sidecar into `src-tauri\binaries`. It runs `npm ci`,
+`npm run build`, installs the Cargo Tauri CLI matching the locked npm CLI version,
+and runs `cargo tauri build --target x86_64-pc-windows-msvc`. The existing
+`tauri.windows.conf.json` selects NSIS automatically.
 
-## Settings guide
+Printed outputs are under `src-tauri\target\x86_64-pc-windows-msvc\release`:
 
-- **General:** both hotkeys, hold/toggle, language/translation, overlay, sounds, theme and autostart.
-- **Engine:** offline model catalog, explicit install/remove/select, file-level progress,
-  compute device/precision, beam/VAD, a measured silent 3-second test, and dictionary editor.
-- **Audio:** input selection/refresh, idle live meter, gain, silence and utterance durations.
-- **Behavior:** coding style/app matching, spoken punctuation/newlines, injection preferences,
-  exclusions/picker, filler words, editable replacement rules, and the last session transcript.
-- **Privacy:** local-only explanation, opt-in retention, debounced history search/delete-all,
-  conventional OS paths and Open folder buttons (which resolve actual XDG/Windows paths).
+- `murmur.exe` and `murmur-engine.exe`: portable pair; keep them in the same folder.
+- `bundle\nsis\*-setup.exe`: unsigned NSIS installer (per-user default).
 
-The DOM tests exercise page rendering, saved controls, conflicts, empty/offline states,
-model/history actions, event cleanup and overlay timing with explicit mock IPC. They do not
-render pixels or replace desktop integration/visual parity checks.
+Python is not required on the destination PC. Models are not bundled. WebView2
+and compatible NVIDIA drivers (for CUDA) remain runtime prerequisites. Unsigned
+builds may trigger SmartScreen; inspect the build source rather than disabling
+system protections. Run Murmur and its target apps at the same privilege level;
+Windows can block injection into elevated windows.
 
-Settings use only the typed bridge. All settings saves go through the Rust config transaction;
-rejected hotkeys or invalid values show errors and retain the last saved value. Removing a
-replacement requires saving the whole replacement table. History deletion and model removal
-ask for confirmation. Themes are shared with the overlay; reduced motion is respected.
+## Hotkeys
+
+| Shortcut / mode | Action |
+| --- | --- |
+| `Ctrl+Alt+D`, Hold (default) | Hold to record; release to transcribe and insert |
+| Main shortcut, Toggle | Press to start; press again to stop; silence also auto-stops |
+| Code shortcut (`general.hotkey_code`, unset by default) | Same hold/toggle behavior, forcing code style for this dictation |
+| `Esc` while listening | Cancel without insertion or a cancellation cue |
+
+Very short recordings are ignored. Rebind shortcuts in General; the main and
+code shortcuts must differ. Escape is reserved for cancellation, not dictation.
+
+## Coding mode / vibecoding workflow
+
+1. In Engine, explicitly install **large-v3-turbo**, then choose **Use model** for
+   technical prompts. Use `distil-small.en` for a smaller English-only option.
+2. In General, choose toggle mode; Audio defaults allow up to 90 seconds. Increase
+   the silence timeout if you pause often while composing prompts.
+3. Keep Behavior → Dictation style **Auto** and **Prefer paste** enabled. Code-app
+   matching selects code style for editors/terminals; edit the list for your apps.
+4. Keep Live preview enabled to catch misheard identifiers; press Esc to cancel
+   before the result is inserted. Preview is not a code validator.
+5. Add project-specific tokens to Engine → Dictionary or deterministic corrections
+   to Replacements. Optionally bind the Code shortcut for other focused apps.
+
+Say “foo underscore bar”, “double equals”, “fat arrow”, or “quote hello unquote”.
+Code style avoids sentence capitalisation and preserves code-like/mixed-case
+identifiers. Filler removal is opt-in. “Newline” becomes a space unless explicitly
+enabled; detected terminals always flatten newlines to avoid executing a line.
+Check the destination before dictating commands; app detection is not a security boundary.
+
+Prefer paste uses the clipboard for code style or text longer than 200 characters,
+even when Method is Type. Disable it to use the legacy method selection (Auto
+uses typing for ASCII up to 1500 bytes, otherwise paste). Linux terminals use
+Ctrl+Shift+V; other targets use Ctrl+V. Previous clipboard text is restored after
+300 ms unless it changed. Non-text clipboard data cannot be restored; when there
+was no text snapshot, the transcript remains available. Clipboard-only/excluded
+apps receive no keystrokes, and Murmur's own windows are skipped.
+
+## Configuration reference
+
+Linux: `${XDG_CONFIG_HOME:-~/.config}/murmur/config.toml`, data/models/history/logs
+under `${XDG_DATA_HOME:-~/.local/share}/murmur`. Windows:
+`%APPDATA%\Murmur\config.toml` and `%LOCALAPPDATA%\Murmur` for data.
+Use Settings or edit TOML; writes are atomic, unknown keys are preserved, and
+invalid edits report errors while retaining the last valid configuration.
+All supported keys are listed below. Defaults are application defaults; a fresh
+Linux user install explicitly enables autostart without changing the app default.
+
+| TOML key | Default | Meaning / accepted values |
+| --- | --- | --- |
+| `general.hotkey` | `"Ctrl+Alt+D"` | Global dictation accelerator; not modifier-only |
+| `general.hotkey_mode` | `"hold"` | `hold` or `toggle` |
+| `general.hotkey_code` | `""` | Optional distinct accelerator forcing code style |
+| `general.language` | `"en"` | Language code; empty string enables autodetection |
+| `general.translate` | `false` | Translate speech to English; use a multilingual model |
+| `general.autostart` | `false` | Start on login; true in a fresh Linux installer-created config |
+| `general.theme` | `"auto"` | `auto`, `light`, `dark`; shared by settings and overlay |
+| `overlay.enabled` | `true` | Show overlay |
+| `overlay.position` | `"bottom-center"` | `bottom-center` or `top-center` |
+| `overlay.scale` | `1.0` | Scale, 0.8–1.6 |
+| `overlay.show_preview` | `true` | Live recognition preview |
+| `overlay.idle_hide` | `true` | Hide after returning to idle |
+| `sounds.enabled` | `true` | Enable synthesized start/stop/error cues |
+| `sounds.volume` | `0.6` | Cue volume, 0–1 |
+| `sounds.muted` | `false` | Mute without changing volume |
+| `engine.model` | `"distil-small.en"` | Catalog model name; empty means none; selection is not installation |
+| `engine.device` | `"auto"` | `auto`, `cuda`, `cpu`; auto allows sticky CPU fallback |
+| `engine.compute_type` | `"auto"` | `auto`, `int8`, `int8_float16`, `float16`, `float32`, `int8_float32`; auto resolves per device |
+| `engine.beam_size` | `1` | Decoder beam size, 1–10 |
+| `engine.vad_filter` | `true` | Filter nonspeech during inference |
+| `engine.dictionary` | Seeded coding vocabulary below | String array used as decoder prompt bias, not guaranteed corrections |
+| `audio.device` | `"default"` | System default or enumerated input-device name |
+| `audio.gain` | `1.0` | Input multiplier, 0–10 |
+| `audio.silence_threshold` | `0.012` | RMS silence threshold, 0–1 |
+| `audio.silence_timeout_ms` | `1200` | Toggle-mode silence endpoint, 100–60000 ms |
+| `audio.max_utterance_s` | `90` | Maximum recording length, 1–90 seconds |
+| `audio.min_utterance_ms` | `250` | Ignore shorter recordings; positive and no greater than maximum duration |
+| `injection.method` | `"auto"` | `auto`, `type`, `clipboard`; prefer_paste can override |
+| `injection.clipboard_only` | `false` | Copy transcript without sending paste/type keystrokes |
+| `injection.trailing_space` | `true` | Append one space |
+| `injection.capitalize` | `true` | Capitalise prose sentence starts, not code |
+| `injection.remove_fillers` | `false` | Remove words listed in postproc.fillers |
+| `injection.exclude_apps` | `[]` | Focused-app matches receive clipboard-only output |
+| `injection.prefer_paste` | `true` | Prefer atomic paste for code style or long text |
+| `postproc.replacements` | `{ "mur mur" = "Murmur" }` | Case-insensitive whole-word corrections, longest phrase first |
+| `postproc.fillers` | `["um", "uh", "er", "hmm"]` | Filler list; no empty entries |
+| `postproc.style` | `"auto"` | `prose`, `code`, `auto` (resolve by focused app) |
+| `postproc.code_apps` | Editor/terminal list below | App-name/class matches that select code style |
+| `postproc.spoken_punctuation` | `true` | Convert punctuation phrases to symbols |
+| `postproc.allow_newlines` | `false` | Allow spoken newline outside detected terminals |
+| `privacy.history_enabled` | `false` | Opt-in local SQLite transcript history |
+| `privacy.history_retention_days` | `7` | Retention, 1–3650 days |
+
+Default dictionary: `Tauri`, `faster-whisper`, `CTranslate2`, `WebKitGTK`, `WebView2`,
+`serde`, `tokio`, `enigo`, `cpal`, `rodio`, `Murmur`, `zethrus`, `Python`, `TypeScript`,
+`npm`, `cargo`, `git`, `stdin`, `stdout`, `JSON-RPC`, `hotkey`, `overlay`, `systemd`,
+`Wayland`, `X11`, `pip`, `venv`, `regex`, `null`, `boolean`.
+
+Default code apps: `code`, `cursor`, `vscode`, `code-oss`, `jetbrains`, `zed`,
+`sublime`, `gnome-terminal`, `konsole`, `alacritty`, `kitty`, `wezterm`,
+`windowsterminal`, `mintty`. Linux matches X11 window classes; Windows uses
+foreground executable names. Explicit lists, including empty ones, are preserved.
 
 ## Privacy
 
-Speech-to-text runs locally. No accounts, telemetry, cloud transcription or audio storage.
-The engine runs with HF_HUB_OFFLINE=1 except within an explicitly requested model install.
-Hugging Face telemetry is disabled. A model install contacts Hugging Face to download the
-selected weights and emits file-level progress; no audio/transcripts are sent there.
-History is off by default. Opt-in SQLite history is pruned on startup and daily; disabling
-history stops new entries but does not erase existing entries. `history_clear` deletes and
-vacuums the database; filesystem snapshots/backups are outside the application's control.
-Transcripts are never written to diagnostic logs. Clipboard managers and the destination
-application may retain pasted text independently of Murmur.
+Speech recognition runs locally: no account, telemetry, cloud transcription or
+saved microphone audio. The engine disables Hugging Face telemetry and is offline
+except for an explicit model installation, which downloads weights from Hugging
+Face without uploading speech/transcripts. Dependency installation/builds also
+require network access; “local” describes dictation, not software distribution.
+
+History is off by default. Enabling it stores local transcripts in `history.sqlite`;
+retention pruning occurs at startup and daily. Disabling it stops new entries but
+does not delete old ones; use Privacy → Clear history or uninstall with `--purge`.
+Diagnostic logs rotate at 2 MiB with two backups and are not intended to contain
+transcripts. Treat debug logs as sensitive when sharing. Clipboard managers,
+destination applications and filesystem backups may independently retain text.
+
+## Performance
+
+Measured on Linux with an **11.0 s clip**, model **distil-small.en**:
+
+| Platform / device | Compute type | Inference | Key-to-text | VRAM |
+| --- | --- | --- | --- | --- |
+| Linux / GPU RTX 4060 | int8_float16 | 117 ms | 134 ms | 359 MiB |
+| Linux / CPU | int8 | 1505 ms | 2926 ms | — |
+| Windows / GPU RTX 4060 | int8_float16 | Pending measurement | Pending measurement | Pending measurement |
+| Windows / CPU | int8 | Pending measurement | Pending measurement | — |
+
+These are measured results for that clip, not general latency guarantees or
+Windows measurements. Key-to-text is post-recording turnaround, not the time
+spent speaking. Model loading, model size, hardware and injection method affect
+latency; the first inference can be slower while the engine loads the model.
 
 ## Troubleshooting / QA
 
-- No model: explicitly install a catalog model; incomplete downloads are never treated as
-  installed. No model/network operation is performed by the test suite.
-- Hotkey conflict: choose another non-modifier accelerator. Escape is reserved for cancel.
-- Microphone failure: select an available input; unplug failures rebuild on the next press.
-- Engine crash: one automatic restart is permitted; a second failure requires restarting
-  Murmur. Check the venv/dependencies or packaged engine and the local diagnostic log.
-- Clipboard/paste failure: try explicit typing or clipboard-only mode. X11 injection needs
-  DISPLAY and xprop; native Wayland is unverified.
-- Python logs go to stderr; stdout is exclusively newline-delimited JSON RPC.
+- **No model:** open Settings → Engine, Install a catalog model, then Use model.
+  A model name in config is not a download; incomplete downloads are not installed.
+- **Hotkey conflict:** choose another non-modifier combination in General; avoid
+  OS/window-manager bindings. Escape is reserved. Check both hotkeys are distinct.
+- **No microphone:** select/refresh an available input in Audio; check OS microphone
+  permissions, PipeWire/ALSA or Windows input settings, mute and gain. Unplugged
+  device errors rebuild the capture stream on the next recording attempt.
+- **Sidecar crash:** keep `murmur-engine[.exe]` next to the release app. A bare app
+  copied alone is insufficient. The supervisor restarts once, then requires an app
+  restart after another failure. Check `<data>/murmur.log`; for source runs verify
+  the venv imports. For extra diagnostics, quit and launch with `MURMUR_LOG=debug`.
+  Frozen onefile builds need writable temporary storage and permission to execute
+  extracted libraries; restrictive/noexec temp mounts can prevent startup.
+- **CUDA fallback:** use Device Auto / Compute Auto for CUDA `int8_float16` or CPU
+  `int8`. Auto sticks to CPU for that engine process if CUDA loading/inference
+  fails; restart after fixing compatible drivers/runtime libraries. Forced CUDA
+  reports errors rather than silently falling back. NVIDIA runtime wheels are
+  included when available, but do not replace the host driver. Check the resolved
+  device in Settings after inference; Windows CUDA remains unverified.
+- **Injection fails:** check X11 `DISPLAY` and `xprop`, destination focus and Windows
+  privilege levels. Try Clipboard only or disable Prefer paste for explicit Type.
+- **Build fails:** check native dependencies and free disk space. Re-run only after
+  resolving the reported stage; local install requires both Linux bundles to succeed.
 
-Synthetic audio recipe (optional, not executed by the build):
+Optional synthetic audio test (not a benchmark of speech accuracy):
 
 ```sh
 mkdir -p .cache/qa
 espeak-ng -w .cache/qa/speech.wav 'Murmur local speech test'
-aplay .cache/qa/speech.wav    # or paplay
+aplay .cache/qa/speech.wav       # or paplay
 MURMUR_QA_WAV="$PWD/.cache/qa/speech.wav" npm run tauri dev
 ```
 
-QA WAV input accepts PCM or float WAV, downmixes/resamples, feeds at real-time cadence,
-and rewinds at each dictation. It bypasses microphone hardware and stops at EOF.
-The test-engine IPC performs a repeatable three-second silent inference probe (VAD may
-return empty text). Real transcription/injection performance has not been measured in this phase.
+QA WAV accepts PCM/float WAV, downmixes/resamples, bypasses the microphone, rewinds
+at each dictation and stops at EOF. Test Engine uses a silent three-second probe;
+VAD may return empty text. Do not confuse that probe with the measured clip above.
 
-Manual parity (not executed in either implementation phase): open Settings and the idle/listening overlay on
-Linux and Windows with the same theme and scaling. Compare spacing, type sizes and colour
-roles; only font-family resolution should differ. Save screenshots in `docs/parity/`.
-Do not infer live hotkey, tray, audio, CUDA, injection, packaging or Windows success from
-unit tests. No GUI was launched and no Whisper model was downloaded during implementation.
+## CI, releases and design parity
 
-## Implementation notes
-
-Extra crates are narrowly scoped: rusqlite/bundled is mandated for history; base64 encodes
-PCM for JSON RPC; regex implements Unicode whole-word replacements; hound reads QA WAV;
-windows-sys provides atomic replacement and foreground-process lookup. Single-instance is
-a Rust lifecycle plugin and exposes no IPC permission identifier; capabilities list only
-real window/event, global-shortcut and autostart permissions, with no shell/filesystem grant.
-Lockfiles are committed in compact, valid machine-readable form to stay below the requested
-400-line file limit. Cargo may canonicalize its generated lockfile on a subsequent build;
-compaction preserves the exact parsed dependency graph. Source modules stay below the limit.
+`linux-build.yml` uses Ubuntu 22.04, Node 22, Rust stable and a frozen engine;
+it uploads deb, AppImage, unsigned app/sidecar and a portable tarball.
+`windows-build.yml` uses Windows latest, Python 3.12, Node 22 and Rust stable;
+it uploads unsigned EXEs, NSIS installer and a portable zip. Cargo and npm are
+cached. `release.yml` builds both via reusable workflows on tags `v*`, then
+publishes with `softprops/action-gh-release` only after both builds succeed.
+No signing/notarization is configured. CI workflows have not been run as part of
+this documentation/installers change; published artifacts must be tested before
+claiming desktop compatibility. See [docs/parity](docs/parity/README.md) for the
+manual Linux/Windows acceptance matrix and screenshot protocol.

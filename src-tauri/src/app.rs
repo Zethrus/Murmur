@@ -76,6 +76,16 @@ impl AppState {
         } else {
             None
         };
+        tracing::info!(
+            version = env!("CARGO_PKG_VERSION"),
+            config = %paths.config.display(),
+            models = %paths.models.display(),
+            model = %config.engine.model,
+            device = %config.engine.device,
+            hotkey = %config.general.hotkey,
+            mode = %config.general.hotkey_mode,
+            "murmur starting"
+        );
         let engine = Arc::new(Engine::new(paths.models.clone(), app.clone())?);
         let (sender, receiver) = mpsc::channel();
         let status = Status {

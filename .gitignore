@@ -10,7 +10,10 @@ dist/
 build/
 engine/*.spec
 src-tauri/binaries/*
-docs/parity/
+# Keep parity documentation/small PNGs; exclude bulky local recordings.
+docs/parity/captures/
+docs/parity/*.mp4
+docs/parity/*.webm
 models/
 *.wav
 *.ogg

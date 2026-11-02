@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    uses: ./.github/workflows/linux-build.yml
+  windows:
+    uses: ./.github/workflows/windows-build.yml
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: murmur-linux-x86_64
+          path: release-assets/linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: murmur-windows-x86_64
+          path: release-assets/windows
+      - name: Verify release asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s release-assets/linux/murmur
+          test -s release-assets/linux/murmur-engine
+          test -s release-assets/linux/murmur-linux-x86_64.tar.gz
+          test -s release-assets/windows/murmur.exe
+          test -s release-assets/windows/murmur-engine.exe
+          test -s release-assets/windows/murmur-windows-x86_64.zip
+          for pattern in 'linux/*.deb' 'linux/*.AppImage' 'windows/*-setup.exe'; do
+            compgen -G "release-assets/$pattern" >/dev/null || exit 1
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            Unsigned builds. Windows runtime and GPU behavior remain unverified on real Windows hardware.
+            Portable archives include the required adjacent engine sidecar; keep the pair together.
+            Models are not bundled: install a model explicitly in Settings → Engine.
+          files: |
+            release-assets/linux/*
+            release-assets/windows/*
