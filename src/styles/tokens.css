@@ -1,0 +1,143 @@
+/* The only source of literal visual values. Components consume semantic/component aliases. */
+:root {
+  --grey-50: #f8fafc; --grey-100: #f1f3f7; --grey-200: #e2e6ed;
+  --grey-300: #cbd2de; --grey-400: #9aa5b7; --grey-500: #737f93;
+  --grey-600: #526079; --grey-700: #394459; --grey-800: #252c3b;
+  --grey-900: #171b24; --grey-950: #10131a;
+  --blue-400: #7aa2f7; --blue-500: #3b6fd4; --blue-600: #2858b5;
+  --amber-500: #cf8c21; --green-500: #2d9f6f; --red-500: #cb454e;
+  --white: #ffffff; --transparent: transparent;
+  --r-sm: 4px; --r-md: 8px; --r-lg: 12px; --r-pill: 999px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 28px;
+  --sp-8: 32px;
+  --sp-9: 36px;
+  --sp-10: 40px;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-15: 15px;
+  --fs-16: 16px;
+  --fs-17: 17px;
+  --fs-18: 18px;
+  --fs-19: 19px;
+  --fs-20: 20px;
+  --fs-21: 21px;
+  --fs-22: 22px;
+  --weight-regular: 400; --weight-medium: 500; --weight-semibold: 600;
+  --lh-tight: 1.2; --lh-body: 1.5; --tracking-hint: 0.06em;
+  --dur-fast: 100ms; --dur-base: 150ms; --dur-slow: 300ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --z-base: 0; --z-overlay: 10; --z-popover: 20;
+  --border-thin: 1px; --border-focus: 2px;
+  --font-ui: "Inter", "Ubuntu", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "Ubuntu Mono", monospace;
+  --scrollbar-w: 10px; --hairline: 1px;
+  --shadow-light-1: 0 2px 8px #10131a0d; --shadow-light-2: 0 8px 24px #10131a26;
+  --shadow-dark-1: 0 2px 8px #00000030; --shadow-dark-2: 0 8px 24px #00000066;
+  --overlay-light: #fffffff2; --overlay-dark: #171b24f2;
+  --row-height: 60px; --sidebar-w: 240px; --card-radius: var(--r-lg);
+  --switch-track: 32px; --switch-h: 20px; --switch-radius: var(--r-pill);
+  --slider-thumb: 14px; --slider-track-h: 4px;
+  --pill-h: 48px; --pill-max-w: 560px; --pill-min-w: 88px; --pill-radius: var(--r-pill);
+  --pill-inset: var(--sp-3) var(--sp-5); --pill-gap: var(--sp-3);
+  --pill-shadow: var(--shadow-2); --pill-weight: var(--weight-medium);
+  --pill-label-size: var(--fs-13); --pill-preview-size: var(--fs-13);
+  --pill-preview-lines: 2; --pill-preview-w: 440px; --pill-preview-gap: var(--sp-1);
+  --overlay-scale: 1; --overlay-inset: var(--sp-2); --overlay-layer: var(--z-overlay);
+  --bar-w: 4px; --bar-h: 24px; --bar-gap: var(--sp-1); --bar-radius: var(--r-sm);
+  --bar-level: 0.12; --bar-transition: transform var(--dur-fast) var(--ease-out);
+  --dot-size: 8px; --dot-radius: var(--r-pill); --dot-opacity: 0.45;
+  --dots-w: 32px; --dots-gap: var(--sp-1); --overlay-canvas-bg: var(--transparent);
+  --pulse-duration: 900ms; --pulse-low: 0.35; --pulse-high: 1;
+  --body-size: var(--fs-13); --body-height: var(--lh-body); --body-weight: var(--weight-regular);
+  --title-size: var(--fs-22); --title-weight: var(--weight-semibold);
+  --section-size: var(--fs-15); --hint-size: var(--fs-11); --hint-tracking: var(--tracking-hint);
+  --page-inset: var(--sp-6); --content-max-w: 720px; --content-gap: var(--sp-6);
+  --card-inset: var(--sp-6); --card-border: var(--hairline) solid var(--border);
+  --card-shadow: var(--shadow-1); --text-gap: var(--sp-3);
+  --control-inset: var(--sp-2) var(--sp-3); --control-radius: var(--r-md);
+  --control-gap: var(--sp-3); --control-motion: var(--dur-base) var(--ease-out);
+  --banner-inset: var(--sp-3); --banner-radius: var(--r-md);
+  --focus-ring: var(--border-focus) solid var(--accent); --focus-offset: var(--border-focus);
+  --meter-bars: 24; --meter-bar-radius: var(--r-sm); --meter-gap: var(--sp-1);
+}
+:root {
+  color-scheme: light;
+  --bg: var(--grey-100);
+  --surface: var(--white);
+  --surface-raised: var(--grey-50);
+  --border: var(--grey-200);
+  --text: var(--grey-900);
+  --text-muted: var(--grey-600);
+  --accent: var(--blue-500);
+  --accent-contrast: var(--white);
+  --danger: var(--red-500);
+  --ok: var(--green-500);
+  --warn: var(--amber-500);
+  --shadow-1: var(--shadow-light-1);
+  --shadow-2: var(--shadow-light-2);
+  --overlay-bg: var(--overlay-light);
+  --meter-track: var(--grey-200);
+  --meter-fill: var(--blue-500);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: var(--grey-950);
+  --surface: var(--grey-900);
+  --surface-raised: var(--grey-800);
+  --border: var(--grey-700);
+  --text: var(--grey-100);
+  --text-muted: var(--grey-400);
+  --accent: var(--blue-400);
+  --accent-contrast: var(--grey-950);
+  --danger: var(--red-500);
+  --ok: var(--green-500);
+  --warn: var(--amber-500);
+  --shadow-1: var(--shadow-dark-1);
+  --shadow-2: var(--shadow-dark-2);
+  --overlay-bg: var(--overlay-dark);
+  --meter-track: var(--grey-700);
+  --meter-fill: var(--blue-400);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+  color-scheme: dark;
+  --bg: var(--grey-950);
+  --surface: var(--grey-900);
+  --surface-raised: var(--grey-800);
+  --border: var(--grey-700);
+  --text: var(--grey-100);
+  --text-muted: var(--grey-400);
+  --accent: var(--blue-400);
+  --accent-contrast: var(--grey-950);
+  --danger: var(--red-500);
+  --ok: var(--green-500);
+  --warn: var(--amber-500);
+  --shadow-1: var(--shadow-dark-1);
+  --shadow-2: var(--shadow-dark-2);
+  --overlay-bg: var(--overlay-dark);
+  --meter-track: var(--grey-700);
+  --meter-fill: var(--blue-400);
+}
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: var(--transparent); }
+html { font-family: var(--font-ui); font-size: var(--body-size); line-height: var(--body-height); font-synthesis: none; }
+body { margin: 0; }
+button, input, select, textarea { font: inherit; color: inherit; }
+::selection { background: var(--accent); color: var(--accent-contrast); }
+:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
+* { scrollbar-width: thin; scrollbar-color: var(--border) var(--surface); }
+::-webkit-scrollbar { width: var(--scrollbar-w); height: var(--scrollbar-w); }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--r-pill); }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; --pulse-duration: 0ms; }
+}

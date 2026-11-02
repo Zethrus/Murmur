@@ -1,0 +1,50 @@
+use crate::config::Overlay;
+use anyhow::{Context, Result};
+use serde_json::json;
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition};
+
+pub fn apply(app: &AppHandle, prefs: &Overlay) -> Result<()> {
+    let window = app.get_webview_window("overlay").context("Overlay window missing")?;
+    window.set_ignore_cursor_events(true).context("Make overlay click-through")?;
+    window.set_size(LogicalSize::new(560.0 * prefs.scale, 130.0 * prefs.scale)).context("Scale overlay window")?;
+    if let Some(monitor) = window.primary_monitor().context("Get primary monitor")? {
+        let area = monitor.work_area();
+        let dpi = monitor.scale_factor();
+        let width = 560.0 * prefs.scale * dpi;
+        let height = 130.0 * prefs.scale * dpi;
+        let x = f64::from(area.position.x) + (f64::from(area.size.width) - width) / 2.0;
+        let y = f64::from(area.position.y)
+            + if prefs.position == "top-center" {
+                48.0 * dpi
+            } else {
+                f64::from(area.size.height) - height - 48.0 * dpi
+            };
+        window.set_position(PhysicalPosition::new(x as i32, y as i32)).context("Position overlay")?;
+    }
+    if !prefs.enabled {
+        window.hide().context("Hide disabled overlay")?;
+    } else if !prefs.idle_hide {
+        window.show().context("Show idle overlay")?;
+    }
+    Ok(())
+}
+pub fn state(app: &AppHandle, state: &str, prefs: &Overlay) -> Result<()> {
+    app.emit("state", json!({"state":state})).context("Emit state")?;
+    if prefs.enabled {
+        if let Some(window) = app.get_webview_window("overlay") {
+            if let Err(error) = window.set_ignore_cursor_events(true) {
+                tracing::warn!(%error, "Overlay click-through unavailable; keeping it hidden");
+                window.hide().context("Hide unsupported overlay")?;
+            } else {
+                window.show().context("Show overlay")?;
+            }
+        }
+    }
+    Ok(())
+}
+pub fn hide(app: &AppHandle) -> Result<()> {
+    if let Some(window) = app.get_webview_window("overlay") {
+        window.hide().context("Hide overlay")?;
+    }
+    Ok(())
+}

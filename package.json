@@ -1,0 +1,20 @@
+{
+  "name": "murmur",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && node scripts/check-tokens.mjs && vite build",
+    "tauri": "tauri",
+    "test:tokens": "node scripts/check-tokens.mjs --self-test"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.0.0"
+  }
+}

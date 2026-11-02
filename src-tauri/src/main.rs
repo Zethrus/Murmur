@@ -1,0 +1,162 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod app;
+mod audio;
+mod config;
+mod controller;
+mod engine;
+mod history;
+mod hotkey;
+mod inject;
+mod ipc;
+mod overlay;
+mod platform;
+mod postproc;
+mod sound;
+
+use tauri::{
+    menu::{CheckMenuItem, Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager,
+};
+
+fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
+    let handle = app.handle().clone();
+    let runtime = app::AppState::new(handle.clone())?;
+    app.manage(runtime);
+    let state = app.state::<app::AppState>();
+    // Recoverable desktop limitations/conflicts must not prevent opening Settings.
+    for result in [
+        hotkey::register(&handle, &state.config()?.general.hotkey),
+        overlay::apply(&handle, &state.config()?.overlay),
+        platform::set_autostart(&handle, state.config()?.general.autostart),
+    ] {
+        if let Err(error) = result {
+            state.error(&format!("{error:#}"));
+        }
+    }
+    let label = MenuItem::with_id(app, "state", "idle", false, None::<&str>)?;
+    let dictate =
+        MenuItem::with_id(app, "dictate", "Dictate", state.config()?.general.hotkey_mode == "toggle", None::<&str>)?;
+    let mute = CheckMenuItem::with_id(app, "mute", "Sounds mute", true, state.config()?.sounds.muted, None::<&str>)?;
+    let enabled =
+        CheckMenuItem::with_id(app, "overlay", "Overlay enabled", true, state.config()?.overlay.enabled, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let reload = MenuItem::with_id(app, "reload", "Reload config", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&label, &dictate, &mute, &enabled, &settings, &reload, &quit])?;
+    let icon = app.default_window_icon().cloned().ok_or_else(|| anyhow::anyhow!("Missing application icon"))?;
+    TrayIconBuilder::with_id("murmur")
+        .icon(icon)
+        .tooltip("Murmur — no model")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| {
+            let state = app.state::<app::AppState>();
+            let result: anyhow::Result<()> = (|| {
+                match event.id.as_ref() {
+                    "dictate" => {
+                        if state.config()?.general.hotkey_mode == "toggle" {
+                            state.send(controller::Action::Toggle)?;
+                        }
+                    }
+                    "mute" => {
+                        state.send(controller::Action::ToggleMute)?;
+                    }
+                    "overlay" => {
+                        state.send(controller::Action::ToggleOverlay)?;
+                    }
+                    "settings" => platform::open_settings(app)?,
+                    "reload" => state.send(controller::Action::Reload)?,
+                    "quit" => app.exit(0),
+                    _ => {}
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                state.error(&error.to_string());
+            }
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
+            ) {
+                if let Err(error) = platform::open_settings(tray.app_handle()) {
+                    tracing::warn!(%error, "Open settings");
+                }
+            }
+        })
+        .build(app)?;
+    state.set_tray(app::TrayControls { label, dictate, mute, enabled })?;
+    state.start()?;
+    Ok(())
+}
+
+fn main() {
+    let application = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Err(error) = platform::open_settings(app) {
+                tracing::warn!(%error, "Second instance");
+            }
+        }))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
+        .setup(|app| setup(app).map_err(Into::into))
+        .on_window_event(|window, event| {
+            if window.label() == "settings" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    if let Err(error) = window.hide() {
+                        tracing::warn!(%error, "Hide settings");
+                    }
+                }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            ipc::get_config,
+            ipc::set_config,
+            ipc::get_status,
+            ipc::list_models,
+            ipc::install_model,
+            ipc::remove_model,
+            ipc::test_engine,
+            ipc::list_devices,
+            ipc::set_hotkey,
+            ipc::preview_sound,
+            ipc::start_dictation,
+            ipc::stop_dictation,
+            ipc::cancel_dictation,
+            ipc::open_settings,
+            ipc::quit_app,
+            ipc::history_search,
+            ipc::history_clear,
+            ipc::pick_exclude_app,
+            ipc::open_path,
+            ipc::apply_overlay_prefs
+        ])
+        .build(tauri::generate_context!());
+    match application {
+        Ok(app) => app.run(|handle, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if let Some(state) = handle.try_state::<app::AppState>() {
+                    if !state.closed() {
+                        api.prevent_exit();
+                        if let Err(error) = state.begin_shutdown() {
+                            state.error(&error.to_string());
+                        }
+                    }
+                }
+            }
+            tauri::RunEvent::Exit => {
+                if let Some(state) = handle.try_state::<app::AppState>() {
+                    state.join_shutdown();
+                }
+            }
+            _ => {}
+        }),
+        Err(error) => {
+            eprintln!("Murmur failed to start: {error:#}");
+            std::process::exit(1);
+        }
+    }
+}
