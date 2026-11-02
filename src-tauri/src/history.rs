@@ -32,8 +32,18 @@ impl History {
             .context("Initialize history schema")?;
         Ok(Self { connection })
     }
-    pub fn insert(&self, text: &str, app: &str, duration_ms: u64, latency_ms: u64, model: &str) -> Result<()> {
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).context("System clock precedes epoch")?.as_secs();
+    pub fn insert(
+        &self,
+        text: &str,
+        app: &str,
+        duration_ms: u64,
+        latency_ms: u64,
+        model: &str,
+    ) -> Result<()> {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("System clock precedes epoch")?
+            .as_secs();
         self.connection
             .execute(
                 "INSERT INTO entries(ts,text,app,duration_ms,latency_ms,model) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -63,17 +73,26 @@ impl History {
                 })
             })
             .context("Search history")?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().context("Read history entries")
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("Read history entries")
     }
     pub fn prune(&self, days: u32) -> Result<()> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).context("Read system time")?.as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("Read system time")?
+            .as_secs();
         self.connection
-            .execute("DELETE FROM entries WHERE ts < ?1", [now.saturating_sub(u64::from(days) * 86_400)])
+            .execute(
+                "DELETE FROM entries WHERE ts < ?1",
+                [now.saturating_sub(u64::from(days) * 86_400)],
+            )
             .context("Prune expired history")?;
         Ok(())
     }
     pub fn clear(&self) -> Result<()> {
-        self.connection.execute_batch("DELETE FROM entries; VACUUM;").context("Erase transcript history")?;
+        self.connection
+            .execute_batch("DELETE FROM entries; VACUUM;")
+            .context("Erase transcript history")?;
         Ok(())
     }
 }

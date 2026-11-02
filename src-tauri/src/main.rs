@@ -38,16 +38,40 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         }
     }
     let label = MenuItem::with_id(app, "state", "idle", false, None::<&str>)?;
-    let dictate =
-        MenuItem::with_id(app, "dictate", "Dictate", state.config()?.general.hotkey_mode == "toggle", None::<&str>)?;
-    let mute = CheckMenuItem::with_id(app, "mute", "Sounds mute", true, state.config()?.sounds.muted, None::<&str>)?;
-    let enabled =
-        CheckMenuItem::with_id(app, "overlay", "Overlay enabled", true, state.config()?.overlay.enabled, None::<&str>)?;
+    let dictate = MenuItem::with_id(
+        app,
+        "dictate",
+        "Dictate",
+        state.config()?.general.hotkey_mode == "toggle",
+        None::<&str>,
+    )?;
+    let mute = CheckMenuItem::with_id(
+        app,
+        "mute",
+        "Sounds mute",
+        true,
+        state.config()?.sounds.muted,
+        None::<&str>,
+    )?;
+    let enabled = CheckMenuItem::with_id(
+        app,
+        "overlay",
+        "Overlay enabled",
+        true,
+        state.config()?.overlay.enabled,
+        None::<&str>,
+    )?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let reload = MenuItem::with_id(app, "reload", "Reload config", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&label, &dictate, &mute, &enabled, &settings, &reload, &quit])?;
-    let icon = app.default_window_icon().cloned().ok_or_else(|| anyhow::anyhow!("Missing application icon"))?;
+    let menu = Menu::with_items(
+        app,
+        &[&label, &dictate, &mute, &enabled, &settings, &reload, &quit],
+    )?;
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing application icon"))?;
     TrayIconBuilder::with_id("murmur")
         .icon(icon)
         .tooltip("Murmur — no model")
@@ -82,7 +106,11 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         .on_tray_icon_event(|tray, event| {
             if matches!(
                 event,
-                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
             ) {
                 if let Err(error) = platform::open_settings(tray.app_handle()) {
                     tracing::warn!(%error, "Open settings");
@@ -90,7 +118,12 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             }
         })
         .build(app)?;
-    state.set_tray(app::TrayControls { label, dictate, mute, enabled })?;
+    state.set_tray(app::TrayControls {
+        label,
+        dictate,
+        mute,
+        enabled,
+    })?;
     state.start()?;
     Ok(())
 }

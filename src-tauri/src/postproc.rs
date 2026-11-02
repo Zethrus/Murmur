@@ -2,7 +2,8 @@ use crate::config::Config;
 use regex::{Captures, RegexBuilder};
 
 fn protected(token: &str) -> bool {
-    let clean = token.trim_matches(|c: char| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | '"' | '\''));
+    let clean =
+        token.trim_matches(|c: char| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | '"' | '\''));
     clean.chars().any(|c| c.is_numeric())
         || clean.contains("://")
         || clean.contains('@')
@@ -17,7 +18,9 @@ fn substitute(text: &str, phrase: &str, replacement: &str) -> String {
     let punctuation = if replacement.is_empty() { "[,;]?" } else { "" };
     let pattern = format!(r"\b{}\b{}", regex::escape(phrase), punctuation);
     match RegexBuilder::new(&pattern).case_insensitive(true).build() {
-        Ok(re) => re.replace_all(text, |cap: &Captures<'_>| replacement_for(cap, replacement)).into_owned(),
+        Ok(re) => re
+            .replace_all(text, |cap: &Captures<'_>| replacement_for(cap, replacement))
+            .into_owned(),
         Err(_) => text.to_owned(),
     }
 }
@@ -38,7 +41,11 @@ pub fn resolve_style(cfg: &Config, focused: &str, force: bool) -> Style {
     if force
         || cfg.postproc.style == "code"
         || (cfg.postproc.style == "auto"
-            && cfg.postproc.code_apps.iter().any(|s| !s.trim().is_empty() && app.contains(&s.to_lowercase())))
+            && cfg
+                .postproc
+                .code_apps
+                .iter()
+                .any(|s| !s.trim().is_empty() && app.contains(&s.to_lowercase())))
     {
         Style::Code
     } else {
@@ -74,7 +81,8 @@ pub fn process_style(text: &str, cfg: &Config, style: Style) -> String {
             if token.matches('`').count() % 2 == 1 {
                 in_code = !in_code;
             }
-            let spoken_word = cfg.postproc.spoken_punctuation && crate::punctuation::command_word(token);
+            let spoken_word =
+                cfg.postproc.spoken_punctuation && crate::punctuation::command_word(token);
             if code || (protected_style(token, style) && !spoken_word) {
                 let marker = format!("\u{e000}{}\u{e001}", saved.len());
                 saved.push(token.to_owned());
@@ -132,7 +140,12 @@ pub fn process_style(text: &str, cfg: &Config, style: Style) -> String {
                 }
                 let result = if sentence && !code && !protected(token) {
                     match token.char_indices().find(|(_, c)| c.is_alphabetic()) {
-                        Some((i, c)) => format!("{}{}{}", &token[..i], c.to_uppercase(), &token[i + c.len_utf8()..]),
+                        Some((i, c)) => format!(
+                            "{}{}{}",
+                            &token[..i],
+                            c.to_uppercase(),
+                            &token[i + c.len_utf8()..]
+                        ),
                         None => token.to_owned(),
                     }
                 } else {
@@ -141,7 +154,10 @@ pub fn process_style(text: &str, cfg: &Config, style: Style) -> String {
                 if token.chars().any(char::is_alphanumeric) || token.starts_with('\u{e000}') {
                     sentence = false;
                 }
-                if token.trim_end_matches(['"', '\'', ')', ']', '}']).ends_with(['.', '!', '?']) {
+                if token
+                    .trim_end_matches(['"', '\'', ')', ']', '}'])
+                    .ends_with(['.', '!', '?'])
+                {
                     sentence = true;
                 }
                 result
@@ -155,7 +171,14 @@ pub fn process_style(text: &str, cfg: &Config, style: Style) -> String {
     if text.is_empty() {
         String::new()
     } else {
-        format!("{text}{}", if cfg.injection.trailing_space { " " } else { "" })
+        format!(
+            "{text}{}",
+            if cfg.injection.trailing_space {
+                " "
+            } else {
+                ""
+            }
+        )
     }
 }
 #[cfg(test)]
@@ -163,7 +186,10 @@ mod tests {
     use super::*;
     #[test]
     fn whitespace_and_sentences() {
-        assert_eq!(process("  hello   there. next one!", &Config::default()), "Hello there. Next one! ");
+        assert_eq!(
+            process("  hello   there. next one!", &Config::default()),
+            "Hello there. Next one! "
+        );
     }
     #[test]
     fn whole_word_fillers() {
@@ -182,7 +208,10 @@ mod tests {
     fn punctuation_and_code_spans() {
         let mut config = Config::default();
         config.injection.remove_fillers = true;
-        assert_eq!(process("um, hello iPhone. next", &config), "Hello iPhone. Next ");
+        assert_eq!(
+            process("um, hello iPhone. next", &config),
+            "Hello iPhone. Next "
+        );
         assert_eq!(process("`let mur mur = 2`", &config), "`let mur mur = 2` ");
         assert_eq!(process("\"hello.\" next", &config), "\"Hello.\" Next ");
     }

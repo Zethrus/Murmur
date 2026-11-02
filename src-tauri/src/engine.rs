@@ -51,8 +51,9 @@ impl Process {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
-        let mut child =
-            command.spawn().context("Start murmur-engine sidecar; check the Python venv or packaged engine")?;
+        let mut child = command
+            .spawn()
+            .context("Start murmur-engine sidecar; check the Python venv or packaged engine")?;
         let stdin = child.stdin.take().context("Sidecar stdin missing")?;
         let stdout = child.stdout.take().context("Sidecar stdout missing")?;
         let stderr = child.stderr.take().context("Sidecar stderr missing")?;
@@ -64,7 +65,8 @@ impl Process {
                     let Ok(line) = line else {
                         break;
                     };
-                    let message = serde_json::from_str(&line).unwrap_or_else(|_| json!({"protocol_error":true}));
+                    let message = serde_json::from_str(&line)
+                        .unwrap_or_else(|_| json!({"protocol_error":true}));
                     if tx.send(message).is_err() {
                         break;
                     }
@@ -104,7 +106,13 @@ impl Process {
                 return Err(e);
             }
         };
-        Ok(Self { child, stdin, lines, readers: vec![reader, errors], next_id: 0 })
+        Ok(Self {
+            child,
+            stdin,
+            lines,
+            readers: vec![reader, errors],
+            next_id: 0,
+        })
     }
     fn call(&mut self, request: &Request, app: &AppHandle, stopping: &AtomicBool) -> Result<Value> {
         self.next_id += 1;
@@ -113,7 +121,9 @@ impl Process {
             &json!({"id":self.next_id,"method":request.method,"params":request.params}),
         )
         .context("Encode engine request")?;
-        self.stdin.write_all(b"\n").context("Write engine request")?;
+        self.stdin
+            .write_all(b"\n")
+            .context("Write engine request")?;
         self.stdin.flush().context("Flush engine request")?;
         let deadline = Instant::now() + request.timeout;
         loop {
@@ -124,7 +134,10 @@ impl Process {
             if remaining.is_zero() {
                 bail!("Engine request timed out");
             }
-            let message = match self.lines.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            let message = match self
+                .lines
+                .recv_timeout(remaining.min(Duration::from_millis(100)))
+            {
                 Ok(message) => message,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(error) => return Err(error).context("Engine disconnected"),
@@ -185,7 +198,9 @@ fn sidecar_command() -> Result<Command> {
         #[cfg(windows)]
         {
             let mut command = Command::new(root.join("engine/.venv/Scripts/python.exe"));
-            command.current_dir(root.join("engine")).args(["-m", "murmur_engine"]);
+            command
+                .current_dir(root.join("engine"))
+                .args(["-m", "murmur_engine"]);
             Ok(command)
         }
         #[cfg(not(windows))]
@@ -195,7 +210,11 @@ fn sidecar_command() -> Result<Command> {
     } else {
         let executable = std::env::current_exe().context("Locate Murmur executable")?;
         let parent = executable.parent().context("Executable has no parent")?;
-        Ok(Command::new(parent.join(if cfg!(windows) { "murmur-engine.exe" } else { "murmur-engine" })))
+        Ok(Command::new(parent.join(if cfg!(windows) {
+            "murmur-engine.exe"
+        } else {
+            "murmur-engine"
+        })))
     }
 }
 pub struct Engine {
@@ -243,7 +262,9 @@ impl Engine {
                         Ok(Message::Request(request)) => {
                             let result = match process.as_mut() {
                                 Some(p) => p.call(&request, &app, &stop),
-                                None => Err(anyhow::anyhow!("Engine unavailable after two failures; restart Murmur")),
+                                None => Err(anyhow::anyhow!(
+                                    "Engine unavailable after two failures; restart Murmur"
+                                )),
                             };
                             if result.is_err() && process.is_some() {
                                 process = None;
@@ -254,7 +275,9 @@ impl Engine {
                             let _ = request.reply.send(result);
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            let dead = process.as_mut().is_some_and(|p| !matches!(p.child.try_wait(), Ok(None)));
+                            let dead = process
+                                .as_mut()
+                                .is_some_and(|p| !matches!(p.child.try_wait(), Ok(None)));
                             if dead {
                                 process = None;
                                 live.store(false, Ordering::Release);
@@ -281,19 +304,35 @@ impl Engine {
                 live.store(false, Ordering::Release);
             })
             .context("Start engine supervisor")?;
-        Ok(Self { sender, job: Mutex::new(Some(job)), alive, stopping, failure })
+        Ok(Self {
+            sender,
+            job: Mutex::new(Some(job)),
+            alive,
+            stopping,
+            failure,
+        })
     }
     pub fn request(&self, method: &str, params: Value) -> Result<Value> {
         if self.stopping.load(Ordering::Acquire) {
             bail!("Engine is shutting down");
         }
-        let timeout = Duration::from_secs(if method == "models.install" { 1800 } else { 120 });
+        let timeout = Duration::from_secs(if method == "models.install" {
+            1800
+        } else {
+            120
+        });
         let (reply, response) = mpsc::channel();
         self.sender
-            .send(Message::Request(Request { method: method.into(), params, timeout, reply }))
+            .send(Message::Request(Request {
+                method: method.into(),
+                params,
+                timeout,
+                reply,
+            }))
             .context("Engine supervisor stopped")?;
-        let value =
-            response.recv_timeout(timeout + Duration::from_secs(5)).context("Engine request queue timed out")??;
+        let value = response
+            .recv_timeout(timeout + Duration::from_secs(5))
+            .context("Engine request queue timed out")??;
         if let Some(message) = value.get("rpc_error").and_then(Value::as_str) {
             bail!("{message}");
         }
@@ -327,5 +366,8 @@ fn report(app: &AppHandle, error: &Mutex<Option<String>>, message: &str, failure
     if let Ok(mut error) = error.lock() {
         *error = Some(message.clone());
     }
-    let _ = app.emit("error", json!({"message": message, "persistent": failures >= 2}));
+    let _ = app.emit(
+        "error",
+        json!({"message": message, "persistent": failures >= 2}),
+    );
 }

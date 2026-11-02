@@ -20,7 +20,10 @@ pub fn parse(accel: &str) -> Result<Shortcut> {
         bail!("Shortcut contains an empty key");
     }
     if parts.iter().all(|p| {
-        matches!(p.to_lowercase().as_str(), "ctrl" | "control" | "alt" | "shift" | "super" | "meta" | "cmd" | "command")
+        matches!(
+            p.to_lowercase().as_str(),
+            "ctrl" | "control" | "alt" | "shift" | "super" | "meta" | "cmd" | "command"
+        )
     }) {
         bail!("Shortcut requires a non-modifier key");
     }
@@ -67,14 +70,27 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
                 }
             }
         })
-        .with_context(|| format!("Shortcut {} is unavailable (another app may own it)", serialize(&shortcut)))?;
+        .with_context(|| {
+            format!(
+                "Shortcut {} is unavailable (another app may own it)",
+                serialize(&shortcut)
+            )
+        })?;
     Ok(())
 }
 fn action_for(mode: &str, down: bool, code: bool) -> Option<Action> {
     match (mode, down) {
-        ("hold", true) => Some(if code { Action::StartCode } else { Action::Start }),
+        ("hold", true) => Some(if code {
+            Action::StartCode
+        } else {
+            Action::Start
+        }),
         ("hold", false) => Some(Action::Stop),
-        ("toggle", true) => Some(if code { Action::ToggleCode } else { Action::Toggle }),
+        ("toggle", true) => Some(if code {
+            Action::ToggleCode
+        } else {
+            Action::Toggle
+        }),
         _ => None,
     }
 }
@@ -135,7 +151,9 @@ pub fn escape(app: &AppHandle, enabled: bool) -> Result<()> {
             })
             .context("Escape is unavailable; cannot safely start dictation")?;
     } else if app.global_shortcut().is_registered("Escape") {
-        app.global_shortcut().unregister("Escape").context("Release Escape shortcut")?;
+        app.global_shortcut()
+            .unregister("Escape")
+            .context("Release Escape shortcut")?;
     }
     Ok(())
 }
@@ -144,12 +162,27 @@ mod tests {
     use super::*;
     #[test]
     fn code_shortcut_routes_hold_and_toggle() {
-        assert!(matches!(action_for("hold", true, true), Some(Action::StartCode)));
-        assert!(matches!(action_for("hold", false, true), Some(Action::Stop)));
-        assert!(matches!(action_for("toggle", true, true), Some(Action::ToggleCode)));
+        assert!(matches!(
+            action_for("hold", true, true),
+            Some(Action::StartCode)
+        ));
+        assert!(matches!(
+            action_for("hold", false, true),
+            Some(Action::Stop)
+        ));
+        assert!(matches!(
+            action_for("toggle", true, true),
+            Some(Action::ToggleCode)
+        ));
         assert!(action_for("toggle", false, true).is_none());
-        assert!(matches!(action_for("hold", true, false), Some(Action::Start)));
-        assert!(matches!(action_for("toggle", true, false), Some(Action::Toggle)));
+        assert!(matches!(
+            action_for("hold", true, false),
+            Some(Action::Start)
+        ));
+        assert!(matches!(
+            action_for("toggle", true, false),
+            Some(Action::Toggle)
+        ));
     }
     #[test]
     fn accelerator_roundtrip() -> Result<()> {

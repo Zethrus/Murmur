@@ -19,6 +19,9 @@ tauri-plugin-single-instance = "2"
 cpal = "0.15"
 enigo = { version = "0.2", default-features = false, features = ["x11rb"] }
 arboard = "3"
+# Direct X11 access for modifier-state polling before synthetic typing.
+x11rb = { version = "0.13", default-features = false }
+
 rodio = { version = "0.20", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -19,7 +19,10 @@ pub struct Paths {
 impl Paths {
     pub fn discover() -> Result<Self> {
         #[cfg(windows)]
-        let (config, data) = (env_path("APPDATA")?.join("Murmur"), env_path("LOCALAPPDATA")?.join("Murmur"));
+        let (config, data) = (
+            env_path("APPDATA")?.join("Murmur"),
+            env_path("LOCALAPPDATA")?.join("Murmur"),
+        );
         #[cfg(not(windows))]
         let (config, data) = {
             let home = env_path("HOME")?;
@@ -41,7 +44,8 @@ impl Paths {
         {
             use std::os::unix::fs::PermissionsExt;
             for dir in [&config, &data] {
-                fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).context("Protect app data directory")?;
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+                    .context("Protect app data directory")?;
             }
         }
         Ok(Self {
@@ -53,10 +57,14 @@ impl Paths {
     }
 }
 fn env_path(key: &str) -> Result<PathBuf> {
-    Ok(PathBuf::from(env::var_os(key).with_context(|| format!("{key} is unset"))?))
+    Ok(PathBuf::from(
+        env::var_os(key).with_context(|| format!("{key} is unset"))?,
+    ))
 }
 pub fn open_settings(app: &AppHandle) -> Result<()> {
-    let window = app.get_webview_window("settings").context("Settings window missing")?;
+    let window = app
+        .get_webview_window("settings")
+        .context("Settings window missing")?;
     window.show().context("Show settings")?;
     window.unminimize().context("Restore settings")?;
     window.set_focus().context("Focus settings")?;
@@ -65,7 +73,12 @@ pub fn open_settings(app: &AppHandle) -> Result<()> {
 pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<()> {
     let manager = app.autolaunch();
     if manager.is_enabled().context("Read autostart state")? != enabled {
-        if enabled { manager.enable() } else { manager.disable() }.context("Update autostart")?;
+        if enabled {
+            manager.enable()
+        } else {
+            manager.disable()
+        }
+        .context("Update autostart")?;
     }
     Ok(())
 }
@@ -95,20 +108,28 @@ fn native_focus() -> Result<String> {
         .last()
         .filter(|id| id.starts_with("0x") && *id != "0x0")
         .context("No active X11 window")?;
-    let output =
-        Command::new("xprop").args(["-id", id, "WM_CLASS"]).output().context("Read focused application class")?;
+    let output = Command::new("xprop")
+        .args(["-id", id, "WM_CLASS"])
+        .output()
+        .context("Read focused application class")?;
     if !output.status.success() {
         bail!("Focused application disappeared");
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let class = text.split('"').nth(3).or_else(|| text.split('"').nth(1)).context("Focused window has no WM_CLASS")?;
+    let class = text
+        .split('"')
+        .nth(3)
+        .or_else(|| text.split('"').nth(1))
+        .context("Focused window has no WM_CLASS")?;
     Ok(class.to_owned())
 }
 #[cfg(windows)]
 fn native_focus() -> Result<String> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
-        System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION},
+        System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
         UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
     };
     unsafe {
@@ -131,7 +152,11 @@ fn native_focus() -> Result<String> {
             return Err(error).context("Read focused process path");
         }
         let path = PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
-        Ok(path.file_name().context("Foreground executable has no name")?.to_string_lossy().into_owned())
+        Ok(path
+            .file_name()
+            .context("Foreground executable has no name")?
+            .to_string_lossy()
+            .into_owned())
     }
 }
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -144,7 +169,10 @@ pub fn open_path(path: &Path) -> Result<()> {
     let mut command = Command::new("explorer.exe");
     #[cfg(not(windows))]
     let mut command = Command::new("xdg-open");
-    let status = command.arg(path).status().context("Open application folder")?;
+    let status = command
+        .arg(path)
+        .status()
+        .context("Open application folder")?;
     if !status.success() {
         bail!("Folder opener failed: {status}");
     }
@@ -190,20 +218,34 @@ impl Rolling {
 struct LogWriter(Arc<Mutex<Rolling>>);
 impl Write for LogWriter {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.0.lock().map_err(|_| io::Error::other("Log lock poisoned"))?.write(data)
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("Log lock poisoned"))?
+            .write(data)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.0.lock().map_err(|_| io::Error::other("Log lock poisoned"))?.file.flush()
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("Log lock poisoned"))?
+            .file
+            .flush()
     }
 }
 pub fn init_logging(data: &Path) -> Result<()> {
     let path = data.join("murmur.log");
-    let file = OpenOptions::new().create(true).append(true).open(&path).context("Open diagnostic log")?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .context("Open diagnostic log")?;
     let size = file.metadata().context("Read log size")?.len();
     let writer = LogWriter(Arc::new(Mutex::new(Rolling { path, file, size })));
     tracing_subscriber::fmt()
         .with_ansi(false)
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("MURMUR_LOG").unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("MURMUR_LOG")
+                .unwrap_or_else(|_| "info".into()),
+        )
         .with_writer(move || writer.clone())
         .try_init()
         .map_err(|e| anyhow::anyhow!("Initialize logs: {e}"))?;

@@ -103,7 +103,10 @@ impl Controller {
         }
         self.prepare_audio(state)?;
         hotkey::escape(&state.app, true)?;
-        self.audio.as_mut().context("Microphone unavailable")?.start()?;
+        self.audio
+            .as_mut()
+            .context("Microphone unavailable")?
+            .start()?;
         self.active = true;
         self.epoch += 1;
         self.started = Instant::now();
@@ -141,17 +144,33 @@ impl Controller {
         self.epoch += 1;
         hotkey::escape(&state.app, false)?;
         let duration = self.started.elapsed().as_millis() as u64;
-        let pcm = self.audio.as_mut().context("Microphone unavailable")?.stop()?;
+        let pcm = self
+            .audio
+            .as_mut()
+            .context("Microphone unavailable")?
+            .stop()?;
         if duration < self.config.audio.min_utterance_ms || pcm.is_empty() {
-            tracing::info!(duration_ms = duration, samples = pcm.len(), "utterance discarded");
+            tracing::info!(
+                duration_ms = duration,
+                samples = pcm.len(),
+                "utterance discarded"
+            );
             return self.idle(state);
         }
-        tracing::info!(duration_ms = duration, samples = pcm.len(), "utterance captured");
+        tracing::info!(
+            duration_ms = duration,
+            samples = pcm.len(),
+            "utterance captured"
+        );
         state.cue(Cue::Stop);
         state.transition("transcribing")?;
         let start = Instant::now();
-        let result = state.engine.request("transcribe", params(&pcm, &self.config))?;
-        let text = result["text"].as_str().context("Engine response lacks transcript")?;
+        let result = state
+            .engine
+            .request("transcribe", params(&pcm, &self.config))?;
+        let text = result["text"]
+            .as_str()
+            .context("Engine response lacks transcript")?;
         tracing::info!(
             infer_ms = result["infer_ms"].as_f64().unwrap_or(0.0),
             chars = text.len(),
@@ -159,16 +178,28 @@ impl Controller {
         );
         let focused = platform::focused_app(&state.app)?;
         let style = postproc::resolve_style(&self.config, &focused, self.force_code);
-        let text = inject::safe_text(&postproc::process_style(text, &self.config, style), &focused);
+        let text = inject::safe_text(
+            &postproc::process_style(text, &self.config, style),
+            &focused,
+        );
         if !text.is_empty() {
-            self.injector.inject(&text, &self.config.injection, &focused, style)?;
+            self.injector
+                .inject(&text, &self.config.injection, &focused, style)?;
             let latency = start.elapsed().as_millis() as u64;
             tracing::info!(latency_ms = latency, app = %focused, style = ?style, chars = text.len(), "transcript delivered");
-            state.app.emit("latency", json!({"latency_ms":latency,"text":text}))?;
+            state
+                .app
+                .emit("latency", json!({"latency_ms":latency,"text":text}))?;
             if state.config()?.privacy.history_enabled {
                 state.history(|history| {
                     if let Some(h) = history {
-                        h.insert(&text, &focused, duration, latency, &self.config.engine.model)?;
+                        h.insert(
+                            &text,
+                            &focused,
+                            duration,
+                            latency,
+                            &self.config.engine.model,
+                        )?;
                     }
                     Ok(())
                 })?;
@@ -216,8 +247,16 @@ impl Controller {
             })?;
             self.prune_at = now + Duration::from_secs(86_400);
         }
-        if self.active && self.config.overlay.show_preview && self.preview.is_none() && now >= self.preview_at {
-            let pcm = self.audio.as_ref().context("Audio unavailable")?.snapshot()?;
+        if self.active
+            && self.config.overlay.show_preview
+            && self.preview.is_none()
+            && now >= self.preview_at
+        {
+            let pcm = self
+                .audio
+                .as_ref()
+                .context("Audio unavailable")?
+                .snapshot()?;
             let pcm = &pcm[pcm.len().saturating_sub(16_000 * 6)..];
             let parameters = params(pcm, &self.config);
             let engine = state.engine.clone();
@@ -252,7 +291,9 @@ impl Controller {
             Action::Level(rms) => {
                 state.app.emit("level", json!({"rms":rms}))?;
             }
-            Action::Endpoint if self.active && self.config.general.hotkey_mode == "toggle" => self.stop(state)?,
+            Action::Endpoint if self.active && self.config.general.hotkey_mode == "toggle" => {
+                self.stop(state)?
+            }
             Action::MaxDuration if self.active => self.stop(state)?,
             Action::Fault(error) => self.fail(state, &error),
             Action::Preview(epoch, result) => {
@@ -261,7 +302,10 @@ impl Controller {
                 }
                 if epoch == self.epoch && self.active {
                     if let Ok(result) = result {
-                        state.app.emit("partial", json!({"text":result["text"].as_str().unwrap_or("")}))?;
+                        state.app.emit(
+                            "partial",
+                            json!({"text":result["text"].as_str().unwrap_or("")}),
+                        )?;
                     }
                 }
             }
@@ -274,8 +318,10 @@ impl Controller {
             Action::Reload => state.reload()?,
             Action::Reconfigure => {
                 let next = state.config()?;
-                let audio_changed = serde_json::to_value(&next.audio)? != serde_json::to_value(&self.config.audio)?;
-                let engine_changed = serde_json::to_value(&next.engine)? != serde_json::to_value(&self.config.engine)?;
+                let audio_changed =
+                    serde_json::to_value(&next.audio)? != serde_json::to_value(&self.config.audio)?;
+                let engine_changed = serde_json::to_value(&next.engine)?
+                    != serde_json::to_value(&self.config.engine)?;
                 let hotkey_changed = next.general.hotkey != self.config.general.hotkey
                     || next.general.hotkey_mode != self.config.general.hotkey_mode
                     || next.general.hotkey_code != self.config.general.hotkey_code;

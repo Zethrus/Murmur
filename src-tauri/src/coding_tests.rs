@@ -28,7 +28,13 @@ fn defaults_and_legacy_config() {
 #[test]
 fn auto_style_and_force() {
     let mut c = Config::default();
-    for app in ["Code", "Cursor.exe", "jetbrains-idea", "Gnome-Terminal", "WindowsTerminal.exe"] {
+    for app in [
+        "Code",
+        "Cursor.exe",
+        "jetbrains-idea",
+        "Gnome-Terminal",
+        "WindowsTerminal.exe",
+    ] {
         assert_eq!(resolve_style(&c, app, false), Style::Code);
     }
     assert_eq!(resolve_style(&c, "firefox", false), Style::Prose);
@@ -41,10 +47,15 @@ fn auto_style_and_force() {
 #[test]
 fn code_preserves_identifiers_and_fillers() {
     let mut c = Config::default();
-    c.postproc.replacements.insert("foo".into(), "changed".into());
+    c.postproc
+        .replacements
+        .insert("foo".into(), "changed".into());
     assert_eq!(code(".foo FOO foo.", &c), ".foo FOO foo. ");
     assert_eq!(
-        code("hello. next um foo_bar foo.rs foo/bar foo() foo{} foo::bar foo=>bar foo<bar> fooBar", &c),
+        code(
+            "hello. next um foo_bar foo.rs foo/bar foo() foo{} foo::bar foo=>bar foo<bar> fooBar",
+            &c
+        ),
         "hello. next um foo_bar foo.rs foo/bar foo() foo{} foo::bar foo=>bar foo<bar> fooBar "
     );
     assert_eq!(code("foo underscore bar", &c), "foo_bar ");
@@ -54,38 +65,75 @@ fn code_preserves_identifiers_and_fillers() {
 #[test]
 fn punctuation_before_replacements_and_toggle() {
     let mut c = Config::default();
-    c.postproc.replacements.insert("comma".into(), "wrong".into());
+    c.postproc
+        .replacements
+        .insert("comma".into(), "wrong".into());
     assert_eq!(code("hello COMMA world", &c), "hello, world ");
     assert_eq!(code("hello CoMmA world", &c), "hello, world ");
-    assert_eq!(code("quote hello comma world unquote", &c), "\"hello, world\" ");
+    assert_eq!(
+        code("quote hello comma world unquote", &c),
+        "\"hello, world\" "
+    );
     c.postproc.spoken_punctuation = false;
     assert_eq!(code("hello comma world", &c), "hello wrong world ");
 }
 #[test]
 fn newlines_gated_even_in_replacements() {
     let mut c = Config::default();
-    c.postproc.replacements.insert("break".into(), "one\ntwo".into());
-    assert_eq!(code("hello newline world\nnext break", &c), "hello world next one two ");
+    c.postproc
+        .replacements
+        .insert("break".into(), "one\ntwo".into());
+    assert_eq!(
+        code("hello newline world\nnext break", &c),
+        "hello world next one two "
+    );
     c.postproc.allow_newlines = true;
-    assert_eq!(code("hello newline world\nnext break", &c), "hello\nworld\nnext one\ntwo ");
+    assert_eq!(
+        code("hello newline world\nnext break", &c),
+        "hello\nworld\nnext one\ntwo "
+    );
 }
 #[test]
 fn paste_precedence_and_length_boundary() {
     let mut c = Config::default().injection;
-    assert_eq!(choose_path("x", &c, "editor", Style::Code), InjectionPath::Clipboard);
-    assert_eq!(choose_path(&"a".repeat(200), &c, "editor", Style::Prose), InjectionPath::Type);
-    assert_eq!(choose_path(&"a".repeat(201), &c, "editor", Style::Prose), InjectionPath::Clipboard);
+    assert_eq!(
+        choose_path("x", &c, "editor", Style::Code),
+        InjectionPath::Clipboard
+    );
+    assert_eq!(
+        choose_path(&"a".repeat(60), &c, "editor", Style::Prose),
+        InjectionPath::Type
+    );
+    assert_eq!(
+        choose_path(&"a".repeat(61), &c, "editor", Style::Prose),
+        InjectionPath::Clipboard
+    );
     c.method = "type".into();
-    assert_eq!(choose_path("x", &c, "editor", Style::Code), InjectionPath::Clipboard);
+    assert_eq!(
+        choose_path("x", &c, "editor", Style::Code),
+        InjectionPath::Clipboard
+    );
     c.prefer_paste = false;
-    assert_eq!(choose_path("x", &c, "editor", Style::Code), InjectionPath::Type);
+    assert_eq!(
+        choose_path("x", &c, "editor", Style::Code),
+        InjectionPath::Type
+    );
     c.clipboard_only = true;
-    assert_eq!(choose_path("x", &c, "editor", Style::Code), InjectionPath::ClipboardOnly);
+    assert_eq!(
+        choose_path("x", &c, "editor", Style::Code),
+        InjectionPath::ClipboardOnly
+    );
     c.clipboard_only = false;
     c.exclude_apps.push("editor".into());
-    assert_eq!(choose_path("x", &c, "Editor", Style::Code), InjectionPath::ClipboardOnly);
+    assert_eq!(
+        choose_path("x", &c, "Editor", Style::Code),
+        InjectionPath::ClipboardOnly
+    );
     c.clipboard_only = true;
-    assert_eq!(choose_path("x", &c, "Murmur", Style::Code), InjectionPath::Skip);
+    assert_eq!(
+        choose_path("x", &c, "Murmur", Style::Code),
+        InjectionPath::Skip
+    );
 }
 #[test]
 fn terminals_never_receive_enter() {
@@ -100,15 +148,29 @@ fn terminals_never_receive_enter() {
         "xterm",
         "powershell.exe",
     ] {
-        assert_eq!(safe_text("one\r\ntwo\nthree\rfour", app), "one two three four");
+        assert_eq!(
+            safe_text("one\r\ntwo\nthree\rfour", app),
+            "one two three four"
+        );
     }
     assert_eq!(safe_text("one\ntwo", "code"), "one\ntwo");
 }
 #[test]
 fn second_hotkey_validation_and_map_deletion() {
     let c = Config::default();
-    assert!(c.patched(serde_json::json!({"general":{"hotkey_code":"Control+Alt+D"}})).is_err());
-    assert!(c.patched(serde_json::json!({"general":{"hotkey_code":"Shift"}})).is_err());
-    assert!(c.patched(serde_json::json!({"general":{"hotkey_code":"Ctrl+Shift+D"}})).is_ok());
-    assert!(c.patched(serde_json::json!({"postproc":{"replacements":{}}})).unwrap().postproc.replacements.is_empty());
+    assert!(c
+        .patched(serde_json::json!({"general":{"hotkey_code":"Control+Alt+D"}}))
+        .is_err());
+    assert!(c
+        .patched(serde_json::json!({"general":{"hotkey_code":"Shift"}}))
+        .is_err());
+    assert!(c
+        .patched(serde_json::json!({"general":{"hotkey_code":"Ctrl+Shift+D"}}))
+        .is_ok());
+    assert!(c
+        .patched(serde_json::json!({"postproc":{"replacements":{}}}))
+        .unwrap()
+        .postproc
+        .replacements
+        .is_empty());
 }

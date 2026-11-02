@@ -61,7 +61,11 @@ impl SoundPlayer {
                     if let Some((_, handle)) = &output {
                         match rodio::Sink::try_new(handle) {
                             Ok(sink) => {
-                                sink.append(rodio::buffer::SamplesBuffer::new(1, 44_100, synthesize(cue, volume)));
+                                sink.append(rodio::buffer::SamplesBuffer::new(
+                                    1,
+                                    44_100,
+                                    synthesize(cue, volume),
+                                ));
                                 sink.sleep_until_end();
                             }
                             Err(error) => {
@@ -73,7 +77,10 @@ impl SoundPlayer {
                 }
             })
             .context("Start cue worker")?;
-        Ok(Self { sender, job: Some(job) })
+        Ok(Self {
+            sender,
+            job: Some(job),
+        })
     }
     pub fn play(&self, cue: Cue, cfg: &Sounds) {
         if cfg.enabled && !cfg.muted {

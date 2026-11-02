@@ -29,7 +29,11 @@ section!(Overlay {
     show_preview: bool = true,
     idle_hide: bool = true
 });
-section!(Sounds { enabled: bool = true, volume: f32 = 0.6, muted: bool = false });
+section!(Sounds {
+    enabled: bool = true,
+    volume: f32 = 0.6,
+    muted: bool = false
+});
 section!(Engine {
     model: String = "distil-small.en".into(), device: String = "auto".into(),
     compute_type: String = "auto".into(), beam_size: u32 = 1, vad_filter: bool = true,
@@ -55,7 +59,10 @@ section!(Postproc {
     spoken_punctuation: bool = true,
     allow_newlines: bool = false
 });
-section!(Privacy { history_enabled: bool = false, history_retention_days: u32 = 7 });
+section!(Privacy {
+    history_enabled: bool = false,
+    history_retention_days: u32 = 7
+});
 section!(Config {
     general: General = General::default(),
     overlay: Overlay = Overlay::default(),
@@ -89,8 +96,8 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let config: Self =
-            toml::from_str(&fs::read_to_string(path).context("Read config")?).context("Parse config TOML")?;
+        let config: Self = toml::from_str(&fs::read_to_string(path).context("Read config")?)
+            .context("Parse config TOML")?;
         config.validate()?;
         Ok(config)
     }
@@ -99,26 +106,44 @@ impl Config {
             bail!("Configuration patch must be an object");
         }
         let mut value = toml::Value::try_from(self).context("Serialize config")?;
-        merge(&mut value, toml::Value::try_from(patch).context("Invalid configuration value")?);
+        merge(
+            &mut value,
+            toml::Value::try_from(patch).context("Invalid configuration value")?,
+        );
         let result: Self = value.try_into().context("Invalid config field type")?;
         result.validate()?;
         Ok(result)
     }
     pub fn validate(&self) -> Result<()> {
         let primary = crate::hotkey::parse(&self.general.hotkey)?;
-        if !self.general.hotkey_code.is_empty() && crate::hotkey::parse(&self.general.hotkey_code)? == primary {
+        if !self.general.hotkey_code.is_empty()
+            && crate::hotkey::parse(&self.general.hotkey_code)? == primary
+        {
             bail!("Dictation and code shortcuts must be different");
         }
         for (value, choices) in [
             (self.general.hotkey_mode.as_str(), &["hold", "toggle"][..]),
             (self.general.theme.as_str(), &["auto", "light", "dark"][..]),
-            (self.overlay.position.as_str(), &["bottom-center", "top-center"][..]),
+            (
+                self.overlay.position.as_str(),
+                &["bottom-center", "top-center"][..],
+            ),
             (self.engine.device.as_str(), &["auto", "cuda", "cpu"][..]),
             (
                 self.engine.compute_type.as_str(),
-                &["auto", "int8", "int8_float16", "float16", "float32", "int8_float32"][..],
+                &[
+                    "auto",
+                    "int8",
+                    "int8_float16",
+                    "float16",
+                    "float32",
+                    "int8_float32",
+                ][..],
             ),
-            (self.injection.method.as_str(), &["auto", "type", "clipboard"][..]),
+            (
+                self.injection.method.as_str(),
+                &["auto", "type", "clipboard"][..],
+            ),
             (self.postproc.style.as_str(), &["prose", "code", "auto"][..]),
         ] {
             if !choices.contains(&value) {
@@ -150,7 +175,11 @@ impl Config {
         if !(1..=3650).contains(&self.privacy.history_retention_days) {
             bail!("Invalid history retention");
         }
-        if self.postproc.replacements.keys().any(|s| s.trim().is_empty())
+        if self
+            .postproc
+            .replacements
+            .keys()
+            .any(|s| s.trim().is_empty())
             || self.postproc.fillers.iter().any(|s| s.trim().is_empty())
         {
             bail!("Empty replacement/filler");
@@ -169,8 +198,15 @@ impl Config {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&temporary).context("Create temporary config")?;
-        file.write_all(toml::to_string_pretty(self).context("Encode config")?.as_bytes()).context("Write config")?;
+        let mut file = options
+            .open(&temporary)
+            .context("Create temporary config")?;
+        file.write_all(
+            toml::to_string_pretty(self)
+                .context("Encode config")?
+                .as_bytes(),
+        )
+        .context("Write config")?;
         file.sync_all().context("Sync config")?;
         drop(file);
         atomic_replace(&temporary, path).context("Atomically replace config")
@@ -184,10 +220,19 @@ fn atomic_replace(source: &Path, dest: &Path) -> Result<()> {
 #[cfg(windows)]
 fn atomic_replace(source: &Path, dest: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
     let s: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
     let d: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
-    if unsafe { MoveFileExW(s.as_ptr(), d.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
+    if unsafe {
+        MoveFileExW(
+            s.as_ptr(),
+            d.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
@@ -212,8 +257,12 @@ mod tests {
     }
     #[test]
     fn invalid_patch_rejected() {
-        assert!(Config::default().patched(serde_json::json!({"overlay":{"scale":4.0}})).is_err());
-        assert!(Config::default().patched(serde_json::json!({"audio":{"gain":"bad"}})).is_err());
+        assert!(Config::default()
+            .patched(serde_json::json!({"overlay":{"scale":4.0}}))
+            .is_err());
+        assert!(Config::default()
+            .patched(serde_json::json!({"audio":{"gain":"bad"}}))
+            .is_err());
     }
     #[test]
     fn atomic_roundtrip() -> Result<()> {

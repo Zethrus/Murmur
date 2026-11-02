@@ -14,8 +14,13 @@ type Reply<T> = Result<T, String>;
 fn error(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Reply<T> {
-    tauri::async_runtime::spawn_blocking(f).await.map_err(error)?.map_err(|e| format!("{e:#}"))
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> Reply<T> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(error)?
+        .map_err(|e| format!("{e:#}"))
 }
 #[tauri::command]
 pub fn get_config(state: State<'_, AppState>) -> Reply<Config> {
@@ -31,13 +36,20 @@ pub fn get_status(state: State<'_, AppState>) -> Reply<Status> {
 }
 #[tauri::command]
 pub async fn list_models(app: AppHandle) -> Reply<Value> {
-    blocking(move || app.state::<AppState>().engine.request("models.list", json!({}))).await
+    blocking(move || {
+        app.state::<AppState>()
+            .engine
+            .request("models.list", json!({}))
+    })
+    .await
 }
 #[tauri::command]
 pub async fn install_model(app: AppHandle, name: String) -> Reply<Value> {
     blocking(move || {
         let state = app.state::<AppState>();
-        let result = state.engine.request("models.install", json!({"name":name}))?;
+        let result = state
+            .engine
+            .request("models.install", json!({"name":name}))?;
         state.refresh_engine()?;
         Ok(result)
     })
@@ -50,7 +62,9 @@ pub async fn remove_model(app: AppHandle, name: String) -> Reply<Value> {
         if state.status()?.state != "idle" {
             anyhow::bail!("Stop dictation before removing a model");
         }
-        let result = state.engine.request("models.remove", json!({"name":name}))?;
+        let result = state
+            .engine
+            .request("models.remove", json!({"name":name}))?;
         state.refresh_engine()?;
         Ok(result)
     })
@@ -62,7 +76,10 @@ pub async fn test_engine(app: AppHandle) -> Reply<Value> {
         let state = app.state::<AppState>();
         let config = state.config()?;
         // A repeatable three-second silent inference probe; VAD may correctly return empty text.
-        let result = state.engine.request("transcribe", controller::params(&vec![0.0; 48_000], &config))?;
+        let result = state.engine.request(
+            "transcribe",
+            controller::params(&vec![0.0; 48_000], &config),
+        )?;
         state.refresh_engine()?;
         Ok(result)
     })
@@ -74,7 +91,11 @@ pub async fn list_devices() -> Reply<Vec<audio::DeviceInfo>> {
 }
 #[tauri::command]
 pub async fn set_hotkey(app: AppHandle, accel: String) -> Reply<Config> {
-    blocking(move || app.state::<AppState>().update(json!({"general":{"hotkey":accel}}))).await
+    blocking(move || {
+        app.state::<AppState>()
+            .update(json!({"general":{"hotkey":accel}}))
+    })
+    .await
 }
 #[tauri::command]
 pub fn preview_sound(state: State<'_, AppState>, kind: String) -> Reply<()> {
@@ -148,7 +169,11 @@ pub async fn open_path(app: AppHandle, kind: String) -> Reply<()> {
     blocking(move || {
         let state = app.state::<AppState>();
         let path = match kind.as_str() {
-            "config" => state.paths.config.parent().ok_or_else(|| anyhow::anyhow!("Config directory missing"))?,
+            "config" => state
+                .paths
+                .config
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Config directory missing"))?,
             "data" | "logs" | "history" => &state.paths.data,
             "models" => &state.paths.models,
             _ => anyhow::bail!("Unknown app folder kind"),

@@ -55,7 +55,10 @@ fn qa_wav_capture_without_hardware() -> Result<()> {
     }
     let mut capture = capture?;
     capture.start()?;
-    while !matches!(rx.recv_timeout(Duration::from_secs(2))?, AudioEvent::MaxDuration) {}
+    while !matches!(
+        rx.recv_timeout(Duration::from_secs(2))?,
+        AudioEvent::MaxDuration
+    ) {}
     let pcm = capture.stop()?;
     assert_eq!(pcm.len(), 1600);
     assert!(pcm.iter().all(|sample| (*sample - 0.375).abs() < 0.00001));
@@ -65,7 +68,12 @@ fn qa_wav_capture_without_hardware() -> Result<()> {
 }
 #[test]
 fn gain_and_preroll() {
-    let b = Buffer { ring: VecDeque::from([0.8, -0.8, 0.2]), cursor: 3, start: Some(1), ..Default::default() };
+    let b = Buffer {
+        ring: VecDeque::from([0.8, -0.8, 0.2]),
+        cursor: 3,
+        start: Some(1),
+        ..Default::default()
+    };
     assert_eq!(b.pcm(2.0), vec![-1.0, 0.4]);
 }
 
@@ -90,7 +98,12 @@ fn idle_meter_emits_without_endpointing() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let collected = events.clone();
     let callback: Callback = Arc::new(move |event| collected.lock().unwrap().push(event));
-    b.push(&vec![0.5; RATE], RATE as u32, &config::Audio::default(), &callback);
+    b.push(
+        &vec![0.5; RATE],
+        RATE as u32,
+        &config::Audio::default(),
+        &callback,
+    );
     let events = events.lock().unwrap();
     assert!(!events.is_empty());
     assert!(events.iter().all(|e| matches!(e, AudioEvent::Level(_))));

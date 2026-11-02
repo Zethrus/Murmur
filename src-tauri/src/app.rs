@@ -59,7 +59,9 @@ pub struct AppState {
     shutdown_job: Mutex<Option<JoinHandle<()>>>,
 }
 pub fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
-    mutex.lock().map_err(|_| anyhow::anyhow!("Internal state lock poisoned"))
+    mutex
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Internal state lock poisoned"))
 }
 impl AppState {
     pub fn new(app: AppHandle) -> Result<Self> {
@@ -141,14 +143,17 @@ impl AppState {
             s.compute = result["compute"].as_str().unwrap_or("unloaded").into();
         }
         self.refresh_tray()?;
-        self.app.emit("state", json!({"state":self.status()?.state}))?;
+        self.app
+            .emit("state", json!({"state":self.status()?.state}))?;
         Ok(result)
     }
     pub fn send(&self, action: Action) -> Result<()> {
         if self.closing.load(Ordering::Acquire) {
             anyhow::bail!("Murmur is shutting down");
         }
-        self.sender.send(action).context("Dictation controller stopped")
+        self.sender
+            .send(action)
+            .context("Dictation controller stopped")
     }
     pub fn sender(&self) -> mpsc::Sender<Action> {
         self.sender.clone()
@@ -160,14 +165,20 @@ impl AppState {
     pub fn refresh_tray(&self) -> Result<()> {
         let c = self.config()?;
         let s = self.status()?;
-        let label = if !s.model_available { "no model" } else { &s.state };
+        let label = if !s.model_available {
+            "no model"
+        } else {
+            &s.state
+        };
         if let Some(tray) = self.app.tray_by_id("murmur") {
             tray.set_tooltip(Some(format!("Murmur — {label}")))?;
         }
         let items = lock(&self.tray)?.clone();
         if let Some(items) = items {
             items.label.set_text(label)?;
-            items.dictate.set_enabled(c.general.hotkey_mode == "toggle")?;
+            items
+                .dictate
+                .set_enabled(c.general.hotkey_mode == "toggle")?;
             items.mute.set_checked(c.sounds.muted)?;
             items.enabled.set_checked(c.overlay.enabled)?;
         }
@@ -217,7 +228,9 @@ impl AppState {
             return Err(error);
         }
         *lock(&self.config)? = new.clone();
-        self.app.emit("config", &new).context("Emit config update")?;
+        self.app
+            .emit("config", &new)
+            .context("Emit config update")?;
         self.send(Action::Reconfigure)?;
         self.refresh_tray()?;
         Ok(new)
@@ -244,7 +257,9 @@ impl AppState {
         f(history.as_ref())
     }
     pub fn start(&self) -> Result<()> {
-        let rx = lock(&self.receiver)?.take().context("Controller already started")?;
+        let rx = lock(&self.receiver)?
+            .take()
+            .context("Controller already started")?;
         let app = self.app.clone();
         *lock(&self.controller)? = Some(
             thread::Builder::new()
@@ -254,18 +269,28 @@ impl AppState {
         );
         let sender = self.sender.clone();
         let path = self.paths.config.clone();
-        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
-            Ok(event) if event.paths.contains(&path) && !matches!(event.kind, notify::EventKind::Access(_)) => {
-                let _ = sender.send(Action::Reload);
-            }
-            Err(error) => {
-                let _ = sender.send(Action::Fault(format!("Config watcher: {error}")));
-            }
-            _ => {}
-        })
-        .context("Create config watcher")?;
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+                Ok(event)
+                    if event.paths.contains(&path)
+                        && !matches!(event.kind, notify::EventKind::Access(_)) =>
+                {
+                    let _ = sender.send(Action::Reload);
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::Fault(format!("Config watcher: {error}")));
+                }
+                _ => {}
+            })
+            .context("Create config watcher")?;
         watcher
-            .watch(self.paths.config.parent().context("Config parent missing")?, RecursiveMode::NonRecursive)
+            .watch(
+                self.paths
+                    .config
+                    .parent()
+                    .context("Config parent missing")?,
+                RecursiveMode::NonRecursive,
+            )
             .context("Watch configuration directory")?;
         *lock(&self.watcher)? = Some(watcher);
         Ok(())

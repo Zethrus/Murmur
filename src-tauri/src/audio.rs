@@ -36,7 +36,11 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
         .enumerate()
         .map(|(i, d)| {
             let name = d.name().context("Read audio device name")?;
-            Ok(DeviceInfo { id: format!("{i}:{name}"), is_default: default.as_ref() == Some(&name), name })
+            Ok(DeviceInfo {
+                id: format!("{i}:{name}"),
+                is_default: default.as_ref() == Some(&name),
+                name,
+            })
         })
         .collect()
 }
@@ -126,7 +130,11 @@ impl Buffer {
                     callback(AudioEvent::Level((rms * cfg.gain).min(1.0)));
                 }
                 if self.start.is_some()
-                    && self.silence.feed(rms * cfg.gain, cfg.silence_threshold, cfg.silence_timeout_ms)
+                    && self.silence.feed(
+                        rms * cfg.gain,
+                        cfg.silence_threshold,
+                        cfg.silence_timeout_ms,
+                    )
                     && !self.endpoint
                 {
                     self.endpoint = true;
@@ -145,7 +153,11 @@ impl Buffer {
     fn pcm(&self, gain: f32) -> Vec<f32> {
         let start = self.start.unwrap_or(self.cursor);
         let first = self.cursor.saturating_sub(self.ring.len() as u64);
-        self.ring.iter().skip(start.saturating_sub(first) as usize).map(|x| (x * gain).clamp(-1.0, 1.0)).collect()
+        self.ring
+            .iter()
+            .skip(start.saturating_sub(first) as usize)
+            .map(|x| (x * gain).clamp(-1.0, 1.0))
+            .collect()
     }
 }
 pub fn rms(samples: &[f32]) -> f32 {
@@ -162,7 +174,10 @@ pub struct AudioCapture {
     qa: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
 }
 impl AudioCapture {
-    pub fn new(cfg: &config::Audio, callback: impl Fn(AudioEvent) + Send + Sync + 'static) -> Result<Self> {
+    pub fn new(
+        cfg: &config::Audio,
+        callback: impl Fn(AudioEvent) + Send + Sync + 'static,
+    ) -> Result<Self> {
         let buffer = Arc::new(Mutex::new(Buffer::default()));
         let healthy = Arc::new(AtomicBool::new(true));
         let callback: Callback = Arc::new(callback);
@@ -173,7 +188,10 @@ impl AudioCapture {
                 bail!("Invalid QA WAV format");
             }
             let raw: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float {
-                reader.samples::<f32>().collect::<std::result::Result<_, _>>().context("Decode float WAV")?
+                reader
+                    .samples::<f32>()
+                    .collect::<std::result::Result<_, _>>()
+                    .context("Decode float WAV")?
             } else {
                 let scale = 2_f32.powi(i32::from(spec.bits_per_sample) - 1);
                 reader
@@ -182,22 +200,28 @@ impl AudioCapture {
                     .collect::<std::result::Result<_, _>>()
                     .context("Decode PCM WAV")?
             };
-            let mono: Vec<f32> =
-                raw.chunks(spec.channels as usize).map(|f| f.iter().sum::<f32>() / f.len() as f32).collect();
+            let mono: Vec<f32> = raw
+                .chunks(spec.channels as usize)
+                .map(|f| f.iter().sum::<f32>() / f.len() as f32)
+                .collect();
             let data = buffer.clone();
             let config = cfg.clone();
             let (tx, rx) = mpsc::channel();
             let job = thread::Builder::new()
                 .name("murmur-qa-audio".into())
                 .spawn(move || {
-                    while matches!(rx.recv_timeout(Duration::from_millis(20)), Err(mpsc::RecvTimeoutError::Timeout)) {
+                    while matches!(
+                        rx.recv_timeout(Duration::from_millis(20)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ) {
                         let Ok(mut b) = data.lock() else {
                             break;
                         };
                         if b.start.is_none() {
                             continue;
                         }
-                        let end = (b.qa_pos + (spec.sample_rate as usize / 50).max(1)).min(mono.len());
+                        let end =
+                            (b.qa_pos + (spec.sample_rate as usize / 50).max(1)).min(mono.len());
                         let pos = b.qa_pos;
                         b.qa_pos = end;
                         b.push(&mono[pos..end], spec.sample_rate, &config, &callback);
@@ -208,24 +232,42 @@ impl AudioCapture {
                     }
                 })
                 .context("Start QA audio worker")?;
-            return Ok(Self { buffer, healthy, cfg: cfg.clone(), _stream: None, qa: Some((tx, job)) });
+            return Ok(Self {
+                buffer,
+                healthy,
+                cfg: cfg.clone(),
+                _stream: None,
+                qa: Some((tx, job)),
+            });
         }
         let host = cpal::default_host();
         let device = if cfg.device == "default" {
             host.default_input_device()
         } else {
-            host.input_devices().context("List microphones")?.enumerate().find_map(|(i, d)| {
-                let name = d.name().ok()?;
-                (cfg.device == name || cfg.device == format!("{i}:{name}")).then_some(d)
-            })
+            host.input_devices()
+                .context("List microphones")?
+                .enumerate()
+                .find_map(|(i, d)| {
+                    let name = d.name().ok()?;
+                    (cfg.device == name || cfg.device == format!("{i}:{name}")).then_some(d)
+                })
         }
         .context("No matching microphone; choose an available input device")?;
-        let supported = device.default_input_config().context("Read default microphone format")?;
+        let supported = device
+            .default_input_config()
+            .context("Read default microphone format")?;
         let format = supported.sample_format();
         let stream_config: cpal::StreamConfig = supported.into();
         macro_rules! stream {
             ($ty:ty) => {
-                build::<$ty>(&device, &stream_config, buffer.clone(), healthy.clone(), cfg.clone(), callback.clone())?
+                build::<$ty>(
+                    &device,
+                    &stream_config,
+                    buffer.clone(),
+                    healthy.clone(),
+                    cfg.clone(),
+                    callback.clone(),
+                )?
             };
         }
         let stream = match format {
@@ -242,13 +284,22 @@ impl AudioCapture {
             _ => bail!("Unsupported microphone format: {format:?}"),
         };
         stream.play().context("Start microphone stream")?;
-        Ok(Self { buffer, healthy, cfg: cfg.clone(), _stream: Some(stream), qa: None })
+        Ok(Self {
+            buffer,
+            healthy,
+            cfg: cfg.clone(),
+            _stream: Some(stream),
+            qa: None,
+        })
     }
     pub fn healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
     }
     pub fn start(&mut self) -> Result<()> {
-        let mut b = self.buffer.lock().map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?;
+        let mut b = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?;
         b.start = Some(b.cursor.saturating_sub(4000));
         b.actual_start = b.cursor;
         b.silence = Silence::default();
@@ -265,10 +316,17 @@ impl AudioCapture {
         Ok(())
     }
     pub fn snapshot(&self) -> Result<Vec<f32>> {
-        Ok(self.buffer.lock().map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?.pcm(self.cfg.gain))
+        Ok(self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?
+            .pcm(self.cfg.gain))
     }
     pub fn stop(&mut self) -> Result<Vec<f32>> {
-        let mut b = self.buffer.lock().map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?;
+        let mut b = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?;
         let pcm = b.pcm(self.cfg.gain);
         b.start = None;
         Ok(pcm)
@@ -309,7 +367,11 @@ where
                 let mono: Vec<f32> = data
                     .chunks(channels)
                     .map(|frame| {
-                        frame.iter().map(|s| <f32 as cpal::Sample>::from_sample(*s)).sum::<f32>() / frame.len() as f32
+                        frame
+                            .iter()
+                            .map(|s| <f32 as cpal::Sample>::from_sample(*s))
+                            .sum::<f32>()
+                            / frame.len() as f32
                     })
                     .collect();
                 if let Ok(mut b) = buffer.lock() {
@@ -318,7 +380,9 @@ where
             },
             move |error| {
                 healthy.store(false, Ordering::Relaxed);
-                errors(AudioEvent::Error(format!("Microphone disconnected: {error}")));
+                errors(AudioEvent::Error(format!(
+                    "Microphone disconnected: {error}"
+                )));
             },
             None,
         )
