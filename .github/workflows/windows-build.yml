@@ -9,7 +9,7 @@ on:
   workflow_call:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: windows-${{ github.ref }}
@@ -17,6 +17,14 @@ concurrency:
 
 jobs:
   build:
+    # Fork PRs must never execute on a self-hosted runner; keep them on hosted or skip.
+    # Fork PRs never run here. Tag builds wait for a real Windows runner instead of failing
+    # against a billing-locked hosted runner.
+    if: >-
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository ||
+       vars.WINDOWS_RUNNER == '') &&
+      (vars.WINDOWS_RUNNER != '' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
     timeout-minutes: 90
     env:
@@ -109,9 +117,20 @@ jobs:
           Compress-Archive -Path "$Destination/murmur.exe", "$Destination/murmur-engine.exe" `
             -DestinationPath "$Destination/murmur-windows-x86_64.zip" -Force
 
-      - uses: actions/upload-artifact@v4
+      - name: Publish Windows assets to the release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: .cache/artifacts/windows/*
+          fail_on_unmatched_files: true
+      - name: Upload build artifacts (best effort)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: murmur-windows-x86_64
           path: .cache/artifacts/windows/*
           if-no-files-found: error
+          retention-days: 3
           compression-level: 0

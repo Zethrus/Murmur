@@ -9,7 +9,9 @@ on:
   workflow_call:
 
 permissions:
-  contents: read
+  # Write is needed to attach assets when a v* tag is pushed; fork PRs never run on the
+  # self-hosted runner (see the job-level `if:`), so untrusted code never holds this token.
+  contents: write
 
 concurrency:
   group: linux-${{ github.ref }}
@@ -17,6 +19,8 @@ concurrency:
 
 jobs:
   build:
+    # Fork PRs must never execute on a self-hosted runner; keep them on hosted or skip.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || vars.LINUX_RUNNER == ''
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
     env:
@@ -88,9 +92,20 @@ jobs:
           cp "$release"/bundle/appimage/*.AppImage .cache/artifacts/linux/
           tar -C .cache/artifacts/linux -czf .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
             murmur murmur-engine
-      - uses: actions/upload-artifact@v4
+      - name: Publish Linux assets to the release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: .cache/artifacts/linux/*
+          fail_on_unmatched_files: true
+      - name: Upload build artifacts (best effort)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: murmur-linux-x86_64
           path: .cache/artifacts/linux/*
           if-no-files-found: error
+          retention-days: 3
           compression-level: 0

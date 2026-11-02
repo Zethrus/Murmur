@@ -8,58 +8,53 @@ permissions:
   contents: read
 
 jobs:
+  # Both build workflows attach their own assets when the ref is a v* tag, so the release does not
+  # depend on Actions artifact storage (the account quota is small and fills after one build).
   linux:
     uses: ./.github/workflows/linux-build.yml
   windows:
     uses: ./.github/workflows/windows-build.yml
   publish:
     needs: [linux, windows]
+    # A Windows runner is optional until one exists; a failed Windows build must not block
+    # publishing the Linux assets that did build.
+    if: always() && needs.linux.result == 'success'
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: murmur-linux-x86_64
-          path: release-assets/linux
-      - uses: actions/download-artifact@v4
-        with:
-          name: murmur-windows-x86_64
-          path: release-assets/windows
-      - name: Verify release asset set
+      - name: Verify the published asset set
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test -s release-assets/linux/murmur
-          test -s release-assets/linux/murmur-engine
-          test -s release-assets/linux/murmur-linux-x86_64.tar.gz
-          test -s release-assets/windows/murmur.exe
-          test -s release-assets/windows/murmur-engine.exe
-          test -s release-assets/windows/murmur-windows-x86_64.zip
-          for pattern in 'linux/*.deb' 'linux/*.AppImage' 'windows/*-setup.exe'; do
-            compgen -G "release-assets/$pattern" >/dev/null || exit 1
+          mkdir -p release-assets && cd release-assets
+          gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --pattern '*' --clobber
+          ls -l
+          test -s murmur
+          test -s murmur-engine
+          test -s murmur-linux-x86_64.tar.gz
+          for pattern in '*.deb' '*.AppImage'; do
+            compgen -G "$pattern" >/dev/null || { echo "missing $pattern" >&2; exit 1; }
           done
-      - name: Write checksums
+          if compgen -G '*.exe' >/dev/null || compgen -G '*.zip' >/dev/null; then
+            test -s murmur.exe
+            test -s murmur-engine.exe
+            test -s murmur-windows-x86_64.zip
+            compgen -G '*-setup.exe' >/dev/null || { echo 'missing *-setup.exe' >&2; exit 1; }
+          else
+            echo 'No Windows assets attached: no Windows runner is configured yet.'
+          fi
+      - name: Write and attach SHA256SUMS
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           cd release-assets
-          find . -type f ! -name SHA256SUMS -printf '%P\n' | sort \
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort \
             | xargs -d '\n' sha256sum > "$RUNNER_TEMP/SHA256SUMS"
           cp "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
           cat SHA256SUMS
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          body: |
-            Unsigned builds. Windows runtime and GPU behavior remain unverified on real Windows hardware.
-            Portable archives include the required adjacent engine sidecar; keep the pair together.
-            Models are not bundled: install a model explicitly in Settings → Engine.
-          files: |
-            release-assets/linux/*
-            release-assets/windows/*
-            release-assets/SHA256SUMS
+          gh release upload "${GITHUB_REF_NAME}" SHA256SUMS --clobber --repo "${GITHUB_REPOSITORY}"
