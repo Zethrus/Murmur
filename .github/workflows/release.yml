@@ -14,7 +14,7 @@ jobs:
     uses: ./.github/workflows/windows-build.yml
   publish:
     needs: [linux, windows]
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     permissions:
       contents: write
     steps:
