@@ -1,135 +1,137 @@
-# Murmur — local, private, low-latency dictation for Linux/X11
+# Murmur — local, private, low-latency dictation (Linux + Windows)
 
-Implementation spec. Read this entire file before writing code. Build exactly this; do not
-add features beyond it. Prefer small, single-purpose modules over large files.
-
-## Target environment (verified, do not re-probe destructively)
-
-- Ubuntu 24.04, **X11** (DISPLAY=:1), GNOME 46 (Ubuntu session, AppIndicator support present).
-- Ryzen 7 7735HS (16 threads), 30 GiB RAM, **RTX 4060 8 GB**, driver 580 (CUDA 12.x).
-- Python 3.12.3 (`/usr/bin/python3`). Available already: `gi` (GTK3, GTK4, libadwaita 1,
-  AyatanaAppIndicator3 0.1, Notify 0.7), `cairo`, `numpy`, `xdotool`, `xclip`, `xsel`,
-  `parec`, `paplay`, `ffmpeg`, `notify-send`.
-- **Not available:** portaudio19-dev, sounddevice, PyAudio, torch, webrtcvad, Handy typelib.
-- Do **not** use apt/sudo. Everything must come from a project venv + system `gi` (use
-  `--system-site-packages` so `gi`/`cairo`/`numpy` import).
-- Audio is PipeWire; capture with the `parec` subprocess (never PyAudio/sounddevice).
+Implementation spec, v2 (cross-platform). Read this file completely before writing code.
+Build exactly this. Small single-purpose modules over large files. One codebase, two OSes.
 
 ## Product
 
-Hotkey dictation: hold (or toggle) a hotkey, speak, and the transcript is typed into whatever
-window has focus. Fully local (faster-whisper / CTranslate2). Warm model, no per-dictation
-load. Tiny always-on-top overlay shows state; a GTK3 tray icon gives quick controls; a
-GTK4/libadwaita settings app covers configuration including model download/selection.
+Press (or hold) a global hotkey, speak, and the transcript is typed into whatever window has
+focus. Fully local speech-to-text. Warm engine, no per-dictation model load. Tiny always-on-top
+overlay shows state; tray icon gives quick controls; a calm settings app covers configuration,
+including model download and selection. Start/stop cues are audible.
 
-Non-goals: cloud STT, accounts, telemetry, audio recording storage, Wayland support.
+Non-goals: cloud STT, accounts, telemetry, storing audio, Wayland-specific work.
 
-## Process architecture
+## Stack (decided — do not substitute)
 
-Two GUI processes sharing one GUI-free core package:
+- **Shell/UI: Tauri v2 + vanilla TypeScript + Vite** (no React/Svelte; smallest, fastest).
+  System webview: WebKitGTK 4.1 on Linux, WebView2 on Windows. One web UI, two windows:
+  `settings` and `overlay`.
+- **Rust backend** (`src-tauri`): hotkeys, audio capture, text injection, tray, overlay window
+  control, config, sounds, sidecar supervision, IPC commands.
+- **Python sidecar** (`engine/`): faster-whisper (CTranslate2) inference + model management,
+  newline-delimited JSON-RPC over stdin/stdout. Isolated so a crash never takes the UI down.
+- Verified local toolchain: rustc/cargo 1.92, node 22.23 + npm 10.9, webkit2gtk-4.1 (2.52),
+  libsoup-3.0, alsa 1.2.11 dev, gtk3 dev, cc/g++/cmake/patchelf present. **No sudo, no apt.**
+- Crates to use: `tauri` 2, `tauri-plugin-global-shortcut` 2, `tauri-plugin-autostart` 2,
+  `tauri-plugin-single-instance` 2, `cpal` 0.15, `enigo` 0.2 (unicode typing; X11 + Windows
+  SendInput), `arboard` (clipboard), `rodio` (cue playback), `serde`/`serde_json`, `toml` 0.8,
+  `anyhow`, `tracing` + `tracing-subscriber`, `notify` (config file watcher). Keep the tree lean;
+  justify any crate not listed here.
 
-1. `murmur-daemon` — GTK3 + AyatanaAppIndicator3 + overlay + hotkey + audio + STT + injection.
-   Started at login from `~/.config/autostart/murmur.desktop`. Idle RAM target ≤ 250 MB
-   (engine excluded), steady CPU on idle ≈ 0 % (continuous 16 kHz capture is acceptable,
-   ~0.5 % of one core).
-2. `murmur-settings` — GTK4 + libadwaita, launched on demand from the tray ("Settings…"),
-   exits when its window closes. Communicates with the daemon over a Unix socket; writes
-   config, daemon hot-reloads.
+## Targets
 
-Core package `murmur/` must not import `gi` at module import time except in GUI modules.
+| Concern | Linux | Windows |
+|---|---|---|
+| Hotkey | pynput-equivalent via tauri global-shortcut (works both) | same |
+| Audio capture | `cpal` (ALSA → PipeWire) | `cpal` (WASAPI) |
+| Typing | `enigo` (X11 XTEST) | `enigo` (SendInput, unicode) |
+| Clipboard | `arboard` | `arboard` |
+| Tray | Tauri tray-icon (libappindicator via GTK) | Tauri tray-icon |
+| Autostart | `tauri-plugin-autostart` (.desktop) | same (HKCU Run) |
+| Overlay click-through | `set_ignore_cursor_events(true)` | same |
+| Cue audio | `rodio` | `rodio` (WASAPI) |
+| Paths | `~/.config/murmur`, `~/.local/share/murmur` | `%APPDATA%\Murmur`, `%LOCALAPPDATA%\Murmur` |
 
-## Repository layout (create exactly this)
+Targets: Ubuntu/Debian (X11 first-class; Wayland may work but is untested and must not crash),
+Windows 10/11 x64.
+
+## Repository layout
 
 ```
 /home/zethrus/Projects/murmur/
-├── SPEC.md                     # this file
-├── README.md                   # quick start, hotkeys, privacy statement, troubleshooting
-├── pyproject.toml              # metadata; no packaging of GUI needed
-├── requirements.txt            # faster-whisper, ctranslate2, pynput, tomli-w, nvidia-* (cu12)
-├── install.sh                  # venv, deps, model dir, autostart entry, smoke test
-├── uninstall.sh                # remove autostart + venv + optionally config/models
-├── bin/murmur-daemon           # exec shim: sets LD_LIBRARY_PATH for CUDA wheels, runs python -m murmur.daemon
-├── bin/murmur-settings         # exec shim
-├── murmur/__init__.py
-├── murmur/config.py            # dataclasses + TOML load/save/diff, defaults, migration, mtime watcher
-├── murmur/state.py             # state machine enum + transition guards + event fanout
-├── murmur/paths.py             # XDG dirs, socket path, model dir, lock file
-├── murmur/ipc.py               # newline-JSON unix-socket server + client (async-free, thread based)
-├── murmur/audio.py             # parec capture process, ring buffer, RMS/VU, utterance assembly
-├── murmur/engine.py            # faster-whisper model cache, device/compute resolution, transcribe(), partials()
-├── murmur/models.py            # model catalog, install sizes, snapshot_download with progress, delete
-├── murmur/postproc.py          # punctuation/capitalisation, fillers, replacements, dictionary prompt
-├── murmur/inject.py            # xdotool type fast path, clipboard-paste path, clipboard restore, exclusions
-├── murmur/hotkey.py            # pynput listener, hold/toggle/tap semantics, combo parser, capture helper
-├── murmur/sounds.py            # generates cue WAVs (numpy) and plays them with paplay, volume/mute
-├── murmur/history.py           # sqlite history (opt-in), retention pruning, search
-├── murmur/controller.py        # orchestration: hotkey → capture → transcribe → postproc → inject; no GUI
-├── murmur/daemon/__init__.py
-├── murmur/daemon/__main__.py   # Gtk.Application wiring + single-instance lock + tray + IPC server thread
-├── murmur/daemon/overlay.py    # click-through GTK3 overlay pill (idle/listening/transcribing/done/error)
-├── murmur/daemon/tray.py       # Ayatana indicator: status, mute sounds, Settings…, Quit
-├── murmur/settings_app/__init__.py
-├── murmur/settings_app/__main__.py
-├── murmur/settings_app/app.py           # Adw.Application + window + NavigationSplitView
-├── murmur/settings_app/pages/general.py
-├── murmur/settings_app/pages/engine.py
-├── murmur/settings_app/pages/audio.py
-├── murmur/settings_app/pages/behavior.py
-├── murmur/settings_app/pages/privacy.py
-├── murmur/settings_app/widgets/hotkey_capture.py
-├── murmur/settings_app/widgets/level_meter.py
-├── assets/murmur.svg           # simple mic glyph, theme-agnostic, 128x128
-├── assets/theme.css            # overlay + settings accents
-└── tests/                      # pytest, headless, no GUI, no model download
+├── SPEC.md  README.md  LICENSE  .gitignore
+├── package.json  vite.config.ts  tsconfig.json  index.html
+├── src/                        # web UI (vanilla TS)
+│   ├── main.ts                 # routes: ?window=settings (default) | overlay
+│   ├── bridge.ts               # typed wrapper over invoke()/listen()
+│   ├── styles/                 # tokens.css, settings.css, overlay.css
+│   ├── settings/               # app.ts, pages/{general,engine,audio,behavior,privacy}.ts,
+│   │                           # widgets/{hotkey-capture,level-meter,row,list-editor}.ts
+│   └── overlay/overlay.ts      # pill renderer (state machine + level bars + partial text)
+├── src-tauri/
+│   ├── Cargo.toml  build.rs  tauri.conf.json
+│   ├── capabilities/default.json
+│   ├── icons/ (generate via `cargo tauri icon` from assets/murmur.png)
+│   ├── binaries/            # engine sidecar placed here at build time (gitignored)
+│   └── src/
+│       ├── main.rs          # tauri::Builder, plugins, tray, windows, command registration
+│       ├── app.rs           # AppState: config, engine client, controller handle, status
+│       ├── config.rs        # serde structs, defaults, load/save, mtime watcher, unknown-key keep
+│       ├── platform.rs      # paths, autostart toggle, focused-window class, spawn-new-instance
+│       ├── audio.rs         # cpal stream, ring buffer, RMS/VU, utterance assembly, device list
+│       ├── hotkey.rs        # combo parse/serialise, hold/toggle/tap/cancel semantics
+│       ├── engine.rs        # sidecar spawn/restart, JSON-RPC client, request timeouts, events
+│       ├── inject.rs        # enigo typing, clipboard paste + restore, exclusion list
+│       ├── postproc.rs      # fillers, replacements, capitalisation, trailing space
+│       ├── sound.rs         # synthesise cues (sine mix), rodio playback, volume/mute
+│       ├── overlay.rs       # window show/hide/position/scale, event forwarding
+│       ├── controller.rs    # state machine: hotkey → capture → transcribe → postproc → inject
+│       ├── history.rs       # sqlite (rusqlite, bundled feature) opt-in history + retention
+│       └── ipc.rs           # #[tauri::command] surface
+├── engine/                  # python sidecar
+│   ├── pyproject.toml  requirements.txt
+│   ├── murmur_engine/{__main__,rpc,stt,models,devices}.py
+│   └── tests/test_{rpc,models,stt}.py
+├── assets/murmur.svg, murmur.png (1024), cues documented (generated at runtime, not files)
+├── scripts/{dev.sh,build-linux.sh,build-windows.ps1,engine-sidecar.sh}
+└── .github/workflows/{linux-build.yml,windows-build.yml,release.yml}
 ```
 
-## Config (TOML, `~/.config/murmur/config.toml`)
-
-Read with `tomllib`, write with `tomli_w` (add to requirements). Create with defaults on first
-run. Daemon polls mtime every 1 s and reloads on change; reload must be safe mid-session
-(never lose a completed transcript). Unknown keys are preserved on save.
+## Config (TOML; unknown keys preserved on save)
 
 ```toml
 [general]
-hotkey = "ctrl+alt+d"        # parsed by hotkey.parse_combo; lowercase names
-hotkey_mode = "hold"         # hold | toggle
-language = "en"              # whisper language code, "" = autodetect
+hotkey = "Ctrl+Alt+D"
+hotkey_mode = "hold"        # hold | toggle
+language = "en"             # "" = autodetect
 translate = false
 
 [overlay]
 enabled = true
-position = "bottom-center"   # bottom-center | top-center
-scale = 1.0                  # 0.8 – 1.6
-show_preview = true          # live partial text while speaking
+position = "bottom-center"  # bottom-center | top-center
+scale = 1.0                 # 0.8 – 1.6
+show_preview = true
+idle_hide = true
 
 [sounds]
 enabled = true
-volume = 0.6                 # 0.0 – 1.0
+volume = 0.6
 muted = false
 
 [engine]
-model = "distil-small.en"    # "" = no model installed yet
-device = "auto"              # auto | cuda | cpu
-compute_type = "auto"        # auto → int8_float16 on cuda, int8 on cpu
+model = "distil-small.en"   # "" = none installed
+device = "auto"             # auto | cuda | cpu
+compute_type = "auto"       # int8_float16 (cuda) | int8 (cpu) when auto
 beam_size = 1
 vad_filter = true
-dictionary = []              # list[str] fed as initial_prompt
+dictionary = []
 
 [audio]
-source = "default"           # pactl source name, or "default"
+device = "default"
 gain = 1.0
-silence_threshold = 0.012    # RMS (0..1 float samples)
-silence_timeout_ms = 1200    # toggle mode auto-stop
+silence_threshold = 0.012
+silence_timeout_ms = 1200
 max_utterance_s = 45
 min_utterance_ms = 250
 
 [injection]
-method = "auto"              # auto | type | clipboard
+method = "auto"             # auto | type | clipboard
 clipboard_only = false
 trailing_space = true
 capitalize = true
 remove_fillers = false
-exclude_apps = []            # lower-case window class substrings; when focused → clipboard only
+exclude_apps = []
 
 [postproc]
 replacements = { "mur mur" = "Murmur" }
@@ -139,161 +141,176 @@ history_enabled = false
 history_retention_days = 7
 ```
 
-## Runtime behaviour (the contract)
+Config lives beside the app data (see Targets). Writing is atomic (temp file + rename).
+The Rust side owns the file; the UI mutates it only through `config_set` commands.
 
-State machine: `idle → listening → transcribing → done → idle`, `listening → idle` (cancel),
-`transcribing → error → idle`. Transitions emit events (`state`, `level`, `partial`,
-`latency`, `error`) to the IPC server for the overlay/settings UI.
+## Runtime behaviour (contract)
 
-1. **Capture** — one long-lived `parec --format=s16le --rate=16000 --channels=1
-   --latency-msec=20 [--device=NAME]` process writing to a reader thread that appends to a
-   deque ring buffer (~60 s). RMS per 20 ms frame drives the `level` events (throttled to
-   ~20 Hz) and the silence detector. On hotkey press: mark start index (keep 250 ms of
-   pre-roll so the first syllable is never clipped). On stop: assemble PCM from start index
-   to now, apply `gain`, normalise to float32.
-2. **Hotkey** — `pynput.keyboard.Listener`. `hold`: key press starts, release stops.
-   `toggle`: first press starts, next press stops; auto-stop after `silence_timeout_ms` of
-   sub-threshold audio following at least 300 ms of speech. `Esc` while listening cancels and
-   discards, with the error cue suppressed. Ignore auto-repeat; require all combo modifiers
-   to be held at press time; ignore presses while the combo's non-modifier key is already
-   down. Hotkey must be changeable at runtime (listener restart within ~100 ms).
-3. **Transcribe** — `engine.transcribe(np.float32, ...)` on a worker thread. Model cached per
-   (name, device, compute_type); loaded lazily at startup in a background thread so the
-   daemon never blocks on it. `device="auto"` → try CUDA once, on failure log and fall back to
-   CPU permanently for the session. Streaming partials (when `overlay.show_preview`): every
-   ~700 ms re-transcribe the buffer grown since the last partial, `condition_on_previous_text=
-   False`, and emit `partial`. Never block the final pass on a partial.
-4. **Post-process** (`postproc.apply`) in this order: strip surrounding whitespace, collapse
-   inner whitespace/newlines to single spaces, optional filler removal, replacement map
-   (case-insensitive whole-word/phrase, longest-first), capitalise first letter of each
-   sentence (when `capitalize`), ensure single trailing space (when `trailing_space`).
-   Do not "fix" technical tokens, casing of mixed-case words, or numbers.
-5. **Inject** — `inject.type_text(text, cfg)`:
-   - Skip when the focused window class matches `exclude_apps` or `clipboard_only` → copy to
-     clipboard only, play the done cue, show overlay "copied".
-   - `auto`: ASCII-only text ≤ 1500 chars → `xdotool type --clearmodifiers --delay 0` (single
-     argv element, `--` separator). Otherwise (unicode, emoji, long) → clipboard path: save
-     CLIPBOARD via `xclip -o -selection clipboard`, set new text, `xdotool key --clearmodifiers
-     ctrl+v`, wait 300 ms, restore the previous clipboard, release ownership afterwards.
-   - `type` forces xdotool (lossy for non-ASCII: warn once in the log), `clipboard` forces the
-     paste path.
-   - Never inject into Murmur's own windows (check focused window class != murmur/settings).
-6. **Sounds** (`sounds.py`) — three short cues synthesised with numpy at install/first-run into
-   `~/.local/share/murmur/cues/` (start: rising two-tone ~90 ms; stop: falling two-tone ~90 ms;
-   error: low double buzz), scaled by `volume`, played with `paplay` (fire-and-forget, never
-   blocking the pipeline), skipped when `muted`/`enabled=false`. Regenerate on volume change.
-   Also mirror state to a `notify-send`-free tray tooltip (no desktop notifications by default;
-   the overlay is the indicator).
-7. **History** — only when `history_enabled`. SQLite at
-   `~/.local/share/murmur/history.db`, table `entries(id, ts, text, app_class, duration_ms,
-   latency_ms, model)`. Prune on startup and daily when older than retention. Settings offers
-   search + delete-all.
-8. **Single instance** — lock file at `$XDG_RUNTIME_DIR/murmur.lock` with PID; a second daemon
-   exits 0 after activating the existing overlay (no duplicate hotkey listeners).
+State machine: `idle → listening → transcribing → done → idle`; `listening → idle` (cancel);
+`transcribing → error → idle`. Every transition emits a `state` event; `level` ~20 Hz while
+listening/capturing; `partial` for live preview; `latency` after injection; `error` with a
+human-readable message.
 
-## IPC (Unix socket `$XDG_RUNTIME_DIR/murmur.sock`, mode 0600)
+1. **Capture (audio.rs)** — open one cpal input stream at the device's default config, convert
+   to mono f32, resample (linear) to 16 kHz, push into a 60 s ring buffer. Compute RMS per 20 ms
+   frame → `level` events (throttled 20 Hz) and silence endpoint detection. On hotkey press record
+   the start cursor minus 250 ms pre-roll; on stop assemble PCM, apply `gain`, clamp.
+   If the stream errors (device unplugged), emit `error`, rebuild the stream on next press.
+2. **Hotkeys (hotkey.rs)** — global shortcut registration with the configured accelerator.
+   `hold`: activation → start, deactivation → stop. `toggle`: activation → start/stop
+   alternating; auto-stop after `silence_timeout_ms` of silence following ≥300 ms of speech;
+   `Escape` (registered only while listening) cancels with no sound. Re-registering a hotkey at
+   runtime must succeed within 100 ms and report failure to the UI (conflict message).
+   Parse "Ctrl+Alt+D" style strings into Tauri accelerator syntax; reject modifier-only combos.
+3. **Engine (engine.rs + engine/)** — spawn `murmur-engine` sidecar with `--models-dir <path>`;
+   stdin/stdout JSON-RPC, one JSON object per line; `{"id":n,"method":"transcribe","params":
+   {"pcm_b64":..., "sample_rate":16000, "language":"en", "translate":false, "beam_size":1,
+   "vad":true, "initial_prompt":"..."}}` → `{"id":n,"ok":true,"result":{"text":...,"language":
+   ...,"duration_ms":...,"infer_ms":...}}`. Methods: `ping`, `status`, `transcribe`,
+   `partial`, `models.list`, `models.install` (streams `{"event":"download",...}`), `models.remove`,
+   `shutdown`. Auto-restart the sidecar once on crash; surface a persistent error if it fails
+   twice. Model loads lazily in the sidecar at first use and stays warm; `device=auto` tries CUDA
+   then permanently falls back to CPU, reporting the resolved device in `status`.
+4. **Post-process (postproc.rs)** — trim/collapse whitespace, optional filler removal
+   (um, uh, er, hmm — configurable list, whole words only), replacement map (case-insensitive,
+   longest phrase first), capitalise sentence starts, single trailing space. Never touch numbers,
+   mixed-case tokens, URLs or code-like strings.
+5. **Inject (inject.rs)** — `auto`: ASCII ≤1500 chars → enigo text typing; else clipboard paste
+   (save current clipboard text, set ours, send Ctrl+V, wait 300 ms, restore) — with a
+   clipboard-restore fallback that leaves the text in the clipboard if restore fails.
+   `clipboard_only` or focused-app match in `exclude_apps` → clipboard only.
+   Never inject into Murmur's own windows. On Windows use enigo unicode typing for the fast path.
+6. **Sounds (sound.rs)** — synthesise at runtime (no audio files in the repo): start = two
+   rising sine tones (660→880 Hz, 45 ms each, 8 ms envelope), stop = falling (880→660), error =
+   two 180 Hz buzzes. Scale amplitude by `volume`, play fire-and-forget on a dedicated thread
+   (rodio Sink), never block the pipeline, skip when muted/disabled.
+7. **Overlay (overlay.rs + src/overlay)** — separate transparent, undecorated, always-on-top,
+   skip-taskbar window, `ignore_cursor_events(true)`, positioned per config on the primary
+   monitor's work area (bottom-centre 48 px up, or top-centre). Content: idle = muted dot + "mur";
+   listening = 5 animated level bars + optional 2-line partial preview (pill grows to 560 px wide);
+   transcribing = pulsing dots; done = check, hide after 900 ms; error = amber dot, hide after
+   1.6 s. With `idle_hide` the window hides 1.5 s after going idle. Repaint only on events.
+8. **Tray (main.rs)** — icon, tooltip `Murmur — <state>`, menu: state label (disabled), "Dictate"
+   (toggle mode only), Sounds mute check, Overlay enabled check, "Settings…", "Reload config",
+   "Quit". Left-click opens Settings. Missing model → tooltip `Murmur — no model`.
+9. **History (history.rs)** — opt-in SQLite (`rusqlite` with `bundled`): `entries(id, ts, text,
+   app, duration_ms, latency_ms, model)`; prune on startup + daily; UI list/search + delete-all.
+10. **First run** — no model: UI shows a banner "Choose a speech model to start dictating" with a
+   jump to Engine; hotkey press plays the error cue and sets error state with a clear message.
+11. **Single instance** — `tauri-plugin-single-instance`: second launch focuses Settings and exits.
 
-Newline-delimited JSON. Client sends `{"id":n,"cmd":...}`; daemon replies
-`{"id":n,"ok":true,"data":{...}}` or `{"id":n,"ok":false,"error":"..."}`. Commands:
-`status`, `config.get`, `config.set` (`{"patch":{...nested...}}`), `reload`, `engine.install`
-(`{"model":"large-v3-turbo"}` → streams `{"event":"download","model":...,"pct":...,"done":false}`),
-`engine.remove`, `engine.test`, `devices.list`, `audio.meter.start`/`stop`,
-`sounds.preview`, `history.search`, `history.clear`, `dictate.start`/`dictate.stop`,
-`quit`. Events (unsolicited): `state`, `level`, `partial`, `latency`, `error`, `download`,
-`config.changed`.
+## IPC surface (Tauri commands; all return `Result<_, String>`)
 
-## Overlay (daemon/overlay.py)
+`get_config`, `set_config(patch)`, `get_status` (state, model, device, compute, sidecar alive),
+`list_models`, `install_model(name)`, `remove_model(name)`, `test_engine()`, `list_devices`,
+`set_hotkey(accel)`, `preview_sound(kind)`, `start_dictation`, `stop_dictation`,
+`cancel_dictation`, `open_settings`, `quit_app`, `history_search(q, limit)`, `history_clear`,
+`pick_exclude_app()`, `open_path(kind)`, `apply_overlay_prefs()`.
+Events to the webview: `state`, `level`, `partial`, `latency`, `error`, `download`, `config`.
 
-- Frameless, RGBA, always-on-top, skip taskbar/pager, `set_accept_focus(False)`, and **true
-  click-through** via `input_shape_combine_region(cairo.Region())` after realise; no shadow.
-- Pill ~180×44 px (× `scale`), rounded 22 px, `position` bottom-center (default 48 px from
-  bottom) or top-center, 24 px margin from screen edges; multi-monitor: primary monitor only.
-- Content by state: idle → small muted dot + "mur"; listening → 5 live level bars (accent) +
-  optional one-line partial preview that grows the pill up to 560 px wide (ellipsise, 2 lines
-  max, 13 px text); transcribing → pulsing dot + "…"; done → checkmark, auto-hide after 900 ms;
-  error → amber dot, auto-hide after 1.6 s. Idle hides completely after 1.5 s of inactivity
-  when `overlay.idle_hide` is true (add this key, default true) — the tray icon is the always-
-  visible indicator when the overlay is hidden.
-- Repaint only on `level`/`partial`/state change (no timers above 20 Hz). Never animate when
-  hidden.
+## Design tokens (single source of truth, cross-platform parity)
 
-## Tray (daemon/tray.py)
+The UI is one codebase, so parity is mostly structural — but WebKitGTK and WebView2 differ in
+fonts, default control chrome, scrollbars and sub-pixel rendering. Fix that with tokens, not
+per-platform CSS forks.
 
-Ayatana indicator with icon from `assets/murmur.svg`, tooltip "Murmur — idle|listening|…",
-menu: status label (insensitive), "Dictate (toggle)" (when mode=toggle), sounds mute checkbox,
-overlay enabled checkbox, "Settings…" (spawns `bin/murmur-settings`), "Reload config",
-"Quit Murmur".
+- `src/styles/tokens.css` is the ONLY place literals live. Layers:
+  1. **Primitive** tokens (`--grey-50 … --grey-950`, `--blue-400/500/600`, `--amber-500`,
+     `--green-500`, radii `--r-sm/md/lg/pill`, spacing `--sp-1…--sp-10` on a 4 px scale, type
+     scale `--fs-11 … --fs-22`, weights, line-heights, motion `--dur-fast/base/slow`,
+     easing `--ease-out`, z-index, border widths).
+  2. **Semantic** tokens (`--bg`, `--surface`, `--surface-raised`, `--border`, `--text`,
+     `--text-muted`, `--accent`, `--accent-contrast`, `--danger`, `--ok`, `--warn`, `--shadow-1/2`,
+     `--overlay-bg`, `--meter-track`, `--meter-fill`) mapped from primitives once, per theme.
+  3. **Component** tokens (`--row-height`, `--sidebar-w`, `--card-radius`, `--switch-track`,
+     `--slider-thumb`, `--pill-h`) — no component CSS reads primitives directly.
+- Themes: `:root` (light), `:root[data-theme="dark"]`, plus `@media (prefers-color-scheme: dark)`
+  when `data-theme="auto"`. Every semantic token has a value in both themes; the settings app can
+  switch Light / Dark / Auto, and the overlay follows the same tokens.
+- **Platform parity tokens**: `--font-ui` = `"Inter", "Ubuntu", "Segoe UI", system-ui, sans-serif`
+  (WebKitGTK resolves Ubuntu, WebView2 resolves Segoe UI — same metrics bucket, no layout shift);
+  `--font-mono` = `"JetBrains Mono", "Cascadia Mono", "Ubuntu Mono", monospace`;
+  `--scrollbar-w: 10px`; `--hairline: 1px` (accepts 1 device px on both). Both OSes use the same
+  sizes, radii, spacing and motion; only font resolution and the scrollbar engine differ, and both
+  are pinned by tokens.
+- No raw hex, px radius, or ad-hoc spacing outside `tokens.css`. `scripts/check-tokens.mjs`
+  fails the build on any `#rrggbb`/`rgb(`/`hsl(` in `src/**/*.css` and `src/**/*.ts` outside the
+  token file, and on any `border-radius:` / `padding:` literal in component CSS that is not a
+  token reference. Wire it into `npm run build` (and CI).
+- Shared chrome normalisation in `tokens.css`: `* { box-sizing: border-box }`,
+  `::selection` from tokens, custom scrollbar width/colour per theme, `-webkit-tap-highlight: none`,
+  `font-synthesis: none`, and a `:focus-visible` ring from `--accent` at 2 px/2 px offset.
+- Parity check (manual, in README + DoD): open Settings and the overlay on Linux; on Windows open
+  the same build and confirm identical spacing/typography/colour roles, only font family differing.
+  Record both screenshots under `docs/parity/` (gitignored if large — keep small PNGs).
 
-## Settings app (GTK4 + libadwaita)
+## Settings UI (must look deliberate, not default-browser)
 
-`Adw.Application`, window 860×640, `Adw.NavigationSplitView` sidebar pages + `Adw.HeaderBar`.
-Modern, calm, small: heading + description per row, no dense grids, no raw JSON. Every control
-applies immediately (write config → daemon reloads via socket `reload`); no Save button.
-Pages and rows:
+- Sidebar (240 px) with 5 sections and a footer showing daemon status dot + version; content pane
+  max-width 720 px, generous spacing (24 px gutters), one concept per row: label + hint on the
+  left, control on the right. Rounded 12 px cards on `--surface` with 1 px border, subtle shadow.
+- Typography: system stack (`Inter`, `Ubuntu`, `Segoe UI`, system-ui); 13 px body, 15 px section
+  titles, 11 px uppercase muted hints with 0.06em tracking. Dark and light via
+  `prefers-color-scheme`, both defined as CSS custom properties; accent `#7aa2f7` dark /
+  `#3b6fd4` light; 150 ms ease transitions; no spinners longer than necessary.
+- Controls: custom-styled switch, slider (track + 14 px thumb), select, and a **hotkey capture
+  field** that records a combo (shows key chips, clears with Backspace, rejects modifier-only,
+  shows inline conflict error). Level meter = 24 rounded bars driven by `level` events.
+- Pages: General (hotkey, mode, language, translate, overlay prefs, sounds + preview buttons,
+  autostart), Engine (model cards with size/accuracy/installed state, install progress bar,
+  device selector with detected hardware line, beam, VAD, "Test 3 s" showing measured latency,
+  dictionary list editor), Audio (device select, gain, live meter, silence threshold/timeout, max
+  utterance), Behavior (injection method, clipboard-only, trailing space, capitalise, fillers,
+  exclusions list, replacements table, last transcript), Privacy (local-only statement, history
+  switch + retention + search + clear, path list with "Open folder").
+- Empty states and disabled states must be handled (no model, no devices, sidecar down).
 
-- **General** — hotkey capture widget (Gtk.EventControllerKey, shows combo chips; rejects
-  modifier-only combos; shows conflict warning if the combo fails to bind), mode (hold/toggle),
-  language dropdown (whisper languages, "Auto"), translate switch, overlay enabled, overlay
-  position, overlay scale slider, live preview switch, sound volume slider + mute + "Preview"
-  buttons, autostart switch (writes/removes `~/.config/autostart/murmur.desktop`).
-- **Engine** — model list from `murmur/models.py` catalog (tiny.en, base.en, small.en,
-  distil-small.en, distil-medium.en, medium.en, large-v3-turbo, large-v3) each with size,
-  accuracy hint, Installed state, Install/Remove button, progress bar during download; device
-  selector (Auto/CUDA/CPU) showing detected hardware line ("CUDA · RTX 4060 · int8_float16"),
-  beam size spin, VAD switch, "Test 3 s of audio" latency readout, dictionary list editor.
-- **Audio** — input device dropdown (from `pactl list short sources`, excluding `.monitor`),
-  gain slider, live level meter (uses `level` events), silence threshold slider, silence
-  timeout spin, max utterance spin.
-- **Behavior** — injection method dropdown, clipboard-only switch, trailing space,
-  capitalisation, filler removal, exclusions list (add/remove app class), replacements table
-  (add/remove rows), "Show last transcript" read-only row.
-- **Privacy** — explicit "Everything stays on this machine" block, history switch, retention
-  days spin, search field + results list (last 50, click to copy), "Delete all history"
-  destructive button with confirmation, paths list (config, models, history, log) with
-  "Open folder".
+## Build & packaging
 
-Empty/first-run state: if `engine.model` is "" or not installed, the General page shows an
-`Adw.Banner` "Choose a speech model to start dictating" with a button that jumps to Engine, and
-the tray tooltip says "no model". The daemon must not crash when no model is available; it
-sounds the error cue and emits an error state on hotkey press.
-
-## Performance & quality targets (verify and report measured numbers)
-
-- Hotkey → first audio sample: < 60 ms (ring buffer makes this near-zero).
-- 5 s utterance, GPU large-v3-turbo int8_float16 → injected text: ≤ 600 ms wall clock.
-- Idle daemon RSS ≤ 250 MB excluding the loaded model; no CPU spin (idle < 1 %).
-- Zero network access at runtime: only `models.install` touches the network (huggingface_hub),
-  and `HF_HUB_OFFLINE=1` is set in the daemon process unless a download is in flight.
+- `npm run dev` → Vite; `npm run tauri dev` → dev app with the Python sidecar from
+  `scripts/engine-sidecar.sh` (Linux) or `engine/.venv/Scripts/python.exe` (Windows).
+- `scripts/build-linux.sh`: `npm ci && npm run build && cargo tauri build` → binary +
+  `.deb` (bundle targets `["deb","appimage"]`, appimage optional/allow failure).
+- **Windows**: `scripts/build-windows.ps1` (PowerShell, no admin): creates `engine\.venv`,
+  `pip install -r engine\requirements.txt pyinstaller`, builds `murmur-engine.exe` with
+  `--onefile`, copies to `src-tauri\binaries\murmur-engine-x86_64-pc-windows-msvc.exe`,
+  `npm ci`, `npm run build`, `cargo tauri build --target x86_64-pc-windows-msvc` → portable
+  `murmur.exe` in `target\release\` plus optional NSIS installer from the bundler.
+  `tauri.conf.json` must declare `bundle.externalBin: ["binaries/murmur-engine"]` and per-platform
+  targets so both builds work without editing config.
+- CI: `.github/workflows/windows-build.yml` (windows-latest: rust + node + python, cache cargo,
+  upload artifacts exe + installer) and `linux-build.yml` (ubuntu-22.04: apt installs
+  webkit2gtk-4.1-dev etc., build, upload deb/AppImage). `release.yml` on tag `v*` publishes both.
+- Icons: Tauri needs `src-tauri/icons/*`; generate from `assets/murmur.png` via
+  `cargo tauri icon assets/murmur.png` (commit the generated icons).
 
 ## Code rules
 
-- Type hints on public functions; dataclasses for config; no global mutable state outside
-  `config.load/save`; one reason to change per module; ≤ 400 lines per file (split instead).
-- Threads, not asyncio, except GTK's own main loop; every worker thread is daemonised and
-  joins on shutdown; no busy-wait loops (use `threading.Event`).
-- All subprocess calls use argv lists (no `shell=True`), with timeouts, and are killed on
-  shutdown (`parec` especially).
-- Logging via `logging` to `~/.local/share/murmur/murmur.log` (RotatingFileHandler, 2 MB × 3),
-  level from `MURMUR_LOG` env (default INFO). Never log transcript text unless
-  `MURMUR_LOG=DEBUG`.
-- Fail soft: a broken engine, missing `xdotool`, or unplugged mic must surface as an error
-  state + log line, never a daemon crash.
-- No new system packages, no sudo, no systemd unit in v1 (autostart .desktop only).
+- Rust: one responsibility per module, ≤400 lines, no `unwrap()` on fallible I/O (use `?` +
+  `anyhow` context), all threads named + joined on shutdown, no busy loops, `tracing` logs to
+  `<data>/murmur.log` (rolling, 2 MB × 3).
+- TS: no framework, no globals; a `bridge.ts` typed façade is the only place touching Tauri;
+  state comes from events, never polled faster than 4 Hz.
+- Python: typed public functions, dataclasses, no asyncio, no globals; JSON-RPC loop must never
+  print anything except protocol lines on stdout (logs to stderr).
+- No transcript text in logs unless `MURMUR_LOG=debug`. No network in the app except explicit
+  model install (`HF_HUB_OFFLINE=1` when idle).
 
 ## Definition of done
 
-1. `./install.sh` completes from a clean checkout: venv with `--system-site-packages`,
-   requirements installed, cue WAVs generated, autostart entry written, `pytest -q` green.
-2. `pytest -q` covers: config round-trip + unknown-key preservation, hotkey combo parse/match
-   (hold, toggle, autorepeat, modifier ordering), postproc (fillers, replacements, casing,
-   trailing space, unicode untouched), inject path selection (ascii/unicode/length/exclusions)
-   with subprocess mocked, silence endpointing maths, sounds volume scaling, history CRUD +
-   retention pruning, IPC request/response over a temp socket, model catalog sanity.
-3. `bin/murmur-daemon` starts on this X11 session, shows the tray icon, and `status` over the
-   socket returns the live state; `bin/murmur-settings` opens and can change the hotkey with the
-   daemon picking it up within 1 s.
-4. A real end-to-end run with a small model: hotkey → speak → correct text injected into a
-   focused text field, with start/stop cues audible. Document the exact repro commands in
-   README (including how to synthesise a test utterance with `espeak-ng`/`ffmpeg` if present).
-5. Measured numbers from target section recorded in README under "Performance".
-6. `git` repository initialised with a sensible `.gitignore` (no venv, no models, no caches).
+1. `cargo build --manifest-path src-tauri/Cargo.toml` succeeds on Linux with zero warnings that
+   matter; `cargo test --manifest-path src-tauri/Cargo.toml` green for config, accelerator parse,
+   postproc, injection path selection, silence maths, sounds amplitude, history CRUD.
+2. `engine` tests green (`pytest -q` in `engine/`), all model calls mocked, no network.
+3. `npm run build` (tsc + vite + `node scripts/check-tokens.mjs`) clean; `npm run tauri build --
+   --no-bundle` produces a binary that launches on this X11 session, shows tray icon + overlay,
+   and answers `get_status`. No hardcoded colour/spacing literals outside `tokens.css`.
+4. Hand-verified on this machine: settings window opens with all five pages, screenshot captured;
+   overlay screenshots for idle and listening; hotkey rebind takes effect without restart.
+5. `scripts/build-windows.ps1` reviewed line by line for correctness (cannot be executed here);
+   documented as "unverified until run on Windows" in README.
+6. README: install, run, hotkeys, privacy statement, performance numbers, Windows build steps,
+   troubleshooting (no model, hotkey conflict, mic, sidecar crash), and the test-audio recipe
+   (`espeak-ng` or `ffmpeg` synth + `aplay`/`paplay`), plus how to point the app at a wav instead
+   of the mic for QA (`MURMUR_QA_WAV=<path>` must be supported by audio.rs).
+7. Git repo with clean commits; no build artifacts committed.
