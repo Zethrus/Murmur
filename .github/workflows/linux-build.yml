@@ -48,6 +48,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Isolate the CI Rust toolchain
+        run: |
+          set -euo pipefail
+          # Self-hosted machines already have rustup in $HOME; a CI install over it fails with
+          # "could not rename component ... Directory not empty" and mutates the desktop toolchain.
+          root="${RUNNER_TOOL_CACHE:-$HOME/.cache}/murmur-ci"
+          mkdir -p "$root/rustup" "$root/cargo"
+          printf 'RUSTUP_HOME=%s\n' "$root/rustup" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\n' "$root/cargo" >> "$GITHUB_ENV"
+          printf '%s\n' "$root/cargo/bin" >> "$GITHUB_PATH"
+          rustup target list --installed 2>/dev/null || true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

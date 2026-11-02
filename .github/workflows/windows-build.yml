@@ -40,6 +40,14 @@ jobs:
           node-version: '22'
           cache: npm
 
+      - name: Isolate the CI Rust toolchain
+        shell: pwsh
+        run: |
+          $Root = Join-Path $env:RUNNER_TOOL_CACHE 'murmur-ci'
+          New-Item -ItemType Directory -Force "$Root/rustup", "$Root/cargo" | Out-Null
+          "RUSTUP_HOME=$Root/rustup" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CARGO_HOME=$Root/cargo" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$Root/cargo/bin" | Out-File -FilePath $env:GITHUB_PATH -Append
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
