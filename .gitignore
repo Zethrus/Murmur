@@ -18,3 +18,13 @@ models/
 *.wav
 *.ogg
 src-tauri/gen/
+# Local-only artefacts that must never be published
+*.log
+.env
+.env.*
+*.pem
+*.key
+*.p12
+.DS_Store
+Thumbs.db
+*.swp

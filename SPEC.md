@@ -49,7 +49,7 @@ Windows 10/11 x64.
 ## Repository layout
 
 ```
-/home/zethrus/Projects/murmur/
+the repository root (./)
 ├── SPEC.md  README.md  LICENSE  .gitignore
 ├── package.json  vite.config.ts  tsconfig.json  index.html
 ├── src/                        # web UI (vanilla TS)

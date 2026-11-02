@@ -2,7 +2,8 @@ name: Windows build
 
 on:
   push:
-    branches: ['**']
+    branches: ['master', 'main']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -10,29 +11,75 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
+    env:
+      HF_HUB_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      DO_NOT_TRACK: '1'
+      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
+      PYINSTALLER_CONFIG_DIR: ${{ github.workspace }}/.cache/pyinstaller
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           architecture: x64
+          cache: pip
+          cache-dependency-path: engine/requirements.txt
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-      - name: Freeze engine, npm ci, npm run build, and Tauri NSIS build
+
+      - name: Freeze the engine sidecar
         shell: pwsh
-        run: ./scripts/build-windows.ps1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m venv engine/.venv
+          $Python = 'engine/.venv/Scripts/python.exe'
+          & $Python -m pip install --upgrade pip
+          & $Python -m pip install -r engine/requirements.txt pyinstaller
+          if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
+          Push-Location engine
+          try {
+            & $Python -m PyInstaller --noconfirm --clean --onefile --name murmur-engine `
+              --paths . --runtime-hook runtime_hook_cuda.py `
+              --collect-all faster_whisper --collect-all ctranslate2 `
+              --collect-all tokenizers --collect-all onnxruntime `
+              murmur_engine/__main__.py
+            if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
+          } finally { Pop-Location }
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          $Sidecar = 'src-tauri/binaries/murmur-engine-x86_64-pc-windows-msvc.exe'
+          Copy-Item engine/dist/murmur-engine.exe $Sidecar -Force
+          if (-not (Test-Path $Sidecar)) { throw 'sidecar missing' }
+          & $Sidecar --help
+          if ($LASTEXITCODE -ne 0) { throw 'frozen engine did not start' }
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Build the app and NSIS installer
+        run: npx tauri build --target x86_64-pc-windows-msvc
+
       - name: Verify and stage unsigned artifacts
         shell: pwsh
         run: |
@@ -40,18 +87,20 @@ jobs:
           $Release = 'src-tauri/target/x86_64-pc-windows-msvc/release'
           $Destination = '.cache/artifacts/windows'
           New-Item -ItemType Directory -Force $Destination | Out-Null
+          # Tauri copies the sidecar next to the app; verify the pair, never the app alone.
           foreach ($Name in @('murmur.exe', 'murmur-engine.exe')) {
             $File = Join-Path $Release $Name
             if (-not (Test-Path $File) -or (Get-Item $File).Length -eq 0) {
               throw "Missing or empty portable artifact: $File"
             }
-            Copy-Item $File $Destination
+            Copy-Item $File $Destination -Force
           }
           $Installers = @(Get-ChildItem "$Release/bundle/nsis/*.exe" -File)
           if ($Installers.Count -eq 0) { throw 'Missing NSIS installer' }
           $Installers | Copy-Item -Destination $Destination
           Compress-Archive -Path "$Destination/murmur.exe", "$Destination/murmur-engine.exe" `
             -DestinationPath "$Destination/murmur-windows-x86_64.zip" -Force
+
       - uses: actions/upload-artifact@v4
         with:
           name: murmur-windows-x86_64

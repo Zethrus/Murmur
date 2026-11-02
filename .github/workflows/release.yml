@@ -39,6 +39,13 @@ jobs:
           for pattern in 'linux/*.deb' 'linux/*.AppImage' 'windows/*-setup.exe'; do
             compgen -G "release-assets/$pattern" >/dev/null || exit 1
           done
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          find . -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs -d '\n' sha256sum > SHA256SUMS
+          cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -53,3 +60,4 @@ jobs:
           files: |
             release-assets/linux/*
             release-assets/windows/*
+            release-assets/SHA256SUMS

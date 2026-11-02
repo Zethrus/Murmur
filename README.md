@@ -1,5 +1,9 @@
 # Murmur
 
+[![Linux build](https://github.com/Zethrus/Murmur/actions/workflows/linux-build.yml/badge.svg)](https://github.com/Zethrus/Murmur/actions/workflows/linux-build.yml)
+[![Windows build](https://github.com/Zethrus/Murmur/actions/workflows/windows-build.yml/badge.svg)](https://github.com/Zethrus/Murmur/actions/workflows/windows-build.yml)
+[![Release](https://img.shields.io/github/v/release/Zethrus/Murmur)](https://github.com/Zethrus/Murmur/releases)
+
 Local, private dictation for Linux/X11 and Windows 10/11 x64. Hold a global hotkey,
 speak, and Murmur inserts the transcript into the focused application. A small
 click-through overlay shows recording, preview and completion; the tray opens
