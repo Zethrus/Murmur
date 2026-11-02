@@ -44,7 +44,9 @@ jobs:
         run: |
           set -euo pipefail
           cd release-assets
-          find . -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs -d '\n' sha256sum > SHA256SUMS
+          find . -type f ! -name SHA256SUMS -printf '%P\n' | sort \
+            | xargs -d '\n' sha256sum > "$RUNNER_TEMP/SHA256SUMS"
+          cp "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
           cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
