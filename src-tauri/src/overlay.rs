@@ -5,7 +5,6 @@ use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition};
 
 pub fn apply(app: &AppHandle, prefs: &Overlay) -> Result<()> {
     let window = app.get_webview_window("overlay").context("Overlay window missing")?;
-    window.set_ignore_cursor_events(true).context("Make overlay click-through")?;
     window.set_size(LogicalSize::new(560.0 * prefs.scale, 130.0 * prefs.scale)).context("Scale overlay window")?;
     if let Some(monitor) = window.primary_monitor().context("Get primary monitor")? {
         let area = monitor.work_area();
@@ -21,10 +20,16 @@ pub fn apply(app: &AppHandle, prefs: &Overlay) -> Result<()> {
             };
         window.set_position(PhysicalPosition::new(x as i32, y as i32)).context("Position overlay")?;
     }
-    if !prefs.enabled {
-        window.hide().context("Hide disabled overlay")?;
-    } else if !prefs.idle_hide {
-        window.show().context("Show idle overlay")?;
+    if !prefs.enabled || prefs.idle_hide {
+        window.hide().context("Hide idle overlay")?;
+        return Ok(());
+    }
+    // GTK only has a GdkWindow after the widget is realized, and tao panics (not Result) when
+    // asked to shape an unrealized window: show first, then make it click-through.
+    window.show().context("Show idle overlay")?;
+    if let Err(error) = window.set_ignore_cursor_events(true) {
+        tracing::warn!(%error, "Overlay click-through unavailable; hiding it");
+        window.hide().context("Hide unsupported overlay")?;
     }
     Ok(())
 }
@@ -32,11 +37,11 @@ pub fn state(app: &AppHandle, state: &str, prefs: &Overlay) -> Result<()> {
     app.emit("state", json!({"state":state})).context("Emit state")?;
     if prefs.enabled {
         if let Some(window) = app.get_webview_window("overlay") {
+            // Same ordering rule as apply(): realize (show) before shaping the window.
+            window.show().context("Show overlay")?;
             if let Err(error) = window.set_ignore_cursor_events(true) {
                 tracing::warn!(%error, "Overlay click-through unavailable; keeping it hidden");
                 window.hide().context("Hide unsupported overlay")?;
-            } else {
-                window.show().context("Show overlay")?;
             }
         }
     }

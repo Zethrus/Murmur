@@ -199,6 +199,62 @@ human-readable message.
    jump to Engine; hotkey press plays the error cue and sets error state with a clear message.
 11. **Single instance** — `tauri-plugin-single-instance`: second launch focuses Settings and exits.
 
+## Coding mode — primary use case: dictating prompts and code (vibecoding)
+
+Most dictation output goes into a chat box / editor prompt (Hermes, Cursor, Claude Code, VS Code,
+terminals). Speech-to-text mangles technical tokens unless explicitly handled, so coding mode is a
+first-class path with its own config, not a hidden extra.
+
+```toml
+[postproc]
+style = "auto"                 # prose | code | auto  (auto = resolve per focused app)
+code_apps = ["code", "cursor", "vscode", "code-oss", "jetbrains", "zed", "sublime",
+             "gnome-terminal", "konsole", "alacritty", "kitty", "wezterm", "windowsterminal", "mintty"]
+spoken_punctuation = true      # deterministic phrase → symbol map (see below)
+allow_newlines = false         # false → "newline"/"next line" emits a space, transcript stays single-line
+
+[general]
+hotkey_code = ""               # optional second hotkey that forces code style regardless of app
+
+[injection]
+prefer_paste = true            # paste instead of typing for code style and long text
+```
+
+Rules:
+- **Spoken punctuation map** (case-insensitive, whole-word, longest phrase first, applied before
+  the replacement map): `comma` → `,` · `period`/`full stop` → `.` · `question mark` → `?` ·
+  `exclamation mark`/`exclamation point` → `!` · `colon` → `:` · `semicolon` → `;` ·
+  `open paren`/`open parenthesis`/`left paren` → `(` · `close paren`/`right paren` → `)` ·
+  `open bracket` → `[` · `close bracket` → `]` · `open brace` → `{` · `close brace` → `}` ·
+  `underscore` → `_` · `hyphen`/`dash` → `-` · `slash` → `/` · `backslash` → `\` · `dot` → `.` ·
+  `at sign` → `@` · `hash` → `#` · `asterisk` → `*` · `ampersand` → `&` · `pipe` → `|` ·
+  `equals` → `=` · `double equals` → `==` · `arrow` → ` -> ` · `fat arrow` → ` => ` ·
+  `percent` → `%` · `dollar sign` → `$` · `plus` → `+` · `less than` → `<` · `greater than` → `>` ·
+  `backtick` → `` ` `` · `quote` … `unquote` → wraps the enclosed words in `"` ·
+  `newline`/`next line` → `\n` when `allow_newlines` else a single space.
+  Symbol substitution inserts the symbol with the spacing a human would use: no space before
+  `, . : ; ) ] }`, one space after, no space around `_ / \ . @` when between word characters.
+- **Code style never** capitalises sentence starts, never removes fillers unless asked, never
+  reflows or "corrects" the sentence, and never rewrites a token containing `_ . / ( ) { } :: => < >`
+  or internal capitals. Trailing space is still added when `trailing_space` is true.
+- **Injection preference**: code style or `len(text) > 200` → clipboard paste (atomic, preserves
+  punctuation and newlines exactly, immune to dropped keystrokes in Electron apps); short prose →
+  type. `clipboard_only` still wins, and exclusions still apply.
+- **Terminal safety**: when the focused app is in `code_apps` and looks like a terminal, `\n` is
+  never injected (a newline would execute a line); multi-line prompts stay one paragraph.
+- **Dictionary** seeded with coding vocabulary that Whisper mishears, editable in Settings:
+  `Tauri, faster-whisper, CTranslate2, WebKitGTK, WebView2, serde, tokio, enigo, cpal, rodio,
+  Murmur, zethrus, Python, TypeScript, npm, cargo, git, stdin, stdout, JSON-RPC, hotkey, overlay,
+  systemd, Wayland, X11, pip, venv, regex, null, boolean` (trim to what is plausible; it only
+  biases the decoder via `initial_prompt`).
+- `[audio] max_utterance_s` default 90 — long prompts are normal for vibecoding. Toggle mode is
+  the recommended mode here (documented in README), silence auto-stop still applies.
+- README gains a "Vibecoding workflow" section: recommend `large-v3-turbo`, toggle mode, code style
+  auto-detect, overlay preview to catch misheard identifiers before they land, and the Esc cancel.
+- Tests required: punctuation map (spacing, longest-match, no false positives inside words),
+  quote/unquote pairing, newline gating, code-style non-capitalisation, style auto-resolution by
+  window class, and paste-vs-type selection (style, length, clipboard_only, exclusions).
+
 ## IPC surface (Tauri commands; all return `Result<_, String>`)
 
 `get_config`, `set_config(patch)`, `get_status` (state, model, device, compute, sidecar alive),
