@@ -30,24 +30,48 @@ export TMPDIR="$ROOT/.cache/tmp" PIP_CACHE_DIR="$ROOT/.cache/pip"
 # Make the artifact location deterministic even with an inherited Cargo target override.
 export CARGO_TARGET_DIR="$ROOT/src-tauri/target"
 mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
-printf '[1/5] Preparing engine/.venv (system site packages enabled)...\n'
-python3 -m venv --system-site-packages engine/.venv
-PYTHON="$ROOT/engine/.venv/bin/python"
-"$PYTHON" -c 'import sys; assert sys.prefix != sys.base_prefix'
-"$PYTHON" -m pip install -r engine/requirements.txt pyinstaller
-"$PYTHON" -c 'import faster_whisper, ctranslate2, numpy, huggingface_hub, PyInstaller'
+printf '[1/5] Installing the local engine runtime (venv + model inference)...\n'
+ENGINE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/murmur/engine"
+mkdir -p "$ENGINE_DIR"
+if [[ ! -x "$ENGINE_DIR/.venv/bin/python" ]]; then
+  python3 -m venv --system-site-packages "$ENGINE_DIR/.venv"
+fi
+PYTHON="$ENGINE_DIR/.venv/bin/python"
+"$PYTHON" -m pip install --upgrade pip >/dev/null
+"$PYTHON" -m pip install -r engine/requirements.txt
+"$PYTHON" -c 'import faster_whisper, ctranslate2, numpy, huggingface_hub'
+rm -rf "$ENGINE_DIR/murmur_engine"
+cp -r engine/murmur_engine "$ENGINE_DIR/murmur_engine"
 printf '[2/5] Installing locked frontend dependencies...\n'
 npm ci
 [[ -x node_modules/.bin/tauri ]] || { printf 'Tauri CLI missing after npm ci.\n' >&2; exit 1; }
-printf '[3/5] Freezing the engine (including installed NVIDIA runtimes)...\n'
-scripts/engine-sidecar.sh --build
+printf '[3/5] Writing the engine launcher (CUDA runtimes from the venv, no frozen bundle)...\n'
+SIDECAR="$ROOT/.cache/murmur-engine"
+mkdir -p "$ROOT/.cache"
+cat > "$SIDECAR" <<'LAUNCH'
+#!/usr/bin/env bash
+# Launches the engine from its installed venv so CUDA wheels are found without bundling ~1.6 GB.
+set -euo pipefail
+ROOT="${MURMUR_ENGINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/murmur/engine}"
+NV_LIBS=$(ls -d "$ROOT"/.venv/lib/python*/site-packages/nvidia/*/lib 2>/dev/null | paste -sd: - || true)
+if [[ -n "$NV_LIBS" ]]; then
+  export LD_LIBRARY_PATH="$NV_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+export HF_HUB_OFFLINE=0 HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
+cd "$ROOT"
+exec "$ROOT/.venv/bin/python" -m murmur_engine "$@"
+LAUNCH
+chmod 755 "$SIDECAR"
+bash -n "$SIDECAR"
 TARGET="$(rustc -vV | while IFS=' ' read -r key value; do
   [[ "$key" != host: ]] || printf '%s' "$value"
 done)"
 [[ -n "$TARGET" ]] || { printf 'Cannot determine Rust host target.\n' >&2; exit 1; }
-SIDECAR="$ROOT/src-tauri/binaries/murmur-engine-$TARGET"
-[[ -s "$SIDECAR" && -x "$SIDECAR" ]]
-"$PYTHON" -c 'import subprocess, sys; subprocess.run([sys.argv[1], "--help"], check=True, timeout=120)' "$SIDECAR"
+# tauri.conf declares externalBin, so the bundle needs a file with the target suffix; the launcher
+# is that file (a few hundred bytes) instead of a ~1.6 GB frozen interpreter.
+mkdir -p src-tauri/binaries
+cp "$SIDECAR" "src-tauri/binaries/murmur-engine-$TARGET"
+"$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'
 printf '[4/5] Building Murmur and Linux bundles...\n'
 # Tauri runs npm run build through beforeBuildCommand.
 npx tauri build

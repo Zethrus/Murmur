@@ -15,11 +15,11 @@
         "label": "settings",
         "title": "Murmur Settings",
         "url": "index.html",
-        "width": 900,
-        "height": 660,
+        "width": 1000,
+        "height": 780,
         "visible": false,
-        "minWidth": 700,
-        "minHeight": 500
+        "minWidth": 760,
+        "minHeight": 560
       },
       {
         "label": "overlay",

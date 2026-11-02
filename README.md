@@ -33,10 +33,12 @@ From the repository root:
 ~/.local/bin/murmur
 ```
 
-The installer creates/reuses `engine/.venv` with `--system-site-packages`, installs
-`engine/requirements.txt` and PyInstaller, runs `npm ci`, freezes the sidecar, then
-runs `npx tauri build` (which also builds the frontend). NVIDIA runtime wheels can
-make the download and frozen engine large; allow several GB of free build space.
+The installer builds the Python engine in place at `~/.local/share/murmur/engine`
+(a venv from `engine/requirements.txt`, including the CUDA wheels so GPU inference
+works on NVIDIA hardware), runs `npm ci`, then `npx tauri build` (which also builds
+the frontend). Linux does **not** ship a frozen interpreter: `murmur-engine` is a small
+launcher that execs the venv with the CUDA libraries on `LD_LIBRARY_PATH`, which keeps
+the install ~30 MB instead of ~1.6 GB. Allow a few GB of build space for the toolchain.
 It fails on missing prerequisites or build/copy verification errors. It does not
 install system packages, fetch models, launch the app, or elevate privileges.
 
@@ -46,7 +48,8 @@ Installed layout (default XDG directories):
 | --- | --- |
 | `~/.local/bin/murmur` | Launcher; add `~/.local/bin` to PATH if needed |
 | `~/.local/share/murmur/bin/murmur` | App binary |
-| `~/.local/share/murmur/bin/murmur-engine` | Required adjacent frozen sidecar |
+| `~/.local/share/murmur/bin/murmur-engine` | Launcher that runs the engine venv (CUDA-aware) |
+| `~/.local/share/murmur/engine/.venv` | Local inference runtime (faster-whisper + CUDA wheels) |
 | `~/.local/share/murmur/icons/<size>/murmur.png` | Private icon copies |
 | `~/.local/share/icons/hicolor/*/apps/murmur.png` | Desktop-theme icons |
 | `~/.local/share/applications/murmur.desktop` | Application-menu entry |
@@ -92,9 +95,9 @@ npm run tauri dev                # desktop app; source Python engine from the ve
 For a release build without installing into your home directory:
 
 ```sh
-scripts/build-linux.sh          # frozen sidecar + app + deb; AppImage best-effort
-# Keep the engine beside the raw release binary for manual execution:
-cp engine/dist/murmur-engine src-tauri/target/release/murmur-engine
+scripts/build-linux.sh          # sidecar launcher + app + deb; AppImage best-effort
+# Keep the engine launcher beside the raw release binary for manual execution:
+cp .cache/murmur-engine src-tauri/target/release/murmur-engine
 src-tauri/target/release/murmur
 ```
 
@@ -270,6 +273,11 @@ These are measured results for that clip, not general latency guarantees or
 Windows measurements. Key-to-text is post-recording turnaround, not the time
 spent speaking. Model loading, model size, hardware and injection method affect
 latency; the first inference can be slower while the engine loads the model.
+
+Memory (measured, idle with `distil-small.en` loaded): app process **203 MB**
+(settings + overlay webviews), engine **779 MB** with the CUDA context resident
+(CTranslate2 + cuDNN + model); CPU-only runs omit the CUDA context and are
+noticeably smaller. Memory scales with model size, not utterance length.
 
 ## Troubleshooting / QA
 

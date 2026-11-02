@@ -12,10 +12,13 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 if [[ "${1:-}" == --build ]]; then
   cd "$ROOT/engine"
+  # CUDA bundling is opt-in: cuDNN+cuBLAS add ~1.4 GB to a onefile binary and slow every launch.
   NV_ARGS=()
-  for pkg in nvidia.cudnn nvidia.cublas nvidia.cuda_nvrtc; do
-    if "$PYTHON" -c "import $pkg" >/dev/null 2>&1; then NV_ARGS+=(--collect-all "$pkg"); fi
-  done
+  if [[ "${2:-}" == --cuda ]]; then
+    for pkg in nvidia.cudnn nvidia.cublas nvidia.cuda_nvrtc; do
+      if "$PYTHON" -c "import $pkg" >/dev/null 2>&1; then NV_ARGS+=(--collect-all "$pkg"); fi
+    done
+  fi
   "$PYTHON" -m PyInstaller --noconfirm --clean --onefile --name murmur-engine \
     --paths . --runtime-hook runtime_hook_cuda.py "${NV_ARGS[@]}" \
     --collect-all faster_whisper --collect-all ctranslate2 \
