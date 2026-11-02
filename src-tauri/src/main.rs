@@ -187,6 +187,7 @@ fn main() {
                 if let Some(state) = handle.try_state::<app::AppState>() {
                     state.join_shutdown();
                 }
+                inject::stop_helper();
             }
             _ => {}
         }),

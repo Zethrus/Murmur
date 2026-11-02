@@ -260,12 +260,12 @@ destination applications and filesystem backups may independently retain text.
 
 ## Performance
 
-Measured on Linux with an **11.0 s clip**, model **distil-small.en**:
+Measured on Linux with an **11.0 s clip** (78 characters of transcript), model **distil-small.en**:
 
 | Platform / device | Compute type | Inference | Key-to-text | VRAM |
 | --- | --- | --- | --- | --- |
-| Linux / GPU RTX 4060 | int8_float16 | 117 ms | 134 ms | 359 MiB |
-| Linux / CPU | int8 | 1505 ms | 2926 ms | — |
+| Linux / GPU RTX 4060 | int8_float16 | 103-124 ms | 1.5 s | 359 MiB |
+| Linux / CPU | int8 | 1505 ms | 2.9 s | — |
 | Windows / GPU RTX 4060 | int8_float16 | Pending measurement | Pending measurement | Pending measurement |
 | Windows / CPU | int8 | Pending measurement | Pending measurement | — |
 
@@ -273,6 +273,12 @@ These are measured results for that clip, not general latency guarantees or
 Windows measurements. Key-to-text is post-recording turnaround, not the time
 spent speaking. Model loading, model size, hardware and injection method affect
 latency; the first inference can be slower while the engine loads the model.
+
+On Linux the transcript is typed with real XTEST keystrokes (~6 ms per
+character), which dominates key-to-text: 78 characters take roughly 0.5 s to
+type, plus a short wait for the hotkey chord to be released. Speech recognition
+itself is ~0.1 s on the GPU. A clipboard-paste path exists for long transcripts
+but is not the default because synthetic paste chords are unreliable on X11.
 
 Memory (measured, idle with `distil-small.en` loaded): app process **203 MB**
 (settings + overlay webviews), engine **779 MB** with the CUDA context resident
@@ -294,6 +300,14 @@ noticeably smaller. Memory scales with model size, not utterance length.
   the venv imports. For extra diagnostics, quit and launch with `MURMUR_LOG=debug`.
   Frozen onefile builds need writable temporary storage and permission to execute
   extracted libraries; restrictive/noexec temp mounts can prevent startup.
+- **X11 typing drops or mangles the first word:** the transcript is typed by a
+  long-lived helper process (`XDG_RUNTIME_DIR/murmur-inject.*`) that waits for the
+  hotkey chord to be physically released before typing. If words are lost, check
+  that no synthetic modifier release is being sent (fake Ctrl/Alt key-ups
+  desynchronise the global hotkey grab, after which chords are swallowed silently),
+  that the typing delay stays at 6 ms or more per character (GTK drops characters
+  below that), and that only one Murmur instance owns the hotkey. The helper exits
+  with the app; a stale `murmur-inject.pid` can be deleted after quitting.
 - **CUDA fallback:** use Device Auto / Compute Auto for CUDA `int8_float16` or CPU
   `int8`. Auto sticks to CPU for that engine process if CUDA loading/inference
   fails; restart after fixing compatible drivers/runtime libraries. Forced CUDA

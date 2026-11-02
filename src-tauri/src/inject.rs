@@ -115,6 +115,17 @@ fn release_modifiers() {
         thread::sleep(Duration::from_millis(20));
     }
 }
+/// Poll (never synthesise) until Control/Alt are released: a half-released hold chord turns the
+/// opening words into menu accelerators. Bounded at 600 ms so a stuck modifier cannot stall typing.
+#[cfg(target_os = "linux")]
+fn wait_for_modifiers_released() {
+    for _ in 0..30 {
+        if !modifiers_held() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
 /// Long-lived injection helper.
 ///
 /// Spawning `xdotool` per utterance from the GTK process loses the opening token of the transcript
@@ -133,6 +144,7 @@ mod helper {
         fifo: PathBuf,
         payload: PathBuf,
         pid: PathBuf,
+        done: PathBuf,
     }
     fn paths() -> Result<Paths> {
         let dir = std::env::var_os("XDG_RUNTIME_DIR")
@@ -142,6 +154,7 @@ mod helper {
             fifo: dir.join("murmur-inject.fifo"),
             payload: dir.join("murmur-inject.txt"),
             pid: dir.join("murmur-inject.pid"),
+            done: dir.join("murmur-inject.done"),
         })
     }
     fn alive(pid: &Path) -> bool {
@@ -166,9 +179,12 @@ mod helper {
         }
         // SIGUSR1 is the trigger: the trap types whatever the payload file holds.
         let script = format!(
-            "echo $$ > {pid}; trap 'xdotool type --delay 6 \"$(cat {payload})\"' USR1; while :; do sleep 0.25; done",
+            "echo $$ > {pid}; trap 'sleep 0.25; xdotool type --delay 6 \"$(cat {payload})\"; : > {done}' USR1; \
+             while kill -0 {owner} 2>/dev/null; do sleep 0.25; done",
+            owner = std::process::id(),
             pid = paths.pid.display(),
-            payload = paths.payload.display()
+            payload = paths.payload.display(),
+            done = paths.done.display()
         );
         Command::new("setsid")
             .arg("sh")
@@ -191,6 +207,7 @@ mod helper {
     pub fn submit(text: &str) -> Result<()> {
         let paths = paths()?;
         ensure_running(&paths)?;
+        let _ = fs::remove_file(&paths.done);
         let staged = paths.payload.with_extension("staged");
         fs::write(&staged, text).context("Stage transcript for the helper")?;
         fs::rename(&staged, &paths.payload).context("Publish transcript for the helper")?;
@@ -210,16 +227,41 @@ mod helper {
             bail!("kill -USR1 {pid} failed");
         }
         // Typing runs at ~6 ms per character; give the helper room to drain the payload.
-        let estimate = 150 + text.chars().count() as u64 * 12;
-        tracing::info!(estimate, "helper: waiting for typing to finish");
-        thread::sleep(Duration::from_millis(estimate.min(2500)));
-        Ok(())
+        // Wait for the helper's completion marker instead of guessing how long typing takes.
+        let budget = 300 + text.chars().count() as u64 * 20;
+        for _ in 0..(budget / 10) {
+            if paths.done.exists() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        bail!("injection helper timed out after {budget} ms")
     }
 }
+/// Stop the injection helper on exit so no orphaned process can type into the session.
+#[cfg(target_os = "linux")]
+pub fn stop_helper() {
+    let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return;
+    };
+    let runtime = std::path::PathBuf::from(dir);
+    if let Ok(raw) = std::fs::read_to_string(runtime.join("murmur-inject.pid")) {
+        let pid = raw.trim().to_owned();
+        if !pid.is_empty() {
+            let _ = Command::new("kill").arg(&pid).status();
+        }
+    }
+    let _ = std::fs::remove_file(runtime.join("murmur-inject.pid"));
+}
+#[cfg(not(target_os = "linux"))]
+pub fn stop_helper() {}
 /// Type the transcript through the long-lived helper; fall back to a direct call if it is missing.
 #[cfg(target_os = "linux")]
 fn xdotool_type(text: &str, _class: &str) -> Result<()> {
-    release_modifiers();
+    // Note: never synthesise modifier releases here. Fake Control/Alt key-ups during a hold-mode
+    // cycle desynchronise the global hotkey grab, after which the chord is swallowed and ignored.
+    // Polling is safe: it only observes.
+    wait_for_modifiers_released();
     match helper::submit(text) {
         Ok(()) => return Ok(()),
         Err(error) => tracing::warn!(%error, "Injection helper unavailable; typing directly"),

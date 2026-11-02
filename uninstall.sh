@@ -14,4 +14,9 @@ esac
 }
 command -v python3 >/dev/null || { printf 'Python 3 is required to uninstall safely.\n' >&2; exit 1; }
 printf 'Removing user installation. Quit Murmur first so it cannot recreate data.\n'
+RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if [[ -s "$RUNTIME/murmur-inject.pid" ]]; then
+  kill "$(cat "$RUNTIME/murmur-inject.pid")" 2>/dev/null || true
+fi
+rm -f "$RUNTIME"/murmur-inject.fifo "$RUNTIME"/murmur-inject.txt "$RUNTIME"/murmur-inject.pid "$RUNTIME"/murmur-inject.done
 python3 "$ROOT/scripts/linux-user-install.py" uninstall "$@"
