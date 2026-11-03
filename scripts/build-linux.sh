@@ -2,6 +2,8 @@
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# Keep Cargo and the audit bound to the same absolute target directory.
+export CARGO_TARGET_DIR="$(realpath -m -- "${CARGO_TARGET_DIR:-$ROOT/src-tauri/target}")"
 export TMPDIR="$ROOT/.cache/tmp" PIP_CACHE_DIR="$ROOT/.cache/pip"
 mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
@@ -35,7 +37,7 @@ npm run build
 scripts/engine-sidecar.sh --build
 # Use the project-pinned Tauri CLI; no global cargo-tauri install required.
 npx tauri build --bundles deb
-python3 scripts/audit-llama-cpu.py src-tauri/target/release
+python3 scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release" --artifact "$CARGO_TARGET_DIR/release/murmur"
 if ! npx tauri bundle --bundles appimage; then
   printf '%s\n' 'Optional AppImage bundling failed; the binary and .deb remain available.' >&2
 fi

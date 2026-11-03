@@ -188,12 +188,14 @@ impl Controller {
         let mut delivered = None;
         if !text.is_empty() {
             // Click-through only while keystrokes/paste are in flight.
-            overlay::set_busy(&state.app, true);
+            overlay::set_busy(&state.app, true)?;
             state.enhance.publish(state);
             let injected = self
                 .injector
                 .inject(&text, &self.config.injection, &focused, style);
-            overlay::set_busy(&state.app, false);
+            if let Err(error) = overlay::set_busy(&state.app, false) {
+                tracing::warn!(%error, "Restore overlay cursor handling");
+            }
             state.enhance.publish(state);
             let path = injected?;
             delivered = Some(path);

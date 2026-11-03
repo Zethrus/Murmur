@@ -72,27 +72,51 @@ def linked_cache(target, artifact):
     return cache
 
 
+def audit_flags(text, origin, seen):
+    # Compiler response files are relative to the generated build directory (or the
+    # flags file itself for standalone fixtures). A missing/unreadable file is unsafe.
+    for match in re.finditer(r'(?<![\w@])@(?:"([^"]+)"|([^\s"\';]+))', text):
+        name = match.group(1) or match.group(2)
+        paths = [origin.parent / name, seen[0] / name]
+        response = next((p.resolve() for p in paths if p.is_file()), None)
+        if response is None or response in seen[1]:
+            raise ValueError(f"{origin}: unresolved or recursive response file @{name}")
+        seen[1].add(response)
+        audit_flags(response.read_text(), response, seen)
+        seen[1].remove(response)
+    # Clang's frontend features may bypass CMake GGML options and -m switches.
+    for match in re.finditer(r'(?:-Xclang\s+)?-target-feature\s+(?:-Xclang\s+)?([+-][\w.-]+)', text):
+        if match.group(1).lower() not in ('+sse', '+sse2') and not match.group(1).startswith('-'):
+            raise ValueError(f"{origin}: unsupported CPU flag {match.group(0)}")
+    stripped = re.sub(r'(?:-Xclang\s+)?-target-feature\s+(?:-Xclang\s+)?[+-][\w.-]+', '', text)
+    if re.search(r'(?<![\w-])(?:-Xclang|-target-feature|-mattr=|-target-cpu=|/clang:)', stripped):
+        raise ValueError(f"{origin}: unsupported compiler feature arguments")
+    for match in CPU_SWITCH.finditer(text):
+        flag = match.group(0).lower()
+        if flag.startswith('-m') and not flag.startswith(('-march=', '-mcpu=')):
+            if flag[2:] in ALLOWED_M or flag.startswith('-mtune='):
+                continue
+        elif flag == '-march=x86-64' or flag == '/arch:sse2':
+            continue
+        raise ValueError(f"{origin}: unsupported CPU flag {flag}")
+
+
 def audit_cache(cache, windows=False):
-    values = dict(line.split(":BOOL=", 1) for line in cache.read_text().splitlines() if ":BOOL=" in line)
+    lines = cache.read_text().splitlines()
+    values = dict(line.split(":BOOL=", 1) for line in lines if ":BOOL=" in line)
     for name in BASELINE_OFF:
         if values.get(name) != "OFF":
             raise ValueError(f"{cache}: {name} must be OFF, got {values.get(name)!r}")
-    files = list(cache.parent.rglob("flags.make"))
-    if not files:
-        files = list(cache.parent.rglob("compile_commands.json"))
-    if not files:
-        files = list(cache.parent.rglob("build.ninja"))
+    files = [p for pattern in ('flags.make', 'compile_commands.json', 'build.ninja')
+             for p in cache.parent.rglob(pattern)]
     if not files:
         raise ValueError(f"{cache}: no generated compiler flags to audit (Windows baseline unverified)")
+    seen = (cache.parent, set())
     for file in files:
-        for match in CPU_SWITCH.finditer(file.read_text(errors="replace")):
-            flag = match.group(0).lower()
-            if flag.startswith("-m") and not flag.startswith(("-march=", "-mcpu=")):
-                if flag[2:] in ALLOWED_M or flag.startswith("-mtune="):
-                    continue
-            elif flag == "-march=x86-64" or flag == "/arch:sse2":
-                continue
-            raise ValueError(f"{file}: unsupported CPU flag {flag}")
+        audit_flags(file.read_text(), file, seen)
+    for line in lines:
+        if re.match(r'CMAKE_(?:C|CXX)_FLAGS(?:_[A-Z_]+)?:STRING=', line):
+            audit_flags(line.split('=', 1)[1], cache, seen)
     return len(files)
 
 

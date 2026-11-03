@@ -521,11 +521,26 @@ impl Enhance {
         })?;
         let mut previous = {
             let mut operation = lock(&self.operation);
-            if self.removing.swap(true, Ordering::AcqRel) {
-                return Err(EnhanceError::new(
-                    ErrorCode::Busy,
-                    "Model removal is running",
-                ));
+            if self.removing.load(Ordering::Acquire) {
+                // A timed-out download retains this reservation until its thread has
+                // terminated and a retry explicitly acknowledges that termination.
+                let finished = operation
+                    .as_ref()
+                    .and_then(|op| op.thread.as_ref())
+                    .is_some_and(JoinHandle::is_finished);
+                if !finished {
+                    return Err(EnhanceError::new(
+                        ErrorCode::Busy,
+                        "Model removal is running",
+                    ));
+                }
+                if let Some(mut op) = operation.take() {
+                    if let Some(thread) = op.thread.take() {
+                        let _ = thread.join();
+                    }
+                }
+            } else {
+                self.removing.store(true, Ordering::Release);
             }
             self.clear_enable_intent();
             let previous = operation.take();
@@ -534,14 +549,16 @@ impl Enhance {
             }
             previous
         };
-        // Reservation remains set on every exit, including timeout and filesystem failure.
-        struct Release<'a>(&'a AtomicBool);
+        // A timed-out download must keep the reservation and its JoinHandle alive.
+        struct Release<'a>(&'a AtomicBool, bool);
         impl Drop for Release<'_> {
             fn drop(&mut self) {
-                self.0.store(false, Ordering::Release);
+                if self.1 {
+                    self.0.store(false, Ordering::Release);
+                }
             }
         }
-        let _release = Release(&self.removing);
+        let mut release = Release(&self.removing, true);
         self.shared.update(|s| s.install = InstallState::Removing);
         if let Some(op) = previous.as_mut() {
             if let Some(thread) = op.thread.as_ref() {
@@ -558,6 +575,10 @@ impl Enhance {
                         s.install = catalog::local_state(entry, &self.root);
                         s.error = Some(error.clone());
                     });
+                    // Restore the handle before exposing the timeout; no competing
+                    // install or removal can pass the still-set reservation.
+                    *lock(&self.operation) = previous.take();
+                    release.1 = false;
                     return Err(error);
                 }
             }

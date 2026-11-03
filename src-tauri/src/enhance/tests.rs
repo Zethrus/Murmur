@@ -680,6 +680,84 @@ fn remove_reservation_does_not_hold_operation_lock_during_wait() {
 }
 
 #[test]
+fn removal_timeout_retains_live_download_reservation() {
+    let root = std::env::temp_dir().join(format!("murmur-remove-timeout-{}", std::process::id()));
+    let service = Arc::new(
+        super::Enhance::new(
+            root,
+            super::catalog::DEFAULT_MODEL_ID,
+            1,
+            Box::new(super::backend::Unavailable),
+            Arc::new(|_, _| {}),
+            Arc::new(|_| {}),
+        )
+        .unwrap(),
+    );
+    let (release, wait) = mpsc::channel::<()>();
+    let parked = std::thread::spawn(move || {
+        let _ = wait.recv();
+    });
+    *service.operation.lock().unwrap() = Some(super::Operation {
+        id: service.next_id(),
+        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        thread: Some(parked),
+    });
+    let result = service.remove(super::catalog::DEFAULT_MODEL_ID);
+    assert_eq!(result.unwrap_err().code, ErrorCode::RemoveFailed);
+    assert!(service.removing());
+    assert!(
+        service
+            .operation
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .thread
+            .as_ref()
+            .unwrap()
+            .is_finished()
+            == false
+    );
+    assert_eq!(
+        service
+            .remove(super::catalog::DEFAULT_MODEL_ID)
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    assert_eq!(
+        service
+            .install(
+                super::catalog::DEFAULT_MODEL_ID,
+                false,
+                super::InstallHooks {
+                    enable: Box::new(|_, _| {})
+                }
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !service
+        .operation
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .thread
+        .as_ref()
+        .unwrap()
+        .is_finished()
+        && Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    assert!(service.remove(super::catalog::DEFAULT_MODEL_ID).is_ok());
+}
+
+#[test]
 fn formatted_delivery_obeys_output_cap() {
     let now = Instant::now();
     let mut s = Session::default();

@@ -12,7 +12,45 @@ audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
 
 
+# Explicit fixture requirements, independent of the auditor's own BASELINE_OFF list.
+REQUIRED_OFF = ('GGML_NATIVE', 'GGML_AVX', 'GGML_AVX2', 'GGML_AVX512',
+                'GGML_AVX512_BF16', 'GGML_AVX512_VBMI', 'GGML_AVX512_VNNI',
+                'GGML_AVX_VNNI', 'GGML_FMA', 'GGML_F16C', 'GGML_BMI2',
+                'GGML_SSE42', 'GGML_CPU_ALL_VARIANTS', 'GGML_AMX_BF16',
+                'GGML_AMX_INT8', 'GGML_AMX_TILE')
+
 class AuditTests(unittest.TestCase):
+    def test_effective_compiler_arguments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache.write_text(''.join(f'{name}:BOOL=OFF\n' for name in REQUIRED_OFF))
+            flags = cache.parent / 'flags.make'
+            (cache.parent / 'extra.rsp').write_text('-mavx2')
+            for value in ('@extra.rsp', 'CXX_FLAGS=@extra.rsp', '"@extra.rsp"',
+                          '-Xclang -target-feature -Xclang +avx2'):
+                with self.subTest(value=value):
+                    flags.write_text('CXX_FLAGS = ' + value)
+                    with self.assertRaises(ValueError):
+                        audit.audit_cache(cache)
+            flags.write_text('CXX_FLAGS = @missing.rsp')
+            with self.assertRaisesRegex(ValueError, 'unresolved'):
+                audit.audit_cache(cache)
+            (cache.parent / 'extra.rsp').write_text('@nested.rsp')
+            (cache.parent / 'nested.rsp').write_text('-mavx2')
+            flags.write_text('CXX_FLAGS = @extra.rsp')
+            with self.assertRaisesRegex(ValueError, 'unsupported CPU flag'):
+                audit.audit_cache(cache)
+
+    def test_independent_baseline_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            (cache.parent / 'flags.make').write_text('CXX_FLAGS = -m64 -msse2')
+            for missing in REQUIRED_OFF:
+                with self.subTest(missing=missing):
+                    cache.write_text(''.join(f'{name}:BOOL=OFF\n' for name in REQUIRED_OFF if name != missing))
+                    with self.assertRaises(ValueError):
+                        audit.audit_cache(cache)
+
     def test_unsupported_instruction_families(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = pathlib.Path(tmp) / 'CMakeCache.txt'

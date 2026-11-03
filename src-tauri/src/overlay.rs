@@ -189,6 +189,24 @@ fn queue_visibility<E>(
     enqueue(Box::new(action))
 }
 
+// Only the worker waits; the main executor sends after applying native cursor state.
+fn queue_busy_ack<E>(
+    enqueue: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::result::Result<(), E>,
+    action: impl FnOnce() -> Result<()> + Send + 'static,
+) -> Result<()>
+where
+    E: std::fmt::Display,
+{
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    queue_visibility(enqueue, move || {
+        let _ = send.send(action());
+    })
+    .map_err(|e| anyhow::anyhow!("Queue overlay click-through: {e}"))?;
+    receive
+        .recv()
+        .context("Overlay click-through acknowledgement")?
+}
+
 fn visibility_on_main(
     app: &AppHandle,
     action: impl FnOnce(AppHandle) + Send + 'static,
@@ -371,23 +389,55 @@ fn hide_main(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 /// Click-through while text is being injected so a stray click cannot land on the overlay.
-pub fn set_busy(app: &AppHandle, busy: bool) {
+pub fn set_busy(app: &AppHandle, busy: bool) -> Result<()> {
     runtime().busy = busy;
-    let _ = visibility_on_main(app, move |app| {
-        if let Some(window) = app.get_webview_window("overlay") {
-            if window.is_visible().unwrap_or(false) {
+    let handle = app.clone();
+    let action = move || {
+        if let Some(window) = handle.get_webview_window("overlay") {
+            if window.is_visible().context("Check overlay visibility")? {
                 if let Err(error) = window.set_ignore_cursor_events(busy) {
-                    tracing::warn!(%error, "Overlay cursor handling unavailable");
+                    tracing::warn!(%error, "Overlay cursor handling unavailable; hiding it");
+                    window.hide().context("Hide unsupported overlay")?;
                 }
             }
         }
-    });
+        Ok(())
+    };
+    if busy {
+        // Called by the controller worker, never by the UI thread. No mutex is held here.
+        let result = queue_busy_ack(|task| app.run_on_main_thread(move || task()), action);
+        if result.is_err() {
+            runtime().busy = false;
+        }
+        result
+    } else {
+        visibility_on_main(app, move |_| {
+            if let Err(error) = action() {
+                tracing::warn!(%error, "Restore overlay cursor handling");
+            }
+        })
+    }
 }
 #[cfg(test)]
 mod visibility_tests {
     use super::queue_visibility;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn stalled_main_executor_blocks_injection_until_click_through_ack() {
+        let (queue, main) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let (ready, injection) = mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            super::queue_busy_ack(|task| queue.send(task), || Ok(())).unwrap();
+            ready.send(()).unwrap(); // injection may start only after native update
+        });
+        let task = main.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(injection.recv_timeout(Duration::from_millis(100)).is_err());
+        task();
+        injection.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+    }
 
     #[test]
     fn queued_window_query_does_not_block_worker_or_second_dispatch() {

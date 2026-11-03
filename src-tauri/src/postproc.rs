@@ -99,7 +99,7 @@ fn shield_markers(text: &str) -> (String, Vec<(char, char)>) {
 const DUPLICATE_EXCEPTIONS: &[&str] = &["had", "that", "can", "do", "very"];
 /// Deduplication alone shields quotes; punctuation, fillers and configured replacements
 /// continue to use the legacy dictation pipeline. Newline markers survive until formatting.
-fn remove_duplicates(text: &str) -> String {
+fn remove_duplicates(text: &str, saved: &[String]) -> String {
     let mut out: Vec<&str> = Vec::new();
     let mut quoted: Option<char> = None;
     let mut code = false;
@@ -117,12 +117,21 @@ fn remove_duplicates(text: &str) -> String {
         }
         // Inspect the entire token, including punctuation-wrapped opening quotes. An
         // apostrophe between letters is a contraction, not a quote delimiter.
-        let chars: Vec<char> = token.chars().collect();
+        // A shielded token may contain an opening/closing quote. Inspect it for
+        // delimiters, but never use its restored words for duplicate comparison.
+        let inspect = token
+            .strip_prefix('\u{e000}')
+            .and_then(|t| t.strip_suffix('\u{e001}'))
+            .and_then(|index| index.parse::<usize>().ok())
+            .and_then(|index| saved.get(index))
+            .map(String::as_str)
+            .unwrap_or(token);
+        let chars: Vec<char> = inspect.chars().collect();
         for (i, &ch) in chars.iter().enumerate() {
             if ch == '`' {
                 code = !code;
             } else if !code {
-                let contraction = ch == '\''
+                let contraction = matches!(ch, '\'' | '’')
                     && i > 0
                     && i + 1 < chars.len()
                     && chars[i - 1].is_alphabetic()
@@ -150,7 +159,7 @@ fn remove_duplicates(text: &str) -> String {
                 }
             }
         }
-        previous_word = if quoted.is_none() && !code && word && !duplicate {
+        previous_word = if quoted.is_none() && !code && word {
             Some(token)
         } else {
             None
@@ -302,7 +311,11 @@ fn clean_inner(text: &str, cfg: &Config, style: Style) -> String {
     if style == Style::Prose {
         text = tidy_punctuation(&text);
     }
-    // Single pass: restored originals are never rescanned for markers.
+    if cfg.enhance.auto_rewrite && cfg.postproc.remove_duplicate_words && style == Style::Prose {
+        text = remove_duplicates(&text, &saved);
+    }
+    // Restore only after deduplication: protected tokens and replacement values
+    // remain opaque even when they contain repeated words.
     let marker = regex::Regex::new("\u{e000}([0-9]+)\u{e001}").expect("static marker regex");
     text = marker
         .replace_all(&text, |cap: &Captures<'_>| {
@@ -314,9 +327,6 @@ fn clean_inner(text: &str, cfg: &Config, style: Style) -> String {
                 .unwrap_or_default()
         })
         .into_owned();
-    if cfg.enhance.auto_rewrite && cfg.postproc.remove_duplicate_words && style == Style::Prose {
-        text = remove_duplicates(&text);
-    }
     if cfg.injection.capitalize && style == Style::Prose {
         let mut in_code = false;
         let mut sentence = true;
@@ -382,31 +392,43 @@ mod tests {
             "one newline two",
             "wait... really!!",
         ];
-        let mut configs = Vec::new();
-        configs.push(Config::default());
-        let mut configured = Config::default();
-        configured.injection.remove_fillers = true;
-        configured
-            .postproc
-            .replacements
-            .insert("please".into(), "kindly".into());
-        configs.push(configured);
-        for cfg in &configs {
-            assert!(!cfg.enhance.auto_rewrite);
-            for sample in samples {
-                for style in [Style::Prose, Style::Code] {
-                    let old_style = match style {
-                        Style::Prose => release::Style::Prose,
-                        Style::Code => release::Style::Code,
-                    };
-                    assert_eq!(
-                        process_style(sample, cfg, style),
-                        release::process_style(sample, cfg, old_style),
-                        "{sample:?} {style:?}"
-                    );
+        let mut comparisons = 0;
+        for switches in 0..32 {
+            for replacements in 0..3 {
+                let mut cfg = Config::default();
+                cfg.injection.remove_fillers = switches & 1 != 0;
+                cfg.postproc.spoken_punctuation = switches & 2 != 0;
+                cfg.injection.capitalize = switches & 4 != 0;
+                cfg.postproc.allow_newlines = switches & 8 != 0;
+                cfg.injection.trailing_space = switches & 16 != 0;
+                if replacements >= 1 {
+                    cfg.postproc
+                        .replacements
+                        .insert("please".into(), "kindly".into());
+                }
+                if replacements == 2 {
+                    cfg.postproc
+                        .replacements
+                        .insert("mur".into(), "Murmur".into());
+                }
+                assert!(!cfg.enhance.auto_rewrite);
+                for sample in samples {
+                    for style in [Style::Prose, Style::Code] {
+                        let old_style = match style {
+                            Style::Prose => release::Style::Prose,
+                            Style::Code => release::Style::Code,
+                        };
+                        assert_eq!(
+                            process_style(sample, &cfg, style),
+                            release::process_style(sample, &cfg, old_style),
+                            "{sample:?} {style:?} switches={switches} replacements={replacements}"
+                        );
+                        comparisons += 1;
+                    }
                 }
             }
         }
+        assert_eq!(comparisons, 2688);
     }
     #[test]
     fn dedup_boundaries_when_enabled() {
@@ -428,6 +450,21 @@ mod tests {
             process("say 'hello comma world'", &c),
             "Say 'hello, world' "
         );
+    }
+    #[test]
+    fn reviewer_dedup_protected_and_replacement_spans() {
+        let mut c = Config::default();
+        c.enhance.auto_rewrite = true;
+        assert_eq!(process("fooBar fooBar", &c), "fooBar fooBar ");
+        c.postproc
+            .replacements
+            .insert("alpha".into(), "go go".into());
+        assert_eq!(process("alpha", &c), "Go go ");
+        assert_eq!(
+            process("say ‘don’t go go now’", &c),
+            "Say ‘don’t go go now’ "
+        );
+        assert_eq!(process("the the the the release", &c), "The release ");
     }
     #[test]
     fn whitespace_and_sentences() {
