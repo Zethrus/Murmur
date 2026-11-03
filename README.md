@@ -338,13 +338,20 @@ VAD may return empty text. Do not confuse that probe with the measured clip abov
 
 ## CI, releases and design parity
 
-`linux-build.yml` uses Ubuntu 22.04, Node 22, Rust stable and a frozen engine;
-it uploads deb, AppImage, unsigned app/sidecar and a portable tarball.
-`windows-build.yml` uses Windows latest, Python 3.12, Node 22 and Rust stable;
-it uploads unsigned EXEs, NSIS installer and a portable zip. Cargo and npm are
-cached. `release.yml` builds both via reusable workflows on tags `v*`, then
-publishes with `softprops/action-gh-release` only after both builds succeed.
-No signing/notarization is configured. CI workflows have not been run as part of
-this documentation/installers change; published artifacts must be tested before
-claiming desktop compatibility. See [docs/parity](docs/parity/README.md) for the
-manual Linux/Windows acceptance matrix and screenshot protocol.
+`linux-build.yml` runs on a self-hosted Linux runner (labels from the
+`LINUX_RUNNER` repository variable, hosted `ubuntu-22.04` when unset), Node 22,
+Rust stable with an isolated `RUSTUP_HOME`/`CARGO_HOME`, and a frozen engine; it
+produces the deb, AppImage, unsigned app/sidecar pair and a portable tarball.
+`windows-build.yml` expects a Windows runner via `WINDOWS_RUNNER` (hosted
+`windows-latest` when unset) and produces unsigned EXEs, the NSIS installer and
+a portable zip; tag builds skip it when no Windows runner exists.
+`release.yml` is the only entry point for tags `v*`: each build job attaches its
+own assets to the release, then a final job verifies the asset set and attaches
+`SHA256SUMS`. Release publishing deliberately does not depend on Actions
+artifact storage, because that quota is small on this account.
+Fork pull requests never execute on the self-hosted runner. No signing or
+notarization is configured. The Linux release pipeline has been verified end to
+end (`v0.1.0`); Windows artefacts remain unbuilt until a Windows runner is
+registered, so desktop Windows compatibility is still unverified. See
+[docs/parity](docs/parity/README.md) for the manual Linux/Windows acceptance
+matrix and screenshot protocol.
