@@ -93,6 +93,11 @@ jobs:
       - run: npm run build
       - run: npm run test:ui
       - name: Test Rust including unavailable Enhance backend
+        env:
+          # Debug symbols from the test build are what fill a self-hosted runner's disk
+          # (13 GB against 7.5 GB for the whole release tree); the release build sets its own.
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_INCREMENTAL: '0'
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml
           cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
