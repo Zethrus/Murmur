@@ -3,7 +3,6 @@ name: Linux build
 on:
   push:
     branches: ['master', 'main']
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -97,6 +96,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            Unsigned builds. Windows runtime and GPU behavior remain unverified on real Windows hardware.
+            Portable archives include the required adjacent engine sidecar; keep the pair together.
+            Models are not bundled: install a model explicitly in Settings → Engine.
           files: .cache/artifacts/linux/*
           fail_on_unmatched_files: true
       - name: Upload build artifacts (best effort)
