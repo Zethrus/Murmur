@@ -40,7 +40,9 @@ export function enhanceCard(ctx: PageContext): HTMLElement {
 
   const install = async (enable: boolean): Promise<void> => {
     if (!model || downloading()) return; notice.textContent = ""; consent.hidden = true;
-    try { const {operation_id} = await call("install_enhance_model",{modelId:model.id,enableAfterInstall:enable});
+    try {
+      if (e.model !== model.id) await save({model:model.id});
+      const {operation_id} = await call("install_enhance_model",{modelId:model.id,enableAfterInstall:enable});
       if (!live) return;
       // Progress events may already have arrived for this operation; do not regress them.
       if (download?.operation_id !== operation_id) download = {operation_id,model_id:model.id,phase:"starting",received_bytes:0,total_bytes:model.size_bytes,error_code:null};
@@ -78,6 +80,7 @@ export function enhanceCard(ctx: PageContext): HTMLElement {
       st === "removing" ? "Removing…" : status?.message ?? (installed() ? "Installed" : "Not installed");
     actions.replaceChildren();
     const offline = !supported || !model || status?.backend_available === false;
+    manual.disabled = offline;
     if (downloading()) actions.append(button("Cancel download",cancel,"danger"));
     else if (installed()) { const r = button("Remove",remove,"quiet danger"); r.disabled = st === "removing"; actions.append(r); }
     else { const failed = download?.phase === "error" || download?.phase === "cancelled" || st === "error" || st === "corrupt";
@@ -93,7 +96,8 @@ export function enhanceCard(ctx: PageContext): HTMLElement {
 
   const adopt = (next: EnhanceStatus): void => {
     if (next.revision < statusRevision) return; statusRevision = next.revision; status = next; cache.status = next;
-    if (next.download && (!download || next.download.operation_id === download.operation_id || !ACTIVE_PHASES.has(download.phase))) { download = next.download; cache.download = download; }
+    if (next.download) { download = next.download; cache.download = download; }
+    else { download = undefined; cache.download = undefined; }
     if (model) { model = {...model,installed:next.installation_state === "installed"}; cache.model = model; }
   };
   const refresh = async (): Promise<void> => {
@@ -106,6 +110,7 @@ export function enhanceCard(ctx: PageContext): HTMLElement {
   ctx.subscribe("enhance-status",next=>{ adopt(next); paint(); });
   ctx.subscribe("enhance-download",event=>{
     // Only follow the operation this page started or rehydrated; ignore late events from older operations.
+    if (!status?.download && (status?.installation_state === "installed" || status?.installation_state === "removing") && ACTIVE_PHASES.has(event.phase)) return;
     if (download && event.operation_id !== download.operation_id && ACTIVE_PHASES.has(download.phase)) return;
     download = event; cache.download = event;
     if (event.phase === "complete" && model) { model = {...model,installed:true}; cache.model = model; }

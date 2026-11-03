@@ -293,6 +293,24 @@ mod tests {
     }
     #[test]
     fn qwen_non_thinking_serialization_snapshot() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../scripts/tests/enhance-prompt-fixture.json"
+        ))
+        .unwrap();
+        assert_eq!(SYSTEM, fixture["system"].as_str().unwrap());
+        assert_eq!(TASK, fixture["task"].as_str().unwrap());
+        assert_eq!(
+            Preset::Concise.suffix(),
+            fixture["concise"].as_str().unwrap()
+        );
+        assert_eq!(
+            Preset::Thorough.suffix(),
+            fixture["thorough"].as_str().unwrap()
+        );
+        assert_eq!(
+            Preset::Structured.suffix(),
+            fixture["structured"].as_str().unwrap()
+        );
         let prompt = build("how do I reset this", Preset::Concise, &[]).unwrap();
         let rendered = prompt.render();
         let expected = format!(
@@ -310,9 +328,7 @@ mod tests {
     fn preset_texts_are_distinct_and_exact() {
         assert!(Preset::Concise.suffix().starts_with("Be concise"));
         assert!(Preset::Thorough.suffix().starts_with("Be thorough"));
-        assert!(Preset::Structured
-            .suffix()
-            .starts_with("Be structured"));
+        assert!(Preset::Structured.suffix().starts_with("Be structured"));
         assert_eq!(Preset::parse("bogus"), Preset::Concise);
     }
     #[test]

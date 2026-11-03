@@ -133,12 +133,16 @@ fn oversized_views_shrink_and_stay_inside() {
 #[test]
 fn size_reports_are_validated_and_revisioned() {
     use crate::overlay::accept_size;
-    assert!(accept_size(f64::NAN, 10.0, 1_000).is_err());
-    assert!(accept_size(10.0, -1.0, 1_001).is_err());
-    let first = accept_size(5000.0, 10.0, 1_002).unwrap().unwrap();
+    assert!(accept_size(f64::NAN, 10.0, 1_000, "first").is_err());
+    assert!(accept_size(10.0, -1.0, 1_001, "first").is_err());
+    let first = accept_size(5000.0, 10.0, 1_002, "first").unwrap().unwrap();
     assert_eq!(first, (1200.0, 40.0));
     assert!(
-        accept_size(300.0, 300.0, 1_002).unwrap().is_none(),
+        accept_size(300.0, 300.0, 1_002, "first").unwrap().is_none(),
         "stale revision ignored"
+    );
+    assert_eq!(
+        accept_size(300.0, 300.0, 1, "reloaded").unwrap(),
+        Some((300.0, 300.0))
     );
 }

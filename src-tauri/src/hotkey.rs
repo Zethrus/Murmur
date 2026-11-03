@@ -97,8 +97,20 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
             let Ok(config) = state.config() else { return };
             let action = match purpose_of(&config, shortcut) {
                 // Enhance actions are press-only and independent of hold/toggle mode.
-                Some(Purpose::Rewrite) => down.then_some(Action::Rewrite),
-                Some(Purpose::Accept) => down.then_some(Action::AcceptCurrent),
+                Some(Purpose::Rewrite) if down => {
+                    if state
+                        .status()
+                        .is_ok_and(|s| matches!(s.state.as_str(), "listening" | "transcribing"))
+                    {
+                        None
+                    } else {
+                        Some(Action::Rewrite(state.enhance.shortcut_context()))
+                    }
+                }
+                Some(Purpose::Accept) if down => {
+                    Some(Action::AcceptCurrent(state.enhance.shortcut_suggestion()))
+                }
+                Some(Purpose::Rewrite | Purpose::Accept) => None,
                 Some(purpose) => {
                     if down && state.status().is_ok_and(|s| s.state == "transcribing") {
                         return;

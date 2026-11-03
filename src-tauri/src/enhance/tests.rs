@@ -102,6 +102,28 @@ impl Harness {
 }
 
 #[test]
+fn cancelled_before_submit_and_reverse_order_are_rejected() {
+    use std::sync::Barrier;
+    let h = harness("ordering");
+    let barrier = Arc::new(Barrier::new(2));
+    std::thread::scope(|scope| {
+        let gate = barrier.clone();
+        let worker = &h.worker;
+        let old = h.job(10, "old");
+        let submit = scope.spawn(move || {
+            gate.wait();
+            worker.submit(old)
+        });
+        h.worker.cancel(10);
+        barrier.wait();
+        assert!(!submit.join().unwrap());
+    });
+    assert!(h.worker.submit(h.job(12, "new")));
+    assert!(!h.worker.submit(h.job(11, "old")));
+    assert_eq!(h.finished().0, 12);
+}
+
+#[test]
 fn worker_success_and_lazy_load_once() {
     let h = harness("ok");
     h.worker.submit(h.job(1, "send the notes to alex"));
@@ -277,6 +299,7 @@ const OPEN: Gate = Gate {
     backend: true,
     overlay: true,
     dictating: false,
+    rewrite_code: false,
 };
 
 fn ready(session: &mut Session, request: u64, suggestion: u64) {
@@ -325,6 +348,85 @@ fn session_ready_accept_is_idempotent_and_stale_ids_rejected() {
         Err(RewriteStatus::Revealed)
     );
     assert_eq!(s.phase(), Phase::Ready);
+}
+
+#[test]
+fn acceptance_owner_keeps_reads_nonblocking_and_writes_once() {
+    use super::runtime::accept_with;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut initial = Session::default();
+    initial.begin_dictation();
+    initial.record_delivery(record(
+        1,
+        "hello world",
+        Style::Prose,
+        InjectionPath::Clipboard,
+    ));
+    ready(&mut initial, 10, 11);
+    let session = Arc::new(Mutex::new(initial));
+    let writes = Arc::new(AtomicUsize::new(0));
+    let (actions, receiver) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+    let owner = std::thread::spawn(move || {
+        while let Ok(action) = receiver.recv() {
+            action();
+        }
+    });
+    let (entered, copied) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let (results, replies) = mpsc::channel();
+    let s = session.clone();
+    let count = writes.clone();
+    let send = results.clone();
+    actions
+        .send(Box::new(move || {
+            let (reply, _) = accept_with(&s, Some(11), |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+                entered.send(()).unwrap();
+                wait.recv().unwrap();
+                Ok(())
+            });
+            send.send(reply).unwrap();
+        }))
+        .unwrap();
+    copied.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(
+        session.try_lock().is_ok(),
+        "snapshot must remain readable during clipboard I/O"
+    );
+    let s = session.clone();
+    let count = writes.clone();
+    let send = results.clone();
+    actions
+        .send(Box::new(move || {
+            let (reply, _) = accept_with(&s, Some(11), |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+            send.send(reply).unwrap();
+        }))
+        .unwrap();
+    let s = session.clone();
+    actions
+        .send(Box::new(move || {
+            s.lock().unwrap().begin_dictation();
+        }))
+        .unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        replies.recv_timeout(Duration::from_secs(1)).unwrap()["outcome"],
+        "copied"
+    );
+    assert_eq!(
+        replies.recv_timeout(Duration::from_secs(1)).unwrap()["outcome"],
+        "copied"
+    );
+    drop(actions);
+    owner.join().unwrap();
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        accept_with(&session, Some(11), |_| panic!("stale copy")).0["outcome"],
+        "stale"
+    );
 }
 
 #[test]
@@ -382,10 +484,21 @@ fn gating_rules() {
         s.check(Trigger::Manual, OPEN, now),
         Err(RewriteStatus::CodeStyle)
     );
-    let mut opted = record(2, "fn main", Style::Code, InjectionPath::Clipboard);
-    opted.config.enhance.rewrite_code = true;
-    s.record_delivery(opted);
-    assert!(s.check(Trigger::Manual, OPEN, now).is_ok());
+    s.record_delivery(record(2, "fn main", Style::Code, InjectionPath::Clipboard));
+    assert!(s
+        .check(
+            Trigger::Manual,
+            Gate {
+                rewrite_code: true,
+                ..OPEN
+            },
+            now
+        )
+        .is_ok());
+    assert_eq!(
+        s.check(Trigger::Manual, OPEN, now),
+        Err(RewriteStatus::CodeStyle)
+    );
     s.record_delivery(record(3, "hi there", Style::Prose, InjectionPath::Skip));
     assert_eq!(
         s.check(Trigger::Auto, OPEN, now),
@@ -471,7 +584,14 @@ fn unchanged_errors_and_cancel_outcomes() {
         4,
         now
     ));
-    assert_eq!(s.message.as_deref(), Some("Rewrite timed out"));
+    assert_eq!(s.phase(), Phase::Notice);
+    assert!(s
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("generation exceeded"));
+    assert!(s.holds_overlay());
+    assert!(!s.tick(now + Duration::from_secs(5)));
     s.check(Trigger::Manual, OPEN, now).unwrap();
     s.started(5, true, Trigger::Manual);
     assert_eq!(
@@ -497,6 +617,86 @@ fn expiry_clears_text_and_notices_time_out() {
     );
     assert!(s.tick(Instant::now() + super::session::NOTICE_TTL + Duration::from_secs(1)));
     assert_eq!(s.phase(), Phase::None);
+}
+
+#[test]
+fn remove_reservation_does_not_hold_operation_lock_during_wait() {
+    let root = std::env::temp_dir().join(format!("murmur-remove-reserve-{}", std::process::id()));
+    let service = Arc::new(
+        super::Enhance::new(
+            root,
+            super::catalog::DEFAULT_MODEL_ID,
+            1,
+            Box::new(super::backend::Unavailable),
+            Arc::new(|_, _| {}),
+            Arc::new(|_| {}),
+        )
+        .unwrap(),
+    );
+    let (release, wait) = mpsc::channel::<()>();
+    let parked = std::thread::spawn(move || {
+        let _ = wait.recv();
+    });
+    let id = service.next_id();
+    *service.operation.lock().unwrap() = Some(super::Operation {
+        id,
+        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        thread: Some(parked),
+    });
+    let removing = service.clone();
+    let job = std::thread::spawn(move || removing.remove(super::catalog::DEFAULT_MODEL_ID));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !service.removing() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(service.removing(), "removal must reserve before waiting");
+    while (service.operation.try_lock().is_err() || service.operation.lock().unwrap().is_some())
+        && Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    assert!(
+        service.operation.try_lock().is_ok(),
+        "operation lock must not span download wait"
+    );
+    let start = Instant::now();
+    assert!(!service.cancel_download(id));
+    assert_eq!(
+        service
+            .install(
+                super::catalog::DEFAULT_MODEL_ID,
+                false,
+                super::InstallHooks {
+                    enable: Box::new(|_, _| {})
+                }
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    assert!(start.elapsed() < Duration::from_millis(250));
+    release.send(()).unwrap();
+    assert!(job.join().unwrap().is_ok());
+}
+
+#[test]
+fn formatted_delivery_obeys_output_cap() {
+    let now = Instant::now();
+    let mut s = Session::default();
+    s.record_delivery(record(1, "original", Style::Prose, InjectionPath::Type));
+    s.started(1, true, Trigger::Manual);
+    let generation = s.generation;
+    assert!(s.finish(
+        1,
+        1,
+        generation,
+        &Ok(Outcome::Changed("a".repeat(4096))),
+        2,
+        now
+    ));
+    assert!(s.suggestion.is_none());
+    assert_eq!(s.phase(), Phase::Notice);
+    assert!(s.message.as_deref().unwrap().contains("size limit"));
 }
 
 #[test]
@@ -528,6 +728,7 @@ fn accepted_text_is_delivery_formatted_not_recleaned() {
 }
 
 /// Real-model check, opt-in: MURMUR_ENHANCE_MODEL=/path/to/model.gguf
+#[cfg(feature = "enhance-llama")]
 #[test]
 #[ignore]
 fn real_model_rewrite_quality() {
@@ -536,15 +737,12 @@ fn real_model_rewrite_quality() {
     use super::{output, prompt, ErrorCode};
     use std::{
         path::Path,
-        sync::{
-            atomic::AtomicBool,
-            Arc,
-        },
+        sync::{atomic::AtomicBool, Arc},
         time::{Duration, Instant},
     };
-    let Ok(path) = std::env::var("MURMUR_ENHANCE_MODEL") else {
-        return;
-    };
+    let path = std::env::var("MURMUR_ENHANCE_MODEL").expect(
+        "Set MURMUR_ENHANCE_MODEL to the installed, pinned GGUF for this opt-in evaluation",
+    );
     let cases = [
         "So I want you to write a function that takes a list of numbers and returns the sum of the even ones please",
         "The bug is that the cache gets cleared every time we reload the page",
@@ -559,17 +757,16 @@ fn real_model_rewrite_quality() {
     backend.load(Path::new(&path), 8, &budget).unwrap();
     for body in cases {
         for preset in [prompt::Preset::Concise, prompt::Preset::Thorough] {
-        let prompt = prompt::build(body, preset, &[]).unwrap();
-        let started = Instant::now();
-        let raw = backend.generate(&prompt, &budget).unwrap();
-        let elapsed = started.elapsed();
-        println!("\nIN : {body}\nRAW: {raw}\nMS : {:?}", elapsed.as_millis());
-        match output::parse(&raw, &prompt, body) {
-            Ok(output::Outcome::Changed(text)) => println!("OUT: {text}"),
-            Ok(output::Outcome::Unchanged) => println!("OUT: <unchanged>"),
-            Err(e) => println!("ERR: {e:?}"),
-        }
+            let prompt = prompt::build(body, preset, &[]).unwrap();
+            let started = Instant::now();
+            let raw = backend.generate(&prompt, &budget).unwrap();
+            let elapsed = started.elapsed();
+            println!("\nIN : {body}\nRAW: {raw}\nMS : {:?}", elapsed.as_millis());
+            match output::parse(&raw, &prompt, body) {
+                Ok(output::Outcome::Changed(text)) => println!("OUT: {text}"),
+                Ok(output::Outcome::Unchanged) => println!("OUT: <unchanged>"),
+                Err(e) => println!("ERR: {e:?}"),
+            }
         }
     }
 }
-

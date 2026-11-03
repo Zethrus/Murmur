@@ -109,7 +109,7 @@ interface Commands {
   discard_enhancement: [{ suggestionId: string }, void];
   get_overlay_snapshot: [undefined, OverlaySnapshot];
   reset_overlay_position: [undefined, void];
-  set_overlay_size: [{ width: number; height: number; layoutRevision: number }, void];
+  set_overlay_size: [{ width: number; height: number; layoutRevision: number; layoutInstance: string }, void];
 }
 export function call<K extends keyof Commands>(command: K,
   ...args: Commands[K][0] extends undefined ? [] : [Commands[K][0]]): Promise<Commands[K][1]> {

@@ -95,14 +95,9 @@ jobs:
 
       - run: npm run build
       - run: npm run test:ui
-      - name: Discover LLVM libclang for llama.cpp bindings
+      - name: Provision and initialize Windows native toolchain
         shell: pwsh
-        run: |
-          $Candidates = @("$env:ProgramFiles\LLVM\bin", "${env:ProgramFiles(x86)}\LLVM\bin")
-          $LibDir = $Candidates | Where-Object { Test-Path (Join-Path $_ 'libclang.dll') } | Select-Object -First 1
-          if (-not $LibDir) { throw 'LLVM libclang.dll is required for the Enhance backend' }
-          "LIBCLANG_PATH=$LibDir" | Out-File -FilePath $env:GITHUB_ENV -Append
-          if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { throw 'CMake is required' }
+        run: . ./scripts/prepare-windows-native.ps1
       - name: Test Rust including unavailable Enhance backend
         shell: pwsh
         run: |
@@ -111,7 +106,23 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests without Enhance backend failed' }
       - name: Build the app and NSIS installer
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64 -C target-feature=-avx,-avx2,-fma,-f16c,-bmi2,-sse4.2
+          GGML_NATIVE: 'OFF'
+          GGML_AVX: 'OFF'
+          GGML_AVX2: 'OFF'
+          GGML_FMA: 'OFF'
+          GGML_F16C: 'OFF'
+          GGML_BMI2: 'OFF'
+          GGML_SSE42: 'OFF'
+          GGML_CPU_ALL_VARIANTS: 'OFF'
         run: npx tauri build --target x86_64-pc-windows-msvc
+
+      - name: Audit linked native CPU baseline
+        shell: pwsh
+        run: |
+          python scripts/audit-llama-cpu.py src-tauri/target/x86_64-pc-windows-msvc/release
+          if ($LASTEXITCODE -ne 0) { throw 'Unsupported native CPU baseline' }
 
       - name: Verify and stage unsigned artifacts
         shell: pwsh

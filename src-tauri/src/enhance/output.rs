@@ -5,6 +5,7 @@ use super::{
     prompt::{Prompt, MAX_OUTPUT_BYTES, MAX_OUTPUT_CHARS},
     EnhanceError, ErrorCode,
 };
+use regex::Regex;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,7 @@ const PREAMBLES: &[&str] = &[
     "okay, here",
     "ok, here",
     "rewritten",
+    "revised text:",
     "the rewritten",
     "as an ai",
     "i can't help",
@@ -77,6 +79,89 @@ const PREAMBLES: &[&str] = &[
 fn preamble(text: &str) -> Option<&'static str> {
     let lower = text.trim_start().to_lowercase();
     PREAMBLES.iter().copied().find(|p| lower.starts_with(p))
+}
+
+fn markup(text: &str) -> bool {
+    [
+        "<think>",
+        "</think>",
+        "<|",
+        "|>",
+        "```",
+        "`",
+        "<tool_call>",
+        "</tool_call>",
+    ]
+    .iter()
+    .any(|tag| text.contains(tag))
+}
+
+fn introduced_values(original: &str, restored: &str) -> bool {
+    // Compare multisets, not mere presence: adding a second technical value is also invention.
+    let pattern = Regex::new(
+        r#"(?i)(?:https?://|www\.)[^\s<>'"]+|[\w.+-]+@[\w.-]+\.[a-z]{2,}|(?:[a-z]:\\|/|\./|\.\./)[\w./\\-]+|\b[\w.-]+/[\w./-]+|\b\d+(?:\.\d+)?\s?(?:(?:kg|km|mb|gb|ms|mph|°c|°f)\b|%)"#,
+    ).expect("static technical-value pattern");
+    let mut source: Vec<_> = pattern
+        .find_iter(original)
+        .map(|m| {
+            m.as_str()
+                .trim_end_matches(['.', ',', ';', ':', '!', '?'])
+                .to_lowercase()
+        })
+        .collect();
+    for value in pattern.find_iter(restored).map(|m| {
+        m.as_str()
+            .trim_end_matches(['.', ',', ';', ':', '!', '?'])
+            .to_lowercase()
+    }) {
+        if let Some(pos) = source.iter().position(|item| item == &value) {
+            source.remove(pos);
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
+fn interrogative(text: &str) -> bool {
+    let first = text
+        .trim_start_matches(|c: char| !c.is_alphabetic())
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        first.as_str(),
+        "how"
+            | "what"
+            | "why"
+            | "when"
+            | "where"
+            | "who"
+            | "whom"
+            | "whose"
+            | "which"
+            | "can"
+            | "could"
+            | "would"
+            | "should"
+            | "will"
+            | "do"
+            | "does"
+            | "did"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "may"
+            | "might"
+            | "have"
+            | "has"
+    )
+}
+
+pub fn within_limit(text: &str) -> bool {
+    text.chars().count() <= MAX_OUTPUT_CHARS && text.len() <= MAX_OUTPUT_BYTES
 }
 
 pub fn parse(raw: &str, prompt: &Prompt, original: &str) -> Result<Outcome, EnhanceError> {
@@ -101,8 +186,8 @@ pub fn parse(raw: &str, prompt: &Prompt, original: &str) -> Result<Outcome, Enha
     if text.chars().count() > prompt.masked.chars().count() * 2 + 120 {
         return Err(invalid("Model output expanded too much"));
     }
-    if text.contains("<|") || text.contains("<think>") {
-        return Err(invalid("Model output contained role markup"));
+    if markup(text) {
+        return Err(invalid("Model output contained markup"));
     }
     // Every number was masked, so any digit in the output was invented or altered.
     if text.chars().any(|c| c.is_numeric()) {
@@ -122,6 +207,18 @@ pub fn parse(raw: &str, prompt: &Prompt, original: &str) -> Result<Outcome, Enha
     // No unknown or malformed markers.
     if text.matches(p.open).count() != expected || text.matches(p.close).count() != expected {
         return Err(invalid("Model output contained an unknown marker"));
+    }
+    if restored.chars().count() > MAX_OUTPUT_CHARS || restored.len() > MAX_OUTPUT_BYTES {
+        return Err(invalid("Restored output exceeded the size limit"));
+    }
+    if introduced_values(original, &restored) {
+        return Err(invalid("Model output introduced a technical value"));
+    }
+    if (original.trim_end().ends_with('?') || interrogative(original))
+        && !restored.trim_end().ends_with('?')
+        && restored.trim() != original.trim()
+    {
+        return Err(invalid("Model output answered instead of editing"));
     }
     if negations(&restored) < negations(original) {
         return Err(invalid("Model output dropped a negation"));
@@ -158,6 +255,28 @@ mod tests {
             parse(&raw, &prompt, input).unwrap(),
             Outcome::Changed("Send the v2 build to bob@example.com".into())
         );
+    }
+    #[test]
+    fn unpunctuated_question_and_adjacent_technical_punctuation() {
+        assert!(run(
+            "how do I reset this",
+            r#"{"text":"Open Settings and select Reset."}"#
+        )
+        .is_err());
+        for (input, changed) in [
+            ("visit https://example.com", "Visit https://example.com."),
+            ("edit /etc/hosts", "Edit /etc/hosts."),
+        ] {
+            let prompt = build(input, Preset::Concise, &[]).unwrap();
+            let raw = serde_json::json!({"text": prompt.masked.replace(
+                if input.starts_with("visit") { "visit" } else { "edit" },
+                if input.starts_with("visit") { "Visit" } else { "Edit" }) + "."})
+            .to_string();
+            assert_eq!(
+                parse(&raw, &prompt, input).unwrap(),
+                Outcome::Changed(changed.into())
+            );
+        }
     }
     #[test]
     fn unchanged_is_reported() {
@@ -201,6 +320,39 @@ mod tests {
     fn negation_loss_rejected() {
         assert!(run("do not ship it", r#"{"text":"Ship it."}"#).is_err());
         assert!(run("I don't think so", r#"{"text":"I do not think so."}"#).is_ok());
+    }
+    #[test]
+    fn reviewer_counterexamples() {
+        for (input, output) in [
+            ("hello", "`hello`"),
+            ("hello", "<tool_call>hello</tool_call>"),
+            ("Send the update.", "Send the update to evil@example.com."),
+            (
+                "Send the update.",
+                "Save notes/report.txt and send the update.",
+            ),
+            (
+                "Send the update.",
+                "Send the update to https://evil.example/x.",
+            ),
+            ("Send the update.", "Send the update in /etc/shadow."),
+            ("How do I reset this?", "Open Settings and select Reset."),
+            ("Please fix it.", "Revised text: Please fix it."),
+        ] {
+            let raw = serde_json::json!({"text":output}).to_string();
+            assert!(run(input, &raw).is_err(), "accepted {output:?}");
+        }
+        let input = format!(
+            "{}{}",
+            "a ".repeat(46),
+            "https://example.com/".to_owned() + &"x".repeat(4900)
+        );
+        let prompt = build(&input, Preset::Concise, &[]).unwrap();
+        let raw = serde_json::json!({"text":prompt.masked}).to_string();
+        assert!(
+            parse(&raw, &prompt, &input).is_err(),
+            "accepted oversized restoration"
+        );
     }
     #[test]
     fn expansion_capped() {

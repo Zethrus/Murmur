@@ -157,6 +157,7 @@ struct Runtime {
     /// Logical size reported by the view (already includes the scale preference).
     size: Option<(f64, f64)>,
     layout_revision: u64,
+    layout_instance: String,
     programmatic_until: Option<Instant>,
     moved_at: Option<Instant>,
     busy: bool,
@@ -168,6 +169,7 @@ fn runtime() -> std::sync::MutexGuard<'static, Runtime> {
             Mutex::new(Runtime {
                 size: None,
                 layout_revision: 0,
+                layout_instance: String::new(),
                 programmatic_until: None,
                 moved_at: None,
                 busy: false,
@@ -175,6 +177,28 @@ fn runtime() -> std::sync::MutexGuard<'static, Runtime> {
         })
         .lock()
         .unwrap_or_else(|p| p.into_inner())
+}
+
+// Visibility decisions run in FIFO order on the event loop. Never hold a worker-side
+// mutex while a native window getter sends a synchronous query to that same loop.
+// The enqueue operation returns without awaiting the native getter inside the action.
+fn queue_visibility<E>(
+    enqueue: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::result::Result<(), E>,
+    action: impl FnOnce() + Send + 'static,
+) -> std::result::Result<(), E> {
+    enqueue(Box::new(action))
+}
+
+fn visibility_on_main(
+    app: &AppHandle,
+    action: impl FnOnce(AppHandle) + Send + 'static,
+) -> Result<()> {
+    let handle = app.clone();
+    queue_visibility(
+        |task| app.run_on_main_thread(move || task()),
+        move || action(handle),
+    )
+    .context("Queue overlay visibility")
 }
 
 fn displays(window: &tauri::WebviewWindow) -> Result<Vec<Display>> {
@@ -265,6 +289,14 @@ fn show_interactive(window: &tauri::WebviewWindow) -> Result<()> {
 }
 
 pub fn apply(app: &AppHandle, prefs: &Overlay) -> Result<()> {
+    let prefs = prefs.clone();
+    visibility_on_main(app, move |app| {
+        if let Err(error) = apply_main(&app, &prefs) {
+            tracing::warn!(%error, "Apply overlay visibility");
+        }
+    })
+}
+fn apply_main(app: &AppHandle, prefs: &Overlay) -> Result<()> {
     clear_background(app);
     position(app, prefs)?;
     let window = app
@@ -293,6 +325,14 @@ pub fn state(app: &AppHandle, state: &str, prefs: &Overlay) -> Result<()> {
 /// Show (if enabled) without a dictation state change, e.g. when a suggestion becomes ready.
 /// Re-clamps placement when the window was hidden (displays may have changed).
 pub fn reveal(app: &AppHandle, prefs: &Overlay) -> Result<()> {
+    let prefs = prefs.clone();
+    visibility_on_main(app, move |app| {
+        if let Err(error) = reveal_main(&app, &prefs) {
+            tracing::warn!(%error, "Reveal overlay");
+        }
+    })
+}
+fn reveal_main(app: &AppHandle, prefs: &Overlay) -> Result<()> {
     if !prefs.enabled {
         return Ok(());
     }
@@ -307,6 +347,24 @@ pub fn reveal(app: &AppHandle, prefs: &Overlay) -> Result<()> {
     Ok(())
 }
 pub fn hide(app: &AppHandle) -> Result<()> {
+    visibility_on_main(app, |app| {
+        if let Err(error) = hide_main(&app) {
+            tracing::warn!(%error, "Hide overlay");
+        }
+    })
+}
+fn hide_main(app: &AppHandle) -> Result<()> {
+    if app
+        .try_state::<crate::app::AppState>()
+        .is_some_and(|state| {
+            state.overlay_held()
+                || state
+                    .status()
+                    .is_ok_and(|s| matches!(s.state.as_str(), "listening" | "transcribing"))
+        })
+    {
+        return Ok(());
+    }
     if let Some(window) = app.get_webview_window("overlay") {
         window.hide().context("Hide overlay")?;
     }
@@ -315,14 +373,47 @@ pub fn hide(app: &AppHandle) -> Result<()> {
 /// Click-through while text is being injected so a stray click cannot land on the overlay.
 pub fn set_busy(app: &AppHandle, busy: bool) {
     runtime().busy = busy;
-    if let Some(window) = app.get_webview_window("overlay") {
-        if window.is_visible().unwrap_or(false) {
-            if let Err(error) = window.set_ignore_cursor_events(busy) {
-                tracing::warn!(%error, "Overlay cursor handling unavailable");
+    let _ = visibility_on_main(app, move |app| {
+        if let Some(window) = app.get_webview_window("overlay") {
+            if window.is_visible().unwrap_or(false) {
+                if let Err(error) = window.set_ignore_cursor_events(busy) {
+                    tracing::warn!(%error, "Overlay cursor handling unavailable");
+                }
             }
         }
+    });
+}
+#[cfg(test)]
+mod visibility_tests {
+    use super::queue_visibility;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn queued_window_query_does_not_block_worker_or_second_dispatch() {
+        let (queue, main) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let (release, wait) = mpsc::channel::<()>();
+        let start = Instant::now();
+        queue_visibility(
+            |task| queue.send(task),
+            move || {
+                wait.recv().unwrap();
+            },
+        )
+        .unwrap();
+        queue_visibility(|task| queue.send(task), || {}).unwrap();
+        assert!(start.elapsed() < Duration::from_millis(250));
+        let first = main.recv_timeout(Duration::from_secs(1)).unwrap();
+        let second = main.recv_timeout(Duration::from_secs(1)).unwrap();
+        let executor = std::thread::spawn(move || {
+            first();
+            second();
+        });
+        release.send(()).unwrap();
+        executor.join().unwrap();
     }
 }
+
 pub fn busy() -> bool {
     runtime().busy
 }
@@ -334,8 +425,9 @@ pub fn set_size(
     width: f64,
     height: f64,
     revision: u64,
+    instance: &str,
 ) -> Result<bool> {
-    let Some(next) = accept_size(width, height, revision)? else {
+    let Some(next) = accept_size(width, height, revision, instance)? else {
         return Ok(false);
     };
     runtime().size = Some(next);
@@ -343,11 +435,24 @@ pub fn set_size(
     Ok(true)
 }
 /// Pure validation for `set_size`; also records the revision.
-pub fn accept_size(width: f64, height: f64, revision: u64) -> Result<Option<(f64, f64)>> {
+pub fn accept_size(
+    width: f64,
+    height: f64,
+    revision: u64,
+    instance: &str,
+) -> Result<Option<(f64, f64)>> {
+    if instance.len() > 128 || instance.is_empty() {
+        anyhow::bail!("Invalid overlay layout instance");
+    }
     if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
         anyhow::bail!("Overlay size must be finite and positive");
     }
     let mut rt = runtime();
+    if rt.layout_instance != instance {
+        rt.layout_instance = instance.to_owned();
+        rt.layout_revision = 0;
+        rt.size = None;
+    }
     if revision <= rt.layout_revision {
         return Ok(None);
     }

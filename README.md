@@ -149,6 +149,8 @@ Windows can block injection into elevated windows.
 
 ## Enhance (optional)
 
+Linux x86-64 release builds enforce the original x86-64/SSE2 CPU baseline for the pinned llama.cpp backend: AVX, AVX2, FMA, F16C, BMI2 and SSE4.2 are disabled, and CI audits the generated CMake compiler flags. The build fails on unexpected flags. A minimum-CPU hardware run is still pending. The optional real-model evaluation can be run locally with `MURMUR_ENHANCE_MODEL=/path/to/model.gguf cargo test --manifest-path src-tauri/Cargo.toml real_model_rewrite_quality -- --ignored --nocapture`; it requires the installed model and makes no download request.
+
 Settings → Behavior offers local CPU rewriting after the original dictation is delivered. It is off by default. Only an explicit Install action downloads the pinned Qwen3-1.7B Q4_K_M model (~1.1 GB) from Hugging Face; subsequently rewriting runs offline. The model is not bundled. A rewrite preview appears in the overlay; Accept copies the proposal to the clipboard, but does not paste or replace previously typed text. Discard leaves the original unchanged. Rewrite and Accept hotkeys start unassigned with suggested bindings in Settings. Code and terminal dictation is not rewritten by default; it requires the explicit opt-in. See [the design](docs/enhance-design.md) and [validation limits](docs/enhance-validation.md). Native Windows overlay interaction and real-model rewrite quality are not verified yet.
 
 ## Hotkeys

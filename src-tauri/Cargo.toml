@@ -41,6 +41,7 @@ regex = "1"
 hound = "3.5"
 # Enhance: explicit model download (HTTPS only, rustls) and streaming integrity checks.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
 sha2 = "0.10"
 # Enhance: exact pins; wrapper defaults (openmp, GPU backends) disabled. The sys crate's own
 # "common" default is pulled in by the wrapper; no GPU backend feature is enabled anywhere.

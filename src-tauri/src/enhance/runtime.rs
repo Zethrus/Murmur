@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        mpsc, Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -22,7 +22,10 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub struct Runtime {
     pub service: Arc<Enhance>,
-    session: Mutex<Session>,
+    session: Arc<Mutex<Session>>,
+    /// FIFO owner of acceptance, invalidation and delivery. Its clipboard I/O never holds
+    /// the session mutex; UI reads only take the short session lock.
+    delivery_owner: mpsc::Sender<Box<dyn FnOnce() + Send>>,
     revision: AtomicU64,
     next_dictation: AtomicU64,
     partial: Mutex<String>,
@@ -36,6 +39,41 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 pub fn parse_id(id: &str) -> Option<u64> {
     id.trim().parse().ok()
+}
+
+pub(super) fn accept_with(
+    session: &Mutex<Session>,
+    suggestion_id: Option<u64>,
+    write: impl FnOnce(&str) -> Result<(), String>,
+) -> (Value, bool) {
+    let Some(id) = suggestion_id else {
+        return (
+            json!({"outcome":"stale","message":"This suggestion is no longer available."}),
+            false,
+        );
+    };
+    let decision = lock(session).accept(id);
+    let AcceptDecision::Copy { text, again } = decision else {
+        return (
+            json!({"outcome":"stale","message":"This suggestion is no longer available."}),
+            false,
+        );
+    };
+    if again {
+        return (
+            json!({"outcome":"copied","message":super::session::COPIED}),
+            false,
+        );
+    }
+    // The caller runs on the FIFO owner, which orders invalidation and delivery.
+    let result = write(&text);
+    let outcome = if result.is_ok() { "copied" } else { "failed" };
+    let message = result.as_ref().err().cloned();
+    lock(session).accepted(id, result, Instant::now());
+    (
+        json!({"outcome":outcome,"message":message.or(Some(super::session::COPIED.into()))}),
+        true,
+    )
 }
 
 impl Runtime {
@@ -56,9 +94,18 @@ impl Runtime {
                 }
             }),
         )?;
+        let (delivery_owner, receiver) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        std::thread::Builder::new()
+            .name("murmur-enhance-delivery".into())
+            .spawn(move || {
+                while let Ok(action) = receiver.recv() {
+                    action();
+                }
+            })?;
         Ok(Self {
             service: Arc::new(service),
-            session: Mutex::new(Session::default()),
+            session: Arc::new(Mutex::new(Session::default())),
+            delivery_owner,
             revision: AtomicU64::new(0),
             next_dictation: AtomicU64::new(1),
             partial: Mutex::new(String::new()),
@@ -66,6 +113,11 @@ impl Runtime {
         })
     }
 
+    fn dispatch_delivery(&self, action: impl FnOnce() + Send + 'static) {
+        if self.delivery_owner.send(Box::new(action)).is_err() {
+            tracing::warn!("Enhance delivery owner stopped");
+        }
+    }
     pub fn holds_overlay(&self) -> bool {
         lock(&self.session).holds_overlay()
     }
@@ -132,11 +184,16 @@ impl Runtime {
 
     /// A new dictation started: forget the previous one and cancel pending work.
     pub fn begin_dictation(&self, state: &AppState) {
-        let cancel = lock(&self.session).begin_dictation();
-        if let Some(id) = cancel {
-            self.service.worker.cancel(id);
-        }
-        self.publish(state);
+        let session = self.session.clone();
+        let worker = self.service.clone();
+        let app = state.app.clone();
+        self.dispatch_delivery(move || {
+            if let Some(id) = lock(&session).begin_dictation() {
+                worker.worker.cancel(id);
+            }
+            let state = app.state::<AppState>();
+            state.enhance.publish(&state);
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -166,17 +223,54 @@ impl Runtime {
             completed: Instant::now(),
             config: config.clone(),
         };
-        lock(&self.session).record_delivery(record);
-        let current = state.config().unwrap_or_else(|_| config.clone());
-        if current.enhance.auto_rewrite && self.service.installed() {
-            let _ = self.rewrite(state, Trigger::Auto);
-        } else {
-            self.publish(state);
-        }
+        let session = self.session.clone();
+        let service = self.service.clone();
+        let app = state.app.clone();
+        let fallback_config = config.clone();
+        self.dispatch_delivery(move || {
+            lock(&session).record_delivery(record);
+            let state = app.state::<AppState>();
+            let current = state.config().unwrap_or(fallback_config);
+            if current.enhance.auto_rewrite && service.installed() {
+                let _ = state.enhance.rewrite(&state, Trigger::Auto);
+            } else {
+                state.enhance.publish(&state);
+            }
+        });
+    }
+
+    pub fn shortcut_context(&self) -> Option<(u64, u64)> {
+        let session = lock(&self.session);
+        session
+            .record
+            .as_ref()
+            .map(|r| (r.dictation_id, session.generation))
+    }
+
+    pub fn shortcut_suggestion(&self) -> Option<u64> {
+        let session = lock(&self.session);
+        session
+            .suggestion
+            .as_ref()
+            .filter(|_| matches!(session.phase(), Phase::Ready | Phase::Notice))
+            .map(|s| s.id)
+    }
+
+    pub fn rewrite_observed(&self, state: &AppState, observed: Option<(u64, u64)>) -> Value {
+        self.rewrite_with(state, Trigger::Manual, observed)
     }
 
     /// Start (or reveal) a rewrite of the last dictation.
     pub fn rewrite(&self, state: &AppState, trigger: Trigger) -> Value {
+        self.rewrite_with(state, trigger, None)
+    }
+
+    fn rewrite_with(
+        &self,
+        state: &AppState,
+        trigger: Trigger,
+        observed: Option<(u64, u64)>,
+    ) -> Value {
         let reply = |status: RewriteStatus, message: Option<String>| json!({ "status": status, "message": message });
         let Ok(config) = state.config() else {
             return reply(
@@ -192,9 +286,19 @@ impl Runtime {
             backend: backend::compiled(),
             overlay: config.overlay.enabled,
             dictating,
+            rewrite_code: config.enhance.rewrite_code,
         };
-        let job = {
+        {
             let mut session = lock(&self.session);
+            if observed.is_some_and(|(dictation, generation)| {
+                session.generation != generation
+                    || session
+                        .record
+                        .as_ref()
+                        .is_none_or(|r| r.dictation_id != dictation)
+            }) {
+                return reply(RewriteStatus::Expired, None);
+            }
             if let Err(status) = session.check(trigger, gate, Instant::now()) {
                 let message = session.message.clone();
                 drop(session);
@@ -224,9 +328,13 @@ impl Runtime {
                 unload_after: Duration::from_secs(config.enhance.unload_after_s),
             };
             session.started(request_id, self.service.loaded(), trigger);
-            job
+            if !self.service.worker.submit(job) {
+                session.discard(Some(request_id));
+                drop(session);
+                self.changed(state);
+                return reply(RewriteStatus::Busy, None);
+            }
         };
-        self.service.worker.submit(job);
         self.changed(state);
         reply(RewriteStatus::Queued, None)
     }
@@ -277,54 +385,41 @@ impl Runtime {
 
     /// Phase 1: accept copies the delivery-formatted suggestion; it never pastes.
     pub fn accept(&self, state: &AppState, suggestion_id: Option<u64>) -> Value {
-        let decision = match suggestion_id {
-            Some(id) => lock(&self.session).accept(id),
-            None => AcceptDecision::Stale,
-        };
-        let AcceptDecision::Copy { text, .. } = decision else {
-            return json!({ "outcome": "stale", "message": "This suggestion is no longer available." });
-        };
-        let id = suggestion_id.unwrap_or_default();
-        let result = self.copy(&text);
-        let outcome = if result.is_ok() { "copied" } else { "failed" };
-        let message = result.as_ref().err().cloned();
-        lock(&self.session).accepted(id, result, Instant::now());
-        self.changed(state);
-        json!({ "outcome": outcome, "message": message.or(Some(super::session::COPIED.into())) })
-    }
-
-    /// Accept shortcut: acts on the visible suggestion only.
-    pub fn accept_current(&self, state: &AppState) {
-        let id = {
-            let session = lock(&self.session);
-            session
-                .suggestion
-                .as_ref()
-                .filter(|_| matches!(session.phase(), Phase::Ready | Phase::Notice))
-                .map(|s| s.id)
-        };
-        if id.is_some() {
-            let _ = self.accept(state, id);
-        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let app = state.app.clone();
+        self.dispatch_delivery(move || {
+            let state = app.state::<AppState>();
+            let (response, changed) = accept_with(&state.enhance.session, suggestion_id, |text| {
+                state.enhance.copy(text)
+            });
+            if changed {
+                state.enhance.changed(&state);
+            }
+            let _ = reply_tx.send(response);
+        });
+        reply_rx
+            .recv()
+            .unwrap_or_else(|_| json!({"outcome":"failed","message":"Enhance delivery stopped"}))
     }
 
     pub fn discard(&self, state: &AppState, suggestion_id: Option<u64>) {
-        let cancel = {
-            let mut session = lock(&self.session);
+        let session = self.session.clone();
+        let worker = self.service.clone();
+        let app = state.app.clone();
+        self.dispatch_delivery(move || {
+            let mut guard = lock(&session);
             let matches = suggestion_id.is_some_and(|id| {
-                session.suggestion.as_ref().is_some_and(|s| s.id == id)
-                    || session.request == Some(id)
+                guard.suggestion.as_ref().is_some_and(|s| s.id == id) || guard.request == Some(id)
             });
             if matches {
-                session.discard(suggestion_id)
-            } else {
-                None
+                if let Some(id) = guard.discard(suggestion_id) {
+                    worker.worker.cancel(id);
+                }
             }
-        };
-        if let Some(id) = cancel {
-            self.service.worker.cancel(id);
-        }
-        self.changed(state);
+            drop(guard);
+            let state = app.state::<AppState>();
+            state.enhance.changed(&state);
+        });
     }
 
     pub fn tick(&self, state: &AppState) {
@@ -334,9 +429,13 @@ impl Runtime {
     }
 
     fn invalidate(&self) {
-        if let Some(id) = lock(&self.session).invalidate() {
-            self.service.worker.cancel(id);
-        }
+        let session = self.session.clone();
+        let worker = self.service.clone();
+        self.dispatch_delivery(move || {
+            if let Some(id) = lock(&session).invalidate() {
+                worker.worker.cancel(id);
+            }
+        });
     }
 
     /// React to a committed configuration change.
@@ -348,7 +447,14 @@ impl Runtime {
         self.service.refresh(&new.enhance.model);
         self.service.set_threads(new.enhance.threads);
         let model_changed = old.enhance.model != new.enhance.model;
-        if model_changed || (old.overlay.enabled && !new.overlay.enabled) {
+        if model_changed
+            || (old.overlay.enabled && !new.overlay.enabled)
+            || (old.enhance.rewrite_code
+                && !new.enhance.rewrite_code
+                && lock(&self.session).record.as_ref().is_some_and(|record| {
+                    record.style == Style::Code || crate::inject::is_terminal(&record.focused)
+                }))
+        {
             self.invalidate();
         }
         if old.enhance.auto_rewrite && !new.enhance.auto_rewrite {
@@ -382,11 +488,12 @@ impl Runtime {
     ) -> Result<String, String> {
         let handle = app.clone();
         let hooks = InstallHooks {
-            enable: Box::new(move || {
+            enable: Box::new(move |id, intent| {
                 if let Some(state) = handle.try_state::<AppState>() {
-                    if let Err(error) = state
-                        .update(json!({"enhance":{"auto_rewrite":true},"overlay":{"enabled":true}}))
-                    {
+                    if let Err(error) = state.update_checked(
+                        json!({"enhance":{"auto_rewrite":true},"overlay":{"enabled":true}}),
+                        || intent.load(Ordering::Acquire) == id,
+                    ) {
                         state.error(&format!("{error:#}"));
                     }
                 }
@@ -401,11 +508,12 @@ impl Runtime {
     /// Blocking: cancels work, unloads, deletes the model and turns auto-rewrite off.
     pub fn remove(&self, state: &AppState, model_id: &str) -> Result<(), String> {
         self.invalidate();
-        if state.config().is_ok_and(|c| c.enhance.auto_rewrite) {
-            state
-                .update(json!({"enhance":{"auto_rewrite":false}}))
-                .map_err(|e| format!("{e:#}"))?;
-        }
+        self.service.clear_enable_intent();
+        // Always commit an explicit disable, including false → false: this transaction
+        // serializes with the download-completion consent check and revokes pending intent.
+        state
+            .update(json!({"enhance":{"auto_rewrite":false}}))
+            .map_err(|e| format!("{e:#}"))?;
         let result = self.service.remove(model_id).map_err(|e| e.message);
         self.changed(state);
         result

@@ -32,9 +32,9 @@ pub enum Action {
     Fault(String),
     Preview(u64, Result<Value>),
     /// Enhance: rewrite the last dictation (shortcut). Press-only, mode-independent.
-    Rewrite,
-    /// Enhance: accept (copy) the visible suggestion.
-    AcceptCurrent,
+    Rewrite(Option<(u64, u64)>),
+    /// Enhance: accept (copy) the suggestion observed at keypress.
+    AcceptCurrent(Option<u64>),
     Quit,
 }
 pub fn params(pcm: &[f32], config: &Config) -> Value {
@@ -184,18 +184,17 @@ impl Controller {
         let focused = platform::focused_app(&state.app)?;
         let style = postproc::resolve_style(&self.config, &focused, self.force_code);
         let body = postproc::clean_body(text, &self.config, style);
-        let text = inject::safe_text(
-            &postproc::process_style(text, &self.config, style),
-            &focused,
-        );
+        let text = inject::safe_text(&postproc::process_cleaned(&body, &self.config), &focused);
         let mut delivered = None;
         if !text.is_empty() {
             // Click-through only while keystrokes/paste are in flight.
             overlay::set_busy(&state.app, true);
+            state.enhance.publish(state);
             let injected = self
                 .injector
                 .inject(&text, &self.config.injection, &focused, style);
             overlay::set_busy(&state.app, false);
+            state.enhance.publish(state);
             let path = injected?;
             delivered = Some(path);
             let latency = start.elapsed().as_millis() as u64;
@@ -343,12 +342,16 @@ impl Controller {
                 state.update(json!({"overlay":{"enabled":!state.config()?.overlay.enabled}}))?;
             }
             Action::Reload => state.reload()?,
-            Action::Rewrite => {
-                let _ = state
-                    .enhance
-                    .rewrite(state, crate::enhance::session::Trigger::Manual);
+            Action::Rewrite(observed) => {
+                if observed.is_some() && !self.active && state.status()?.state != "transcribing" {
+                    let _ = state.enhance.rewrite_observed(state, observed);
+                }
             }
-            Action::AcceptCurrent => state.enhance.accept_current(state),
+            Action::AcceptCurrent(id) => {
+                if let Some(id) = id {
+                    let _ = state.enhance.accept(state, Some(id));
+                }
+            }
             Action::Reconfigure => {
                 let next = state.config()?;
                 let audio_changed =

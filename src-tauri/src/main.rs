@@ -27,6 +27,15 @@ use tauri::{
 
 fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let handle = app.handle().clone();
+    let overlay_view = handle
+        .get_webview_window("overlay")
+        .ok_or_else(|| anyhow::anyhow!("Overlay webview unavailable"))?;
+    anyhow::ensure!(
+        overlay_view
+            .resolve_command_scope::<serde_json::Value>("window", "start_dragging")?
+            .is_some(),
+        "Overlay start-dragging permission denied by the runtime ACL"
+    );
     let runtime = app::AppState::new(handle.clone())?;
     app.manage(runtime);
     let state = app.state::<app::AppState>();

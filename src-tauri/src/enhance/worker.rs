@@ -63,6 +63,8 @@ struct Queue {
     active: Option<(u64, Arc<AtomicBool>)>,
     unload_waiters: Vec<mpsc::Sender<()>>,
     shutdown: bool,
+    latest: u64,
+    cancelled: std::collections::HashSet<u64>,
 }
 
 pub struct Worker {
@@ -179,6 +181,8 @@ impl Worker {
                 active: None,
                 unload_waiters: Vec::new(),
                 shutdown: false,
+                latest: 0,
+                cancelled: std::collections::HashSet::new(),
             }),
             Condvar::new(),
         ));
@@ -260,23 +264,29 @@ impl Worker {
             thread: Mutex::new(Some(thread)),
         })
     }
-    /// Queue a job, replacing (and cancelling) any queued job and cancelling the active one.
-    /// Returns the request ID of a replaced queued job, which will never report.
-    pub fn submit(&self, job: Job) -> Option<u64> {
+    /// Returns false for a cancelled, stale, or shutdown submission.
+    pub fn submit(&self, job: Job) -> bool {
         let (queue, signal) = &*self.shared;
         let mut q = lock(queue);
+        if q.cancelled.remove(&job.request_id) || q.shutdown || job.request_id <= q.latest {
+            return false;
+        }
+        q.latest = job.request_id;
         if let Some((_, cancel)) = &q.active {
             cancel.store(true, Ordering::Release);
         }
-        let replaced = q.pending.replace(job).map(|j| j.request_id);
+        q.pending = Some(job);
         signal.notify_all();
-        replaced
+        true
     }
     /// Cancel the matching active/queued request. Returns true if a queued job was removed
     /// (it will produce no Finished event).
     pub fn cancel(&self, request_id: u64) -> bool {
         let (queue, _) = &*self.shared;
         let mut q = lock(queue);
+        if request_id > q.latest {
+            q.cancelled.insert(request_id);
+        }
         if let Some((id, cancel)) = &q.active {
             if *id == request_id {
                 cancel.store(true, Ordering::Release);
@@ -326,7 +336,13 @@ impl Worker {
             signal.notify_all();
         }
         if let Some(thread) = lock(&self.thread).take() {
-            let _ = thread.join();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !thread.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
         }
     }
 }

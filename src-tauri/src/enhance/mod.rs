@@ -164,6 +164,7 @@ pub struct Enhance {
     pub worker: worker::Worker,
     next: AtomicU64,
     operation: Mutex<Option<Operation>>,
+    removing: AtomicBool,
     /// Operation ID authorised to enable auto-rewrite on success (0 = none).
     enable_intent: AtomicU64,
     space: fn(&Path) -> Option<u64>,
@@ -172,7 +173,7 @@ pub struct Enhance {
 
 pub struct InstallHooks {
     /// Called on success when enabling was requested and still authorised.
-    pub enable: Box<dyn FnOnce() + Send>,
+    pub enable: Box<dyn FnOnce(u64, &AtomicU64) + Send>,
 }
 
 impl Enhance {
@@ -249,6 +250,7 @@ impl Enhance {
             worker,
             next: AtomicU64::new(1),
             operation: Mutex::new(None),
+            removing: AtomicBool::new(false),
             enable_intent: AtomicU64::new(0),
             space: crate::platform::available_space,
             transport: Arc::new(|| {
@@ -332,6 +334,12 @@ impl Enhance {
             EnhanceError::new(ErrorCode::UnavailableModel, "Unknown Enhance model")
         })?;
         let mut operation = lock(&self.operation);
+        if self.removing.load(Ordering::Acquire) {
+            return Err(EnhanceError::new(
+                ErrorCode::Busy,
+                "Model removal is running",
+            ));
+        }
         if let Some(op) = operation.as_ref() {
             if op.thread.as_ref().is_some_and(|t| !t.is_finished()) {
                 return Err(EnhanceError::new(
@@ -412,12 +420,14 @@ impl Enhance {
                     info.received_bytes = received;
                     info.total_bytes = total;
                     self.emit_download(&info);
-                    if phase == download::Phase::Verifying {
-                        self.shared.update(|s| {
-                            s.install = InstallState::Verifying;
+                    self.shared.update(|s| {
+                        if !self.removing() && s.install != InstallState::Removing {
+                            if phase == download::Phase::Verifying {
+                                s.install = InstallState::Verifying;
+                            }
                             s.download = Some(info.clone());
-                        });
-                    }
+                        }
+                    });
                 },
             )
         });
@@ -433,6 +443,9 @@ impl Enhance {
         }
         self.emit_download(&info);
         self.shared.update(|s| {
+            if self.removing() || s.install == InstallState::Removing {
+                return;
+            }
             let failed = matches!(&result, Err(e) if e.code != ErrorCode::Cancelled);
             s.install = if s.model_id != entry.id {
                 s.install
@@ -447,16 +460,24 @@ impl Enhance {
                 _ => None,
             };
         });
-        let authorised = self
-            .enable_intent
-            .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok();
-        if result.is_ok() && authorised && !cancel.load(Ordering::Acquire) {
-            (hooks.enable)();
+        if result.is_ok()
+            && !cancel.load(Ordering::Acquire)
+            && self.enable_intent.load(Ordering::Acquire) == id
+        {
+            (hooks.enable)(id, &self.enable_intent);
         }
+        let _ = self
+            .enable_intent
+            .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub fn removing(&self) -> bool {
+        self.removing.load(Ordering::Acquire)
     }
     pub fn cancel_download(&self, operation_id: u64) -> bool {
         let operation = lock(&self.operation);
+        if self.removing() {
+            return false;
+        }
         match operation.as_ref() {
             Some(op) if op.id == operation_id => {
                 op.cancel.store(true, Ordering::Release);
@@ -473,9 +494,20 @@ impl Enhance {
     }
     fn stop_operation(&self) {
         self.clear_enable_intent();
-        let op = lock(&self.operation).take();
-        if let Some(mut op) = op {
+        let mut operation = lock(&self.operation);
+        if let Some(op) = operation.as_mut() {
             op.cancel.store(true, Ordering::Release);
+            if let Some(thread) = op.thread.as_ref() {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !thread.is_finished() && std::time::Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                if !thread.is_finished() {
+                    return;
+                }
+            }
+        }
+        if let Some(mut op) = operation.take() {
             if let Some(thread) = op.thread.take() {
                 let _ = thread.join();
             }
@@ -487,8 +519,52 @@ impl Enhance {
         let entry = catalog::find(model_id).ok_or_else(|| {
             EnhanceError::new(ErrorCode::UnavailableModel, "Unknown Enhance model")
         })?;
+        let mut previous = {
+            let mut operation = lock(&self.operation);
+            if self.removing.swap(true, Ordering::AcqRel) {
+                return Err(EnhanceError::new(
+                    ErrorCode::Busy,
+                    "Model removal is running",
+                ));
+            }
+            self.clear_enable_intent();
+            let previous = operation.take();
+            if let Some(op) = &previous {
+                op.cancel.store(true, Ordering::Release);
+            }
+            previous
+        };
+        // Reservation remains set on every exit, including timeout and filesystem failure.
+        struct Release<'a>(&'a AtomicBool);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _release = Release(&self.removing);
         self.shared.update(|s| s.install = InstallState::Removing);
-        self.stop_operation();
+        if let Some(op) = previous.as_mut() {
+            if let Some(thread) = op.thread.as_ref() {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !thread.is_finished() && std::time::Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                if !thread.is_finished() {
+                    let error = EnhanceError::new(
+                        ErrorCode::RemoveFailed,
+                        "The model download did not stop in time",
+                    );
+                    self.shared.update(|s| {
+                        s.install = catalog::local_state(entry, &self.root);
+                        s.error = Some(error.clone());
+                    });
+                    return Err(error);
+                }
+            }
+            if let Some(thread) = op.thread.take() {
+                let _ = thread.join();
+            }
+        }
         if !self.worker.unload_and_wait(Duration::from_secs(20)) {
             let error = EnhanceError::new(
                 ErrorCode::RemoveFailed,

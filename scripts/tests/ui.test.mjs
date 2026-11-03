@@ -102,14 +102,22 @@ test("download progress rehydrates after navigating away and back",async()=>{
   h.emit("enhance-download",{operation_id:"1",model_id:"qwen3-1.7b-q4_k_m",phase:"complete",received_bytes:1107409472,total_bytes:1107409472,error_code:null});await settle();await settle();
   assert.ok(button(enhanceCard(h.root),"Remove"));h.unload();assert.equal([...h.events.values()].reduce((n,s)=>n+s.size,0),0);
 });
+test("download completion while Behavior is closed clears cached controls",async()=>{
+  const h=await behaviorPage();await button(enhanceCard(h.root),"Install").dispatch("click");await settle();
+  await button(h.root,"General").dispatch("click");await settle();
+  h.enhanceModel.installed=true;h.enhanceStatus.revision=7;h.enhanceStatus.installation_state="installed";h.enhanceStatus.download=null;
+  await button(h.root,"Behavior").dispatch("click");await settle();await settle();
+  assert.ok(button(enhanceCard(h.root),"Remove"));assert.equal(button(enhanceCard(h.root),"Cancel download"),undefined);
+  h.unload();
+});
 test("installed model enables auto-rewrite, removal confirms, missing backend disables controls",async()=>{
   const h=await harness();h.enhanceModel.installed=true;h.enhanceStatus.installation_state="installed";await (await h.module("settings/app.ts")).mountSettings(h.root);await settle();
   await button(h.root,"Behavior").dispatch("click");await settle();await settle();
   const auto=h.document.getElementById("field-rewrite-automatically");auto.checked=true;await auto.dispatch("change");await settle();assert.equal(h.config.enhance.auto_rewrite,true);
   await button(enhanceCard(h.root),"Remove").dispatch("click");await settle();assert.ok(h.calls.some(c=>c.name==="remove_enhance_model"&&c.args.modelId==="qwen3-1.7b-q4_k_m"));h.unload();
   const off=await behaviorPage({get_enhance_status:async(_,{enhanceStatus})=>({...enhanceStatus,backend_available:false})});
-  assert.match(enhanceCard(off.root).textContent,/no local rewrite backend/);assert.equal(button(enhanceCard(off.root),"Install").disabled,true);
-  assert.equal(off.document.getElementById("field-style").querySelector?.("x"),null);off.unload();
+  assert.equal(button(enhanceCard(off.root),"Install").disabled,true);
+  assert.equal(button(enhanceCard(off.root),"Rewrite last dictation").disabled,true);off.unload();
 });
 test("overlay disabled offers the combined enable action instead of auto-enabling",async()=>{
   const h=await harness();h.config.overlay.enabled=false;h.enhanceModel.installed=true;h.enhanceStatus.installation_state="installed";
@@ -154,6 +162,13 @@ test("overlay shows pending then ready suggestion and ready overrides idle hidin
   assert.equal(h.root.querySelector(".accept-button").hidden,true);h.emit("state",{state:"idle"});h.timers.tick(5000);assert.equal(pill.hidden,false);
   h.emit("overlay-update",snap(2,READY));assert.equal(h.root.querySelector(".suggestion-text").textContent,"The release is done.");assert.equal(h.root.dataset.enhance,"ready");
   assert.equal(h.root.querySelector(".accept-button").textContent,"Accept — copy");h.timers.tick(60000);assert.equal(pill.hidden,false);assert.equal(h.root.dataset.expanded,"true");h.unload();
+});
+test("generation timeout remains visible with an explanation",async()=>{
+  const h=await overlay(),pill=h.root.querySelector(".pill");
+  h.emit("overlay-update",snap(1,enh("notice",{message:"Enhance stopped: generation exceeded the configured time limit. Original dictation is unchanged."})));
+  assert.match(h.root.textContent,/generation exceeded the configured time limit/);
+  h.timers.tick(5000);assert.equal(h.root.dataset.enhance,"notice");assert.equal(pill.hidden,false);
+  h.timers.tick(7000);assert.equal(h.root.dataset.enhance,"none");h.unload();
 });
 test("overlay ignores stale snapshot revisions and hydrates from get_overlay_snapshot",async()=>{
   const h=await overlay({get_overlay_snapshot:async()=>snap(5,READY)});await settle();assert.equal(h.root.dataset.enhance,"ready");
@@ -208,10 +223,28 @@ test("drag starts only from the handle with the primary button and never while d
   h.emit("overlay-update",snap(2,READY,{delivery_busy:true}));await handle.dispatch("pointerdown",{button:0});assert.equal(h.drags.length,1);
   assert.equal(h.root.dataset.busy,"true");assert.equal(h.root.querySelector(".accept-button").disabled,true);h.unload();
 });
+test("denied native drag reports a visible error",async()=>{
+  const h=await overlay({startOverlayDrag:async()=>{throw new Error("permission denied");}});
+  await h.root.querySelector(".drag-handle").dispatch("pointerdown",{button:0});await settle();
+  assert.equal(h.root.dataset.dragError,"true");assert.match(h.root.textContent,/Could not move overlay: Error: permission denied/);h.unload();
+});
+test("scale changes remeasure and page reload resets layout identity",async()=>{
+  const h=await overlay(),pill=h.root.querySelector(".pill");h.emit("state",{state:"listening"});
+  pill.rect={width:200,height:48};h.observers.trigger();
+  h.config.overlay.scale=1.5;h.emit("config",structuredClone(h.config));await settle();
+  pill.rect={width:320,height:72};h.observers.trigger();
+  const sizes=h.calls.filter(c=>c.name==="set_overlay_size").map(c=>plain(c.args));
+  assert.equal(sizes.at(-1).width,360);assert.ok(sizes.at(-1).layoutRevision>sizes[0].layoutRevision);
+  h.unload();
+  const reloaded=await overlay();reloaded.emit("state",{state:"listening"});reloaded.root.querySelector(".pill").rect={width:200,height:48};reloaded.observers.trigger();
+  const first=reloaded.calls.find(c=>c.name==="set_overlay_size").args;
+  assert.equal(first.layoutRevision,1);assert.notEqual(first.layoutInstance,sizes[0].layoutInstance);reloaded.unload();
+});
 test("measured overlay size is reported once per change with increasing layout revisions",async()=>{
   const h=await overlay(),pill=h.root.querySelector(".pill");h.emit("state",{state:"listening"});
   pill.rect={width:200,height:48};h.observers.trigger();pill.rect={width:199.6,height:47.5};h.observers.trigger();
   pill.rect={width:560,height:180.2};h.observers.trigger();const sizes=h.calls.filter(c=>c.name==="set_overlay_size").map(c=>plain(c.args));
-  assert.deepEqual(sizes,[{width:240,height:88,layoutRevision:1},{width:600,height:221,layoutRevision:2}]);
+  assert.deepEqual(sizes.map(({layoutInstance,...rest})=>rest),[{width:240,height:88,layoutRevision:1},{width:600,height:221,layoutRevision:2}]);
+  assert.ok(sizes[0].layoutInstance);assert.equal(sizes[0].layoutInstance,sizes[1].layoutInstance);
   h.unload();assert.equal(h.observers.live.size,0);assert.equal([...h.events.values()].reduce((n,s)=>n+s.size,0),0);
 });

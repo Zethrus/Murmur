@@ -25,21 +25,16 @@ if ($env:OS -ne 'Windows_NT') { throw 'Run this script on Windows x64.' }
 $Root = Split-Path -Parent $PSScriptRoot
 Push-Location $Root
 try {
-    foreach ($Command in @('python', 'node', 'npm', 'cargo', 'rustup', 'cmake', 'clang-cl')) {
+    . (Join-Path $PSScriptRoot 'prepare-windows-native.ps1')
+    foreach ($Command in @('python', 'node', 'npm', 'cargo', 'rustup', 'cmake', 'clang-cl', 'cl.exe')) {
         if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
             throw "Missing prerequisite: $Command (see README.md)"
         }
     }
-    if (-not $env:LIBCLANG_PATH) {
-        foreach ($Candidate in @("$env:ProgramFiles\LLVM\bin", "${env:ProgramFiles(x86)}\LLVM\bin")) {
-            if (Test-Path -LiteralPath (Join-Path $Candidate 'libclang.dll')) {
-                $env:LIBCLANG_PATH = $Candidate
-                break
-            }
-        }
-    }
-    if (-not $env:LIBCLANG_PATH -or -not (Test-Path -LiteralPath (Join-Path $env:LIBCLANG_PATH 'libclang.dll'))) {
-        throw 'Missing LLVM libclang.dll; set LIBCLANG_PATH to its directory.'
+    if ($env:RUSTFLAGS) { throw 'Release RUSTFLAGS must be empty: the build enforces the x86-64/SSE2 baseline.' }
+    $env:RUSTFLAGS = '-C target-cpu=x86-64 -C target-feature=-avx,-avx2,-fma,-f16c,-bmi2,-sse4.2'
+    foreach ($Flag in @('GGML_NATIVE','GGML_AVX','GGML_AVX2','GGML_FMA','GGML_F16C','GGML_BMI2','GGML_SSE42','GGML_CPU_ALL_VARIANTS')) {
+        [Environment]::SetEnvironmentVariable($Flag, 'OFF', 'Process')
     }
     if (-not $env:CMAKE_BUILD_PARALLEL_LEVEL) { $env:CMAKE_BUILD_PARALLEL_LEVEL = '2' }
     if (-not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = '2' }
@@ -100,6 +95,7 @@ try {
     $App = Join-Path $Release 'murmur.exe'
     $PortableEngine = Join-Path $Release 'murmur-engine.exe'
     Assert-Artifact $App
+    Invoke-Native 'python' @((Join-Path $PSScriptRoot 'audit-llama-cpu.py'), $Release, '--artifact', $App)
     # The portable pair must work without the checkout or Python installed.
     Copy-Item -LiteralPath $Frozen -Destination $PortableEngine -Force
     Assert-Artifact $PortableEngine

@@ -25,6 +25,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     config = next; document.documentElement.dataset.theme = next.general.theme;
     document.documentElement.style.setProperty("--overlay-scale",String(next.overlay.scale)); root.dataset.position = next.overlay.position;
     root.dataset.preview = String(next.overlay.show_preview); render(state);
+    reported = undefined; void Promise.resolve().then(()=>measure());
   };
   /** Suggestion view; never hides the overlay while a rewrite is pending, ready, accepting or reporting. */
   const renderEnhancement = (): void => {
@@ -72,7 +73,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     if (next.expires_at !== null && active(next)) {
       expiry = setTimeout(()=>{ if (enhancement === next) { setEnhancement(NONE); render(state); } },Math.max(0,next.expires_at - Date.now()));
     }
-    if (next.phase === "notice") noticeTimer = setTimeout(()=>{ if (enhancement === next) { setEnhancement(NONE); settle(); } },NOTICE_MS);
+    if (next.phase === "notice") noticeTimer = setTimeout(()=>{ if (enhancement === next) { setEnhancement(NONE); settle(); } },next.message?.startsWith("Enhance stopped:") ? 12000 : NOTICE_MS);
     if (wasActive && !active(next)) { proposed.textContent = ""; }
   };
   /** After a suggestion closes, fall back to the ordinary idle presentation. */
@@ -83,6 +84,11 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   const applySnapshot = (snapshot: OverlaySnapshot): void => {
     if (!isNewer(revision,snapshot.revision)) return; revision = snapshot.revision;
     const wasActive = active(enhancement); busy = snapshot.delivery_busy; root.dataset.busy = String(busy);
+    render(snapshot.dictation_state);
+    if (snapshot.dictation_state === "listening") {
+      preview.textContent = snapshot.partial_text;
+      root.dataset.expanded = String(isExpanded());
+    }
     setEnhancement(snapshot.enhancement ?? NONE);
     if (wasActive && !active(enhancement)) settle(); else renderEnhancement();
   };
@@ -110,19 +116,21 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   accept.addEventListener("click",()=>act("accept")); discard.addEventListener("click",()=>act("discard"));
   // Native drag from the dedicated handle only; text, buttons and scrollbars stay interactive and never start a move.
   handle.addEventListener("pointerdown",(event: Event)=>{ const pointer = event as PointerEvent;
-    if (pointer.button !== 0 || busy) return; void startOverlayDrag().catch(()=>{}); });
+    if (pointer.button !== 0 || busy) return;
+    void startOverlayDrag().catch(error=>{root.dataset.dragError = "true"; label.textContent = `Could not move overlay: ${String(error)}`; pill.hidden = false;}); });
 
   // Report the rendered surface size; Rust clamps it to the work area and keeps the placement anchor.
+  const layoutInstance = `${Date.now()}-${Math.random()}`;
   let layoutRevision = 0, reported: Size | undefined;
   const measure = (): void => {
     if (disposed || pill.hidden) return; const box = pill.getBoundingClientRect(); if (!(box.width > 0 && box.height > 0)) return;
     const style = window.getComputedStyle(root);
     const next = windowSize({width:box.width,height:box.height},{top:cssLength(style.paddingTop),right:cssLength(style.paddingRight),bottom:cssLength(style.paddingBottom),left:cssLength(style.paddingLeft)});
     if (!sizeChanged(reported,next)) return; reported = next;
-    void call("set_overlay_size",{width:next.width,height:next.height,layoutRevision:++layoutRevision}).catch(()=>{});
+    void call("set_overlay_size",{width:next.width,height:next.height,layoutRevision:++layoutRevision,layoutInstance}).catch(()=>{});
   };
   const Observer = (globalThis as {ResizeObserver?: typeof ResizeObserver}).ResizeObserver;
-  if (Observer) { const observer = new Observer(()=>measure()); observer.observe(pill); disposers.push(()=>observer.disconnect()); }
+  if (Observer) { const observer = new Observer(()=>measure()); observer.observe(root); observer.observe(pill); disposers.push(()=>observer.disconnect()); }
 
   async function subscribe<K extends keyof Events>(event: K, handler: (data: Events[K])=>void): Promise<void> {
     const off = await on(event,handler); if (disposed) off(); else disposers.push(off);

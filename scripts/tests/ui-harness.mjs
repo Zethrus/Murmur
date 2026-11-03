@@ -46,7 +46,7 @@ export async function harness(overrides={}) {
     getComputedStyle:()=>({paddingTop:padding,paddingRight:padding,paddingBottom:padding,paddingLeft:padding})};
   const context=vm.createContext({console,document,window,HTMLElement:Element,HTMLInputElement:Element,HTMLButtonElement:Element,performance,URLSearchParams,ResizeObserver:observers.ResizeObserver,...timers});
   const bridge=new vm.SyntheticModule(["call","on","appVersion","startOverlayDrag"],function(){this.setExport("call",call);this.setExport("on",on);this.setExport("appVersion",async()=>"0.1.0");
-    this.setExport("startOverlayDrag",async()=>{drags.push(true);});},{context});
+    this.setExport("startOverlayDrag",async()=>{drags.push(true);if(overrides.startOverlayDrag) await overrides.startOverlayDrag();});},{context});
   const cache=new Map();
   async function load(file){file=resolve(file);if(file.endsWith("src/bridge.ts"))return bridge;if(cache.has(file))return cache.get(file);
     const source=await readFile(file,"utf8"),code=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;

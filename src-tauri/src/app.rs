@@ -123,6 +123,10 @@ impl AppState {
             shutdown_job: Mutex::new(None),
         })
     }
+    pub fn cancel_enhance_download(&self, operation_id: u64) -> Result<bool> {
+        let _transaction = lock(&self.transaction)?;
+        Ok(self.enhance.service.cancel_download(operation_id))
+    }
     pub fn config(&self) -> Result<Config> {
         Ok(lock(&self.config)?.clone())
     }
@@ -229,7 +233,22 @@ impl AppState {
         Ok(())
     }
     pub fn update(&self, patch: Value) -> Result<Config> {
+        self.update_checked(patch, || true)?
+            .context("Configuration update skipped")
+    }
+    pub fn update_checked(
+        &self,
+        patch: Value,
+        authorized: impl FnOnce() -> bool,
+    ) -> Result<Option<Config>> {
         let _transaction = lock(&self.transaction)?;
+        if patch.pointer("/enhance/auto_rewrite") == Some(&Value::Bool(false)) {
+            // Even an explicit false → false choice revokes pending download consent.
+            self.enhance.service.clear_enable_intent();
+        }
+        if !authorized() {
+            return Ok(None);
+        }
         let old = self.config()?;
         let new = old.patched(patch)?;
         self.apply_runtime(&old, &new)?;
@@ -244,7 +263,7 @@ impl AppState {
             .context("Emit config update")?;
         self.send(Action::Reconfigure)?;
         self.refresh_tray()?;
-        Ok(new)
+        Ok(Some(new))
     }
     pub fn reload(&self) -> Result<()> {
         let _transaction = lock(&self.transaction)?;

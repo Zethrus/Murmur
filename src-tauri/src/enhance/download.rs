@@ -10,7 +10,10 @@ use std::{
     fs,
     io::{Read, Write},
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -31,19 +34,30 @@ pub enum Phase {
 
 pub trait Transport: Send + Sync {
     /// Open the immutable URL; returns (content length if known, body reader).
-    fn open(&self, url: &str) -> Result<(Option<u64>, Box<dyn Read + Send>), EnhanceError>;
+    fn open(
+        &self,
+        url: &str,
+        cancel: &std::sync::Arc<AtomicBool>,
+    ) -> Result<(Option<u64>, Box<dyn Read + Send>), EnhanceError>;
 }
 
 /// Hosts the model download may reach: the catalog host and Hugging Face's download CDNs.
 pub fn allowed_host(host: &str) -> bool {
-    let host = host.to_ascii_lowercase();
-    host == "huggingface.co"
-        || host.ends_with(".huggingface.co")
-        || host == "hf.co"
-        || host.ends_with(".hf.co")
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "huggingface.co"
+            | "cdn-lfs.huggingface.co"
+            | "cdn-lfs-us-1.hf.co"
+            | "cas-bridge.xethub.hf.co"
+            | "cas-server.xethub.hf.co"
+    )
 }
 
 pub fn allowed_url(url: &reqwest::Url) -> bool {
+    #[cfg(test)]
+    if url.scheme() == "http" && url.host_str() == Some("127.0.0.1") {
+        return true;
+    }
     url.scheme() == "https"
         && url.username().is_empty()
         && url.password().is_none()
@@ -52,9 +66,8 @@ pub fn allowed_url(url: &reqwest::Url) -> bool {
 }
 
 pub struct Https {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
-
 impl Https {
     pub fn new() -> Result<Self, EnhanceError> {
         let policy = reqwest::redirect::Policy::custom(|attempt| {
@@ -66,11 +79,10 @@ impl Https {
                 attempt.error("redirect to a disallowed host")
             }
         });
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .redirect(policy)
             .https_only(true)
             .connect_timeout(Duration::from_secs(20))
-            .timeout(None)
             .user_agent(concat!("Murmur/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|_| {
@@ -80,8 +92,49 @@ impl Https {
     }
 }
 
+struct StreamReader {
+    chunks: mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    current: std::io::Cursor<Vec<u8>>,
+    cancel: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Read for StreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.cancel.load(Ordering::Acquire) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ));
+            }
+            if (self.current.position() as usize) < self.current.get_ref().len() {
+                return self.current.read(buf);
+            }
+            match self.chunks.recv_timeout(Duration::from_millis(100)) {
+                Ok(Ok(chunk)) => self.current = std::io::Cursor::new(chunk),
+                Ok(Err(error)) => return Err(error),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            }
+        }
+    }
+}
+impl Drop for StreamReader {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 impl Transport for Https {
-    fn open(&self, url: &str) -> Result<(Option<u64>, Box<dyn Read + Send>), EnhanceError> {
+    fn open(
+        &self,
+        url: &str,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<(Option<u64>, Box<dyn Read + Send>), EnhanceError> {
         let parsed = reqwest::Url::parse(url)
             .map_err(|_| EnhanceError::new(ErrorCode::Network, "Invalid model URL"))?;
         if !allowed_url(&parsed) {
@@ -90,28 +143,103 @@ impl Transport for Https {
                 "Model URL is not allowed",
             ));
         }
-        // Never log the URL after redirects: CDN URLs are signed.
-        let response = self.client.get(parsed).send().map_err(|error| {
-            tracing::warn!(
-                redirect = error.is_redirect(),
-                timeout = error.is_timeout(),
-                "Enhance download request failed"
-            );
-            EnhanceError::new(ErrorCode::Network, "Could not reach the model server")
-        })?;
-        if !response.status().is_success() {
-            return Err(EnhanceError::new(
-                ErrorCode::Network,
-                &format!("Model server returned HTTP {}", response.status().as_u16()),
-            ));
+        let client = self.client.clone();
+        let flag = cancel.clone();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = stopped.clone();
+        let (headers_tx, headers_rx) = mpsc::channel();
+        let (chunks_tx, chunks_rx) = mpsc::sync_channel(2);
+        let thread = std::thread::Builder::new().name("murmur-enhance-http".into()).spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+                let _ = headers_tx.send(Err(EnhanceError::new(ErrorCode::Network, "Could not start download")));
+                return;
+            };
+            runtime.block_on(async move {
+                let request = client.get(parsed).send();
+                tokio::pin!(request);
+                let mut response = loop {
+                    tokio::select! {
+                        answer = &mut request => match answer {
+                            Ok(response) => break response,
+                            Err(_) => { let _ = headers_tx.send(Err(EnhanceError::new(ErrorCode::Network, "Could not reach the model server"))); return; }
+                        },
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                            if flag.load(Ordering::Acquire) || stop.load(Ordering::Acquire) { return; }
+                        }
+                    }
+                };
+                if !response.status().is_success() || !allowed_url(response.url()) {
+                    let _ = headers_tx.send(Err(EnhanceError::new(ErrorCode::Network, "Model server rejected the download")));
+                    return;
+                }
+                if headers_tx.send(Ok(response.content_length())).is_err() { return; }
+                loop {
+                    let chunk = tokio::select! {
+                        chunk = response.chunk() => chunk,
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                            if flag.load(Ordering::Acquire) || stop.load(Ordering::Acquire) { return; }
+                            continue;
+                        }
+                    };
+                    let value = match chunk {
+                        Ok(Some(bytes)) => Ok(bytes.to_vec()),
+                        Ok(None) => return,
+                        Err(_) => Err(std::io::Error::other("download interrupted")),
+                    };
+                    let failed = value.is_err();
+                    let mut pending = value;
+                    loop {
+                        match chunks_tx.try_send(pending) {
+                            Ok(()) => break,
+                            Err(mpsc::TrySendError::Disconnected(_)) => return,
+                            Err(mpsc::TrySendError::Full(value)) => {
+                                pending = value;
+                                if flag.load(Ordering::Acquire) || stop.load(Ordering::Acquire) { return; }
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                            }
+                        }
+                    }
+                    if failed { return; }
+                }
+            });
+        }).map_err(|_| EnhanceError::new(ErrorCode::Network, "Could not start download"))?;
+        let headers = loop {
+            if cancel.load(Ordering::Acquire) {
+                stopped.store(true, Ordering::Release);
+                let _ = thread.join();
+                return Err(EnhanceError::new(
+                    ErrorCode::Cancelled,
+                    "Download cancelled",
+                ));
+            }
+            match headers_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(value) => break value,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => {
+                    break Err(EnhanceError::new(
+                        ErrorCode::Network,
+                        "Could not reach the model server",
+                    ))
+                }
+            }
+        };
+        match headers {
+            Ok(length) => Ok((
+                length,
+                Box::new(StreamReader {
+                    chunks: chunks_rx,
+                    current: std::io::Cursor::new(Vec::new()),
+                    cancel: cancel.clone(),
+                    stopped,
+                    thread: Some(thread),
+                }),
+            )),
+            Err(error) => {
+                stopped.store(true, Ordering::Release);
+                let _ = thread.join();
+                Err(error)
+            }
         }
-        if !allowed_url(response.url()) {
-            return Err(EnhanceError::new(
-                ErrorCode::Network,
-                "Model download was redirected to a disallowed host",
-            ));
-        }
-        Ok((response.content_length(), Box::new(response)))
     }
 }
 
@@ -124,7 +252,7 @@ pub fn install(
     entry: &Entry,
     root: &Path,
     transport: &dyn Transport,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
     available_space: Option<u64>,
     progress: &mut dyn FnMut(Phase, u64, u64),
 ) -> Result<(), EnhanceError> {
@@ -142,7 +270,7 @@ pub fn install(
     fs::create_dir_all(&dir).map_err(|_| io_error("Could not create the model folder"))?;
     let part = dir.join("model.gguf.part");
     let result = (|| {
-        let (length, mut body) = transport.open(&entry.url())?;
+        let (length, mut body) = transport.open(&entry.url(), cancel)?;
         if length.is_some_and(|n| n != total) {
             return Err(EnhanceError::new(
                 ErrorCode::SizeMismatch,
@@ -163,7 +291,11 @@ pub fn install(
                 ));
             }
             let n = body.read(&mut buffer).map_err(|_| {
-                EnhanceError::new(ErrorCode::Network, "The download was interrupted")
+                if cancel.load(Ordering::Acquire) {
+                    EnhanceError::new(ErrorCode::Cancelled, "Download cancelled")
+                } else {
+                    EnhanceError::new(ErrorCode::Network, "The download was interrupted")
+                }
             })?;
             if n == 0 {
                 break;
@@ -276,7 +408,11 @@ mod tests {
         }
     }
     impl Transport for Fixture {
-        fn open(&self, _: &str) -> Result<(Option<u64>, Box<dyn Read + Send>), EnhanceError> {
+        fn open(
+            &self,
+            _: &str,
+            _: &Arc<AtomicBool>,
+        ) -> Result<(Option<u64>, Box<dyn Read + Send>), EnhanceError> {
             *self.opened.lock().unwrap() += 1;
             let data = Cursor::new(self.body.clone());
             Ok(match self.fail_after {
@@ -321,7 +457,7 @@ mod tests {
             entry,
             dir,
             t,
-            &AtomicBool::new(false),
+            &Arc::new(AtomicBool::new(false)),
             None,
             &mut |_, _, _| {},
         )
@@ -336,7 +472,7 @@ mod tests {
             entry,
             &dir,
             &fixture(&body),
-            &AtomicBool::new(false),
+            &Arc::new(AtomicBool::new(false)),
             Some(u64::MAX),
             &mut |p, r, t| phases.push((p, r, t)),
         )
@@ -399,7 +535,7 @@ mod tests {
             entry,
             &dir,
             &fixture(&body),
-            &AtomicBool::new(true),
+            &Arc::new(AtomicBool::new(true)),
             None,
             &mut |_, _, _| {},
         )
@@ -410,7 +546,7 @@ mod tests {
             entry,
             &dir,
             &t,
-            &AtomicBool::new(false),
+            &Arc::new(AtomicBool::new(false)),
             Some(10),
             &mut |_, _, _| {},
         )
@@ -436,6 +572,55 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
+    fn stalled_headers_and_body_cancel_promptly() {
+        use std::{io::Write as _, net::TcpListener, sync::mpsc as channel, thread};
+        for headers in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release, wait) = channel::channel::<()>();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                if headers {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\na")
+                        .unwrap();
+                }
+                let _ = wait.recv_timeout(Duration::from_secs(3));
+            });
+            let transport = Https {
+                client: reqwest::Client::builder().build().unwrap(),
+            };
+            let flag = Arc::new(AtomicBool::new(false));
+            let cancelling = flag.clone();
+            let timer = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(150));
+                cancelling.store(true, Ordering::Release);
+            });
+            let start = Instant::now();
+            let opened = transport.open(&format!("http://{address}/model"), &flag);
+            if headers {
+                let (_, mut body) = opened.unwrap();
+                let mut buffer = [0u8; 1024];
+                assert_eq!(body.read(&mut buffer).unwrap(), 1);
+                assert!(body.read(&mut buffer).is_err());
+            } else {
+                assert!(matches!(
+                    opened,
+                    Err(EnhanceError {
+                        code: ErrorCode::Cancelled,
+                        ..
+                    })
+                ));
+            }
+            assert!(start.elapsed() < Duration::from_secs(2));
+            timer.join().unwrap();
+            release.send(()).unwrap();
+            server.join().unwrap();
+        }
+    }
+    #[test]
     fn url_policy() {
         for ok in [
             "https://huggingface.co/a/resolve/b/c",
@@ -451,6 +636,8 @@ mod tests {
             "https://huggingface.co.evil.com/a",
             "https://huggingface.co:8443/a",
             "https://example.com/a",
+            "https://unreviewed.huggingface.co/a",
+            "https://unreviewed.hf.co/a",
         ] {
             assert!(!allowed_url(&reqwest::Url::parse(bad).unwrap()), "{bad}");
         }

@@ -221,9 +221,23 @@ pub fn install_enhance_model(
     Ok(json!({ "operation_id": id }))
 }
 #[tauri::command]
-pub fn cancel_enhance_download(state: State<'_, AppState>, operation_id: String) -> Reply<()> {
+pub async fn cancel_enhance_download(app: AppHandle, operation_id: String) -> Reply<()> {
+    let state = app.state::<AppState>();
+    if state.enhance.service.removing() {
+        return Err("Busy: model removal is running".into());
+    }
     if let Some(id) = crate::enhance::runtime::parse_id(&operation_id) {
-        state.enhance.service.cancel_download(id);
+        return tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<AppState>();
+            if !state.cancel_enhance_download(id).map_err(error)?
+                && state.enhance.service.removing()
+            {
+                return Err("Busy: model removal is running".into());
+            }
+            Ok(())
+        })
+        .await
+        .map_err(error)?;
     }
     Ok(())
 }
@@ -248,9 +262,14 @@ pub fn rewrite_last_dictation(state: State<'_, AppState>) -> Reply<Value> {
         .rewrite(&state, crate::enhance::session::Trigger::Manual))
 }
 #[tauri::command]
-pub fn accept_enhancement(state: State<'_, AppState>, suggestion_id: String) -> Reply<Value> {
+pub async fn accept_enhancement(app: AppHandle, suggestion_id: String) -> Reply<Value> {
     let id = crate::enhance::runtime::parse_id(&suggestion_id);
-    Ok(state.enhance.accept(&state, id))
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.enhance.accept(&state, id)
+    })
+    .await
+    .map_err(error)
 }
 #[tauri::command]
 pub fn discard_enhancement(state: State<'_, AppState>, suggestion_id: String) -> Reply<()> {
@@ -283,9 +302,18 @@ pub fn set_overlay_size(
     width: f64,
     height: f64,
     layout_revision: u64,
+    layout_instance: String,
 ) -> Reply<()> {
     require_window(&window, "overlay")?;
     let prefs = state.config().map_err(error)?.overlay;
-    overlay::set_size(&app, &prefs, width, height, layout_revision).map_err(error)?;
+    overlay::set_size(
+        &app,
+        &prefs,
+        width,
+        height,
+        layout_revision,
+        &layout_instance,
+    )
+    .map_err(error)?;
     Ok(())
 }

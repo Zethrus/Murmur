@@ -77,6 +77,7 @@ pub struct Gate {
     pub backend: bool,
     pub overlay: bool,
     pub dictating: bool,
+    pub rewrite_code: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,9 +109,8 @@ impl Default for PhaseState {
     }
 }
 
-pub fn rewritable(record: &DeliveryRecord) -> bool {
-    record.config.enhance.rewrite_code
-        || (record.style == Style::Prose && !crate::inject::is_terminal(&record.focused))
+pub fn rewritable(record: &DeliveryRecord, rewrite_code: bool) -> bool {
+    rewrite_code || (record.style == Style::Prose && !crate::inject::is_terminal(&record.focused))
 }
 
 impl Session {
@@ -195,7 +195,7 @@ impl Session {
         if !gate.overlay {
             return Err(RewriteStatus::Unavailable);
         }
-        if !rewritable(record) {
+        if !rewritable(record, gate.rewrite_code) {
             if trigger == Trigger::Manual {
                 self.notice("Code and terminal dictation is not rewritten.", now);
             }
@@ -263,7 +263,9 @@ impl Session {
                     .strip_suffix(separator.as_str())
                     .unwrap_or(&delivery)
                     .to_owned();
-                if proposed.is_empty() || proposed == record.cleaned_body.trim() {
+                if !super::output::within_limit(&delivery) {
+                    self.notice("Enhance delivery exceeded the size limit", now);
+                } else if proposed.is_empty() || proposed == record.cleaned_body.trim() {
                     self.notice("No changes suggested", now);
                 } else {
                     self.suggestion = Some(Suggestion {
@@ -285,13 +287,19 @@ impl Session {
                 self.set(Phase::None);
                 self.message = None;
             }
+            Err(error) if error.code == ErrorCode::Timeout => {
+                self.notice("Enhance stopped: generation exceeded the configured time limit. Original dictation is unchanged.", now);
+                self.notice_until = Some(now + Duration::from_secs(12));
+            }
             Err(error) => self.notice(&error.message, now),
         }
         true
     }
     pub fn accept(&mut self, suggestion_id: u64) -> AcceptDecision {
         match &self.suggestion {
-            Some(s) if s.id == suggestion_id => {
+            Some(s)
+                if s.id == suggestion_id && self.expires.is_some_and(|at| at > Instant::now()) =>
+            {
                 let again = s.copied;
                 let text = s.delivery.clone();
                 if !again {
