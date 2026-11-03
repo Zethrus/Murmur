@@ -9,6 +9,7 @@ import hashlib
 import json
 import pathlib
 import re
+import shlex
 import sys
 
 BASELINE_OFF = (
@@ -73,13 +74,17 @@ def linked_cache(target, artifact):
 
 
 def audit_flags(text, origin, seen):
-    # Compiler response files are relative to the generated build directory (or the
-    # flags file itself for standalone fixtures). A missing/unreadable file is unsafe.
-    for match in re.finditer(r'(?<![\w@])@(?:"([^"]+)"|([^\s"\';]+))', text):
-        name = match.group(1) or match.group(2)
-        paths = [origin.parent / name, seen[0] / name]
-        response = next((p.resolve() for p in paths if p.is_file()), None)
-        if response is None or response in seen[1]:
+    # Make/Ninja invoke the compiler from the build root, not flags.make's directory.
+    # Shell quotes may surround the whole @argument or just its filename.
+    pattern = r'''(?<![\w@])(?:["']@([^"']+)["']|@(?:"([^"]+)"|'([^']+)'|([^\s"';]+)))'''
+    matches = list(re.finditer(pattern, text))
+    for at in re.finditer(r'(?<![\w@])@', text):
+        if not any(match.start() <= at.start() < match.end() for match in matches):
+            raise ValueError(f"{origin}: unsupported response file syntax")
+    for match in matches:
+        name = next(group for group in match.groups() if group is not None)
+        response = (seen[0] / name).resolve()
+        if not response.is_file() or response in seen[1]:
             raise ValueError(f"{origin}: unresolved or recursive response file @{name}")
         seen[1].add(response)
         audit_flags(response.read_text(), response, seen)
@@ -113,7 +118,29 @@ def audit_cache(cache, windows=False):
         raise ValueError(f"{cache}: no generated compiler flags to audit (Windows baseline unverified)")
     seen = (cache.parent, set())
     for file in files:
-        audit_flags(file.read_text(), file, seen)
+        if file.name == 'compile_commands.json':
+            entries = json.loads(file.read_text())
+            if not isinstance(entries, list) or not entries:
+                raise ValueError(f"{file}: missing compiler invocations")
+            for entry in entries:
+                directory = entry.get('directory')
+                if not isinstance(directory, str) or not pathlib.Path(directory).is_absolute():
+                    raise ValueError(f"{file}: ambiguous compiler working directory")
+                cwd = pathlib.Path(directory).resolve()
+                if not cwd.is_dir():
+                    raise ValueError(f"{file}: unresolved compiler working directory {directory}")
+                command = entry.get('command')
+                arguments = entry.get('arguments')
+                if command is not None and arguments is not None:
+                    raise ValueError(f"{file}: ambiguous compiler arguments")
+                if isinstance(command, str):
+                    audit_flags(command, file, (cwd, set()))
+                elif isinstance(arguments, list) and arguments and all(isinstance(arg, str) for arg in arguments):
+                    audit_flags(' '.join(shlex.quote(arg) for arg in arguments), file, (cwd, set()))
+                else:
+                    raise ValueError(f"{file}: missing compiler arguments")
+        else:
+            audit_flags(file.read_text(), file, seen)
     for line in lines:
         if re.match(r'CMAKE_(?:C|CXX)_FLAGS(?:_[A-Z_]+)?:STRING=', line):
             audit_flags(line.split('=', 1)[1], cache, seen)

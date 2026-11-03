@@ -2727,13 +2727,15 @@ dependencies = [
 
 [[package]]
 name = "murmur"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arboard",
  "base64 0.22.1",
  "cpal",
  "enigo",
+ "gdkx11",
+ "gtk",
  "hound",
  "libc",
  "llama-cpp-2",

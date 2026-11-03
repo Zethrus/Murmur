@@ -104,6 +104,7 @@ fn remove_duplicates(text: &str, saved: &[String]) -> String {
     let mut quoted: Option<char> = None;
     let mut code = false;
     let mut previous_word: Option<&str> = None;
+    let marker = regex::Regex::new("\u{e000}([0-9]+)\u{e001}").expect("static marker regex");
     for token in text.split(' ') {
         let outside = quoted.is_none() && !code;
         let word = outside && !token.is_empty() && token.chars().all(char::is_alphabetic);
@@ -119,13 +120,14 @@ fn remove_duplicates(text: &str, saved: &[String]) -> String {
         // apostrophe between letters is a contraction, not a quote delimiter.
         // A shielded token may contain an opening/closing quote. Inspect it for
         // delimiters, but never use its restored words for duplicate comparison.
-        let inspect = token
-            .strip_prefix('\u{e000}')
-            .and_then(|t| t.strip_suffix('\u{e001}'))
-            .and_then(|index| index.parse::<usize>().ok())
-            .and_then(|index| saved.get(index))
-            .map(String::as_str)
-            .unwrap_or(token);
+        let inspect = marker.replace_all(token, |cap: &Captures<'_>| {
+            cap[1]
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| saved.get(index))
+                .cloned()
+                .unwrap_or_default()
+        });
         let chars: Vec<char> = inspect.chars().collect();
         for (i, &ch) in chars.iter().enumerate() {
             if ch == '`' {
@@ -465,6 +467,19 @@ mod tests {
             "Say ‘don’t go go now’ "
         );
         assert_eq!(process("the the the the release", &c), "The release ");
+        assert_eq!(
+            process("say \"fooBar comma go go now\"", &c),
+            "Say \"fooBar, go go now\" "
+        );
+        assert_eq!(
+            process("say 'please go go now'", &c),
+            "Say 'please go go now' "
+        );
+        assert_eq!(
+            process("say ‘don’t go go now’", &c),
+            "Say ‘don’t go go now’ "
+        );
+        assert_eq!(process("say fooBar fooBar", &c), "Say fooBar fooBar ");
     }
     #[test]
     fn whitespace_and_sentences() {

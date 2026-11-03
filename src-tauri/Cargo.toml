@@ -1,6 +1,6 @@
 [package]
 name = "murmur"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Local, private dictation"
@@ -24,7 +24,7 @@ cpal = "0.15"
 enigo = { version = "0.2", default-features = false, features = ["x11rb"] }
 arboard = "3"
 # Direct X11 access for modifier-state polling before synthetic typing.
-x11rb = { version = "0.13", default-features = false }
+x11rb = { version = "0.13", default-features = false, features = ["shape"] }
 
 rodio = { version = "0.20", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -50,6 +50,10 @@ llama-cpp-sys-2 = { version = "=0.1.160", default-features = false, optional = t
 # Free-space check before an explicit Enhance model download.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gdkx11 = "0.18"
 # Atomic replacement of existing configuration files on Windows.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

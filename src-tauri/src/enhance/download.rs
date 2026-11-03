@@ -114,7 +114,17 @@ impl Read for StreamReader {
             match self.chunks.recv_timeout(Duration::from_millis(100)) {
                 Ok(Ok(chunk)) => self.current = std::io::Cursor::new(chunk),
                 Ok(Err(error)) => return Err(error),
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // A closed channel is end-of-stream when the download finished and a
+                    // cancellation when the flag is set; never report a cancel as EOF.
+                    if self.cancel.load(Ordering::Acquire) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "cancelled",
+                        ));
+                    }
+                    return Ok(0);
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
             }
         }
@@ -217,8 +227,18 @@ impl Transport for Https {
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(_) => {
                     break Err(EnhanceError::new(
-                        ErrorCode::Network,
-                        "Could not reach the model server",
+                        // The worker closes the channel when it stops; that is a
+                        // cancellation when the flag is set, not a server failure.
+                        if cancel.load(Ordering::Acquire) {
+                            ErrorCode::Cancelled
+                        } else {
+                            ErrorCode::Network
+                        },
+                        if cancel.load(Ordering::Acquire) {
+                            "Download cancelled"
+                        } else {
+                            "Could not reach the model server"
+                        },
                     ))
                 }
             }
@@ -578,10 +598,12 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let (release, wait) = channel::channel::<()>();
+            let (request_seen, seen) = channel::channel::<()>();
             let server = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = [0u8; 1024];
                 let _ = stream.read(&mut request);
+                let _ = request_seen.send(());
                 if headers {
                     stream
                         .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\na")
@@ -593,17 +615,26 @@ mod tests {
                 client: reqwest::Client::builder().build().unwrap(),
             };
             let flag = Arc::new(AtomicBool::new(false));
-            let cancelling = flag.clone();
-            let timer = thread::spawn(move || {
-                thread::sleep(Duration::from_millis(150));
-                cancelling.store(true, Ordering::Release);
-            });
+            // Cancellation is driven by an event, never a sleep: a timer that fires
+            // late under parallel test load used to let the second body read block
+            // until the server closed, so the read returned Ok(0) instead of an error.
+            let timer = if headers {
+                None
+            } else {
+                let cancelling = flag.clone();
+                Some(thread::spawn(move || {
+                    if seen.recv_timeout(Duration::from_secs(3)).is_ok() {
+                        cancelling.store(true, Ordering::Release);
+                    }
+                }))
+            };
             let start = Instant::now();
             let opened = transport.open(&format!("http://{address}/model"), &flag);
             if headers {
                 let (_, mut body) = opened.unwrap();
                 let mut buffer = [0u8; 1024];
                 assert_eq!(body.read(&mut buffer).unwrap(), 1);
+                flag.store(true, Ordering::Release);
                 assert!(body.read(&mut buffer).is_err());
             } else {
                 assert!(matches!(
@@ -615,7 +646,9 @@ mod tests {
                 ));
             }
             assert!(start.elapsed() < Duration::from_secs(2));
-            timer.join().unwrap();
+            if let Some(timer) = timer {
+                timer.join().unwrap();
+            }
             release.send(()).unwrap();
             server.join().unwrap();
         }

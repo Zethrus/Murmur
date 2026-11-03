@@ -203,8 +203,8 @@ where
     })
     .map_err(|e| anyhow::anyhow!("Queue overlay click-through: {e}"))?;
     receive
-        .recv()
-        .context("Overlay click-through acknowledgement")?
+        .recv_timeout(Duration::from_secs(2))
+        .context("Overlay click-through native acknowledgement timed out")?
 }
 
 fn visibility_on_main(
@@ -388,6 +388,21 @@ fn hide_main(app: &AppHandle) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(target_os = "linux")]
+fn apply_native_cursor(window: &gtk::ApplicationWindow, busy: bool) -> Result<()> {
+    use gtk::prelude::*;
+    if busy {
+        let gdk = window.window().context("Overlay GTK window not realized")?;
+        let region =
+            gtk::cairo::Region::create_rectangle(&gtk::cairo::RectangleInt::new(0, 0, 1, 1));
+        gdk.input_shape_combine_region(&region, 0, 0);
+        gdk.display().flush();
+    } else {
+        window.input_shape_combine_region(None);
+    }
+    Ok(())
+}
+
 /// Click-through while text is being injected so a stray click cannot land on the overlay.
 pub fn set_busy(app: &AppHandle, busy: bool) -> Result<()> {
     runtime().busy = busy;
@@ -395,7 +410,19 @@ pub fn set_busy(app: &AppHandle, busy: bool) -> Result<()> {
     let action = move || {
         if let Some(window) = handle.get_webview_window("overlay") {
             if window.is_visible().context("Check overlay visibility")? {
-                if let Err(error) = window.set_ignore_cursor_events(busy) {
+                if runtime().busy != busy {
+                    return Ok(()); // timed-out or superseded request
+                }
+                #[cfg(target_os = "linux")]
+                let updated = window
+                    .gtk_window()
+                    .context("Get overlay GTK window")
+                    .and_then(|gtk| apply_native_cursor(&gtk, busy));
+                #[cfg(not(target_os = "linux"))]
+                let updated = window
+                    .set_ignore_cursor_events(busy)
+                    .context("Set overlay cursor handling");
+                if let Err(error) = updated {
                     tracing::warn!(%error, "Overlay cursor handling unavailable; hiding it");
                     window.hide().context("Hide unsupported overlay")?;
                 }
@@ -408,6 +435,18 @@ pub fn set_busy(app: &AppHandle, busy: bool) -> Result<()> {
         let result = queue_busy_ack(|task| app.run_on_main_thread(move || task()), action);
         if result.is_err() {
             runtime().busy = false;
+            // A timed-out dispatch may still be in flight. Queue restoration after it.
+            let handle = app.clone();
+            let _ = visibility_on_main(app, move |_| {
+                if let Some(window) = handle.get_webview_window("overlay") {
+                    #[cfg(target_os = "linux")]
+                    if let Ok(gtk) = window.gtk_window() {
+                        let _ = apply_native_cursor(&gtk, false);
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = window.set_ignore_cursor_events(false);
+                }
+            });
         }
         result
     } else {
@@ -437,6 +476,83 @@ mod visibility_tests {
         task();
         injection.recv_timeout(Duration::from_secs(1)).unwrap();
         worker.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acknowledgement_follows_native_x11_input_shape() {
+        use gtk::prelude::*;
+        use x11rb::protocol::shape::{ConnectionExt as _, SK};
+        gtk::init().unwrap();
+        let app = gtk::Application::new(Some("com.murmur.native-ack-test"), Default::default());
+        // Registration can lose a transient race with the GTK lock when the test binary
+        // runs other tests in parallel; retry briefly and report the real error if it stays shut.
+        let mut failure = None;
+        for _ in 0..20 {
+            match app.register(None::<&gtk::gio::Cancellable>) {
+                Ok(()) => {
+                    failure = None;
+                    break;
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        if let Some(error) = failure {
+            panic!("GTK application registration unavailable: {error}");
+        }
+        let window = gtk::ApplicationWindow::new(&app);
+        window.set_default_size(200, 100);
+        window.show_all();
+        let gdk = window.window().unwrap();
+        let xid = gdk.downcast::<gdkx11::X11Window>().unwrap().xid() as u32;
+        let (conn, _) = x11rb::connect(None).unwrap();
+        let shape = || {
+            conn.shape_get_rectangles(xid, SK::INPUT)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .rectangles
+                .into_iter()
+                .map(|r| (r.x, r.y, r.width, r.height))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shape(), vec![(0, 0, 200, 100)]);
+        let (queue, main) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let (ready, injection) = mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            super::queue_busy_ack(
+                |task| queue.send(task),
+                || {
+                    // The production native boundary, not a simulated acknowledgement.
+                    let window = gtk::Window::list_toplevels()
+                        .into_iter()
+                        .find_map(|w| w.downcast::<gtk::ApplicationWindow>().ok())
+                        .unwrap();
+                    super::apply_native_cursor(&window, true)
+                },
+            )
+            .unwrap();
+            ready.send(()).unwrap();
+        });
+        // The queued closure executes on this GTK thread, not on the worker.
+        let task = main.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(injection.recv_timeout(Duration::from_millis(100)).is_err());
+        task();
+        injection.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(shape(), vec![(0, 0, 1, 1)]);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn stalled_executor_returns_explicit_timeout() {
+        let (queue, _main) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let start = Instant::now();
+        let error = super::queue_busy_ack(|task| queue.send(task), || Ok(())).unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

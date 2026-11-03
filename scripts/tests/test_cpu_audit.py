@@ -41,6 +41,54 @@ class AuditTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'unsupported CPU flag'):
                 audit.audit_cache(cache)
 
+    def test_quoted_and_conflicting_response_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cache = root / 'CMakeCache.txt'
+            cache.write_text(''.join(f'{name}:BOOL=OFF\n' for name in REQUIRED_OFF))
+            directory = root / 'CMakeFiles' / 'cpu.dir'
+            directory.mkdir(parents=True)
+            flags = directory / 'flags.make'
+            # GCC interprets both quoted forms as response files in the build cwd.
+            (root / 'unsafe flags.rsp').write_text('-mavx2')
+            for value in ("@'unsafe flags.rsp'", '@"unsafe flags.rsp"'):
+                with self.subTest(value=value):
+                    flags.write_text('CXX_FLAGS = ' + value)
+                    with self.assertRaises(ValueError):
+                        audit.audit_cache(cache)
+            (directory / 'same.rsp').write_text('-msse2')
+            (root / 'same.rsp').write_text('-mavx2')
+            flags.write_text('CXX_FLAGS = @same.rsp')
+            with self.assertRaises(ValueError):
+                audit.audit_cache(cache)
+            (root / 'same.rsp').unlink()
+            with self.assertRaises(ValueError):
+                audit.audit_cache(cache)
+
+    def test_compile_commands_working_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            cache = root / 'CMakeCache.txt'
+            cache.write_text(''.join(f'{name}:BOOL=OFF\n' for name in REQUIRED_OFF))
+            directory = root / 'other'
+            directory.mkdir()
+            (root / 'same.rsp').write_text('-msse2')
+            (directory / 'same.rsp').write_text('-mavx2')
+            commands = root / 'compile_commands.json'
+            commands.write_text(json.dumps([{'directory': str(directory), 'command': "c++ @'same.rsp'"}]))
+            with self.assertRaisesRegex(ValueError, 'unsupported CPU flag'):
+                audit.audit_cache(cache)
+            commands.write_text(json.dumps([{'directory': 'other', 'arguments': ['c++', '@same.rsp']}]))
+            with self.assertRaisesRegex(ValueError, 'ambiguous compiler working directory'):
+                audit.audit_cache(cache)
+            commands.write_text(json.dumps([{'directory': str(directory), 'arguments': ['c++', '@same.rsp']}]))
+            with self.assertRaisesRegex(ValueError, 'unsupported CPU flag'):
+                audit.audit_cache(cache)
+            commands.write_text(json.dumps([{'directory': str(directory), 'command': 'c++ -msse2',
+                                              'arguments': ['c++', '-mavx2']}]))
+            with self.assertRaisesRegex(ValueError, 'ambiguous compiler arguments'):
+                audit.audit_cache(cache)
+
     def test_independent_baseline_options(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = pathlib.Path(tmp) / 'CMakeCache.txt'
