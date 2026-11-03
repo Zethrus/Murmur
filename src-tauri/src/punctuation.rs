@@ -60,6 +60,49 @@ fn replace(text: &str, pattern: &str, value: &str) -> String {
         .replace_all(text, value)
         .into_owned()
 }
+const SENTENCE: &str = ",.?!:;";
+/// Collapse a spoken-command mark with an adjacent identical recogniser mark ("hello, comma"),
+/// leaving intentional repeats ("...", "!!") that did not come from a command untouched.
+fn collapse_spoken(text: &str) -> String {
+    // (character, came-from-spoken-command)
+    let mut items: Vec<(char, bool)> = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{e013}' {
+            if let Some(mark) = chars.next() {
+                items.push((mark, true));
+            }
+        } else {
+            items.push((c, false));
+        }
+    }
+    let solo = |items: &[(char, bool)], i: usize| {
+        let mark = items[i].0;
+        (i == 0 || items[i - 1] != (mark, false)) && items.get(i + 1) != Some(&(mark, false))
+    };
+    let mut drop = vec![false; items.len()];
+    for i in 0..items.len() {
+        if !items[i].1 {
+            continue;
+        }
+        let mark = items[i].0;
+        let prev = (0..i).rev().find(|&k| items[k].0 != ' ');
+        let next = (i + 1..items.len()).find(|&k| items[k].0 != ' ');
+        let pair = [prev, next]
+            .into_iter()
+            .flatten()
+            .find(|&k| items[k].0 == mark && !items[k].1 && !drop[k] && solo(&items, k));
+        if pair.is_some() {
+            drop[i] = true;
+        }
+    }
+    items
+        .iter()
+        .zip(drop)
+        .filter(|(_, d)| !d)
+        .map(|((c, _), _)| *c)
+        .collect()
+}
 pub fn spoken(text: &str, newlines: bool) -> String {
     // Only balanced spoken quotes are changed. Unmatched quote/unquote stays literal.
     let text = Regex::new(r"(?i)\bquote\b(.*?)\bunquote\b")
@@ -81,14 +124,27 @@ pub fn spoken(text: &str, newlines: bool) -> String {
                 .1;
             if symbol == "\n" && !newlines {
                 " ".to_owned()
+            } else if symbol.len() == 1 && SENTENCE.contains(symbol) {
+                // Provenance marker: this mark came from a spoken command.
+                format!("\u{e013}{symbol}")
             } else {
                 symbol.to_owned()
             }
         })
         .into_owned();
+    // Consecutive spoken marks join ("comma comma" -> ",,").
+    loop {
+        let joined = replace(&text, "(\u{e013}[,.?!:;]) +\u{e013}", "$1\u{e013}");
+        if joined == text {
+            break;
+        }
+        text = joined;
+    }
+    text = collapse_spoken(&text);
     text = replace(&text, r"[ \t]+", " ");
     text = replace(&text, r" *\n *", "\n");
-    text = replace(&text, r" *([,.:;!?\)\]\}]) *", "$1 ");
+    // Runs ("...", "!!", ").") stay together.
+    text = replace(&text, r" *([,.:;!?\)\]\}]+) *", "$1 ");
     text = replace(&text, r#"([.!?,:;]) +""#, "$1\"");
     text = replace(&text, r"([\(\[\{]) +", "$1");
     // Dot is distinct from a spoken period: foo dot bar is an identifier, foo period bar is prose.
@@ -147,6 +203,14 @@ mod tests {
             ),
             "foo_bar/src\\main.rs@host"
         );
+    }
+    #[test]
+    fn spoken_mark_collapses_with_recogniser_mark() {
+        assert_eq!(spoken("hello, comma world", false), "hello, world");
+        assert_eq!(spoken("done period. next", false), "done. next");
+        assert_eq!(spoken("wait... really", false), "wait... really");
+        assert_eq!(spoken("wow!! nice", false), "wow!! nice");
+        assert_eq!(spoken("a comma comma b", false), "a,, b");
     }
     #[test]
     fn quotes_and_newlines() {

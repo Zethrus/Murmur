@@ -25,11 +25,24 @@ if ($env:OS -ne 'Windows_NT') { throw 'Run this script on Windows x64.' }
 $Root = Split-Path -Parent $PSScriptRoot
 Push-Location $Root
 try {
-    foreach ($Command in @('python', 'node', 'npm', 'cargo', 'rustup')) {
+    foreach ($Command in @('python', 'node', 'npm', 'cargo', 'rustup', 'cmake', 'clang-cl')) {
         if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
             throw "Missing prerequisite: $Command (see README.md)"
         }
     }
+    if (-not $env:LIBCLANG_PATH) {
+        foreach ($Candidate in @("$env:ProgramFiles\LLVM\bin", "${env:ProgramFiles(x86)}\LLVM\bin")) {
+            if (Test-Path -LiteralPath (Join-Path $Candidate 'libclang.dll')) {
+                $env:LIBCLANG_PATH = $Candidate
+                break
+            }
+        }
+    }
+    if (-not $env:LIBCLANG_PATH -or -not (Test-Path -LiteralPath (Join-Path $env:LIBCLANG_PATH 'libclang.dll'))) {
+        throw 'Missing LLVM libclang.dll; set LIBCLANG_PATH to its directory.'
+    }
+    if (-not $env:CMAKE_BUILD_PARALLEL_LEVEL) { $env:CMAKE_BUILD_PARALLEL_LEVEL = '2' }
+    if (-not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = '2' }
     Invoke-Native 'python' @('-c', "import struct, sys; assert sys.version_info >= (3, 10); assert struct.calcsize('P') == 8, '64-bit Python required'")
     Invoke-Native 'node' @('-e', "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)")
     $env:TMP = Join-Path $Root '.cache\tmp'

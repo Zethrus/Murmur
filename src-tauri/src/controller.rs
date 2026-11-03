@@ -31,6 +31,10 @@ pub enum Action {
     MaxDuration,
     Fault(String),
     Preview(u64, Result<Value>),
+    /// Enhance: rewrite the last dictation (shortcut). Press-only, mode-independent.
+    Rewrite,
+    /// Enhance: accept (copy) the visible suggestion.
+    AcceptCurrent,
     Quit,
 }
 pub fn params(pcm: &[f32], config: &Config) -> Value {
@@ -113,7 +117,8 @@ impl Controller {
         self.preview_at = Instant::now() + Duration::from_secs(2);
         self.reset_at = None;
         self.hide_at = None;
-        state.app.emit("partial", json!({"text":""}))?;
+        state.enhance.begin_dictation(state);
+        state.enhance.set_partial(state, "");
         state.transition("listening")?;
         state.cue(Cue::Start);
         Ok(())
@@ -124,7 +129,7 @@ impl Controller {
         self.reset_at = None;
         self.hide_at = Some(Instant::now() + Duration::from_millis(1500));
         hotkey::escape(&state.app, false)?;
-        state.app.emit("partial", json!({"text":""}))?;
+        state.enhance.set_partial(state, "");
         state.transition("idle")
     }
     fn cancel(&mut self, state: &AppState) -> Result<()> {
@@ -178,13 +183,21 @@ impl Controller {
         );
         let focused = platform::focused_app(&state.app)?;
         let style = postproc::resolve_style(&self.config, &focused, self.force_code);
+        let body = postproc::clean_body(text, &self.config, style);
         let text = inject::safe_text(
             &postproc::process_style(text, &self.config, style),
             &focused,
         );
+        let mut delivered = None;
         if !text.is_empty() {
-            self.injector
-                .inject(&text, &self.config.injection, &focused, style)?;
+            // Click-through only while keystrokes/paste are in flight.
+            overlay::set_busy(&state.app, true);
+            let injected = self
+                .injector
+                .inject(&text, &self.config.injection, &focused, style);
+            overlay::set_busy(&state.app, false);
+            let path = injected?;
+            delivered = Some(path);
             let latency = start.elapsed().as_millis() as u64;
             tracing::info!(latency_ms = latency, app = %focused, style = ?style, chars = text.len(), "transcript delivered");
             state
@@ -208,6 +221,12 @@ impl Controller {
         state.refresh_engine()?;
         state.transition("done")?;
         self.reset_at = Some(Instant::now() + Duration::from_millis(900));
+        // The original is delivered first; Enhance only ever runs afterwards.
+        if let Some(path) = delivered {
+            state
+                .enhance
+                .delivered(state, body, text, style, &focused, path, &self.config);
+        }
         Ok(())
     }
     fn fail(&mut self, state: &AppState, error: &str) {
@@ -226,16 +245,25 @@ impl Controller {
         let now = Instant::now();
         if self.reset_at.is_some_and(|at| now >= at) {
             self.idle(state)?;
-            if state.config()?.overlay.idle_hide {
+            if state.config()?.overlay.idle_hide && !state.overlay_held() {
                 overlay::hide(&state.app)?;
                 self.hide_at = None;
             }
         }
         if self.hide_at.is_some_and(|at| now >= at) {
             self.hide_at = None;
-            if state.config()?.overlay.idle_hide {
+            if state.config()?.overlay.idle_hide && !state.overlay_held() && !self.active {
                 overlay::hide(&state.app)?;
             }
+        }
+        state.enhance.tick(state);
+        match overlay::settled_placement(&state.app) {
+            Ok(Some(placement)) => {
+                overlay::suppress_moves();
+                state.update(json!({"overlay":{"position":"custom","placement":placement}}))?;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "Overlay placement"),
         }
         if now >= self.prune_at {
             let days = state.config()?.privacy.history_retention_days;
@@ -302,10 +330,9 @@ impl Controller {
                 }
                 if epoch == self.epoch && self.active {
                     if let Ok(result) = result {
-                        state.app.emit(
-                            "partial",
-                            json!({"text":result["text"].as_str().unwrap_or("")}),
-                        )?;
+                        state
+                            .enhance
+                            .set_partial(state, result["text"].as_str().unwrap_or(""));
                     }
                 }
             }
@@ -316,6 +343,12 @@ impl Controller {
                 state.update(json!({"overlay":{"enabled":!state.config()?.overlay.enabled}}))?;
             }
             Action::Reload => state.reload()?,
+            Action::Rewrite => {
+                let _ = state
+                    .enhance
+                    .rewrite(state, crate::enhance::session::Trigger::Manual);
+            }
+            Action::AcceptCurrent => state.enhance.accept_current(state),
             Action::Reconfigure => {
                 let next = state.config()?;
                 let audio_changed =

@@ -10,6 +10,8 @@ export function general(ctx: PageContext): HTMLElement {
     const b = button(kind[0].toUpperCase()+kind.slice(1), () => call("preview_sound",{kind}).catch(ctx.report));
     b.disabled = !c.sounds.enabled || c.sounds.muted; previews.append(b);
   }
+  const resetPosition = button("Reset position",()=>call("reset_overlay_position").catch(ctx.report));
+  resetPosition.disabled = !c.overlay.enabled;
   return stack(
     card("Your shortcut to a thought",
       row("Dictation shortcut","Click to capture keys. Escape cancels recording.",hotkeyCapture(c.general.hotkey,setter(ctx,"general","hotkey"))),
@@ -18,8 +20,10 @@ export function general(ctx: PageContext): HTMLElement {
       row("Language","Language code such as en, fr or ja. Leave empty to auto-detect.",textField(c.general.language,setter(ctx,"general","language"),"Auto-detect")),
       g.toggle("translate","Translate to English","Transcribe speech into English rather than its original language.")),
     card("A little presence",
-      o.toggle("enabled","Show overlay","A quiet, click-through pill above your other windows."),
-      o.select("position","Position","Centred on the primary display.",[["bottom-center","Bottom centre"],["top-center","Top centre"]],!c.overlay.enabled),
+      o.toggle("enabled","Show overlay","A quiet pill above your other windows. Drag its handle to move it; clicking it never takes focus from your app."),
+      o.select("position","Position",c.overlay.position === "custom" ? "Placed where you dragged it. Choose a preset or reset to return it to the bottom centre." : "Centred on the primary display, or drag the overlay anywhere.",
+        [["bottom-center","Bottom centre"],["top-center","Top centre"],...(c.overlay.position === "custom" ? [["custom","Where you dragged it"] as const] : [])],!c.overlay.enabled),
+      row("Reset position","Return the overlay to the bottom centre of the primary display.",resetPosition),
       o.slider("scale","Overlay size","Scale the pill and its text together.",0.8,1.6,0.1,n=>`${Math.round(n*100)}%`,!c.overlay.enabled),
       o.toggle("show_preview","Live preview","See two lines of your words before they land.",!c.overlay.enabled),
       o.toggle("idle_hide","Hide when idle","Disappear after 1.5 seconds of inactivity.",!c.overlay.enabled)),

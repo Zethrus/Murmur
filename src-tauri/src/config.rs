@@ -22,12 +22,28 @@ section!(General {
     theme: String = "auto".into(),
     hotkey_code: String = "".into()
 });
+section!(Placement {
+    monitor_name: String = "".into(),
+    monitor_x: i32 = 0,
+    monitor_y: i32 = 0,
+    monitor_width: u32 = 0,
+    monitor_height: u32 = 0,
+    x_fraction: f64 = 0.5,
+    y_fraction: f64 = 1.0
+});
+impl Placement {
+    /// A zero-size monitor record means "no saved custom placement".
+    pub fn is_set(&self) -> bool {
+        self.monitor_width > 0 && self.monitor_height > 0
+    }
+}
 section!(Overlay {
     enabled: bool = true,
     position: String = "bottom-center".into(),
     scale: f64 = 1.0,
     show_preview: bool = true,
-    idle_hide: bool = true
+    idle_hide: bool = true,
+    placement: Placement = Placement::default()
 });
 section!(Sounds {
     enabled: bool = true,
@@ -57,11 +73,25 @@ section!(Postproc {
     style: String = "auto".into(),
     code_apps: Vec<String> = ["code","cursor","vscode","code-oss","jetbrains","zed","sublime","gnome-terminal","konsole","alacritty","kitty","wezterm","windowsterminal","mintty"].map(String::from).to_vec(),
     spoken_punctuation: bool = true,
-    allow_newlines: bool = false
+    allow_newlines: bool = false,
+    remove_duplicate_words: bool = true
 });
 section!(Privacy {
     history_enabled: bool = false,
     history_retention_days: u32 = 7
+});
+section!(Enhance {
+    auto_rewrite: bool = false,
+    rewrite_hotkey: String = "".into(),
+    accept_hotkey: String = "".into(),
+    style: String = "concise".into(),
+    model: String = crate::enhance::catalog::DEFAULT_MODEL_ID.into(),
+    accept_mode: String = "clipboard".into(),
+    rewrite_code: bool = false,
+    threads: u32 = 0,
+    unload_after_s: u64 = 120,
+    load_timeout_ms: u64 = 30000,
+    timeout_ms: u64 = 15000
 });
 section!(Config {
     general: General = General::default(),
@@ -71,7 +101,8 @@ section!(Config {
     audio: Audio = Audio::default(),
     injection: Injection = Injection::default(),
     postproc: Postproc = Postproc::default(),
-    privacy: Privacy = Privacy::default()
+    privacy: Privacy = Privacy::default(),
+    enhance: Enhance = Enhance::default()
 });
 
 fn merge(target: &mut toml::Value, patch: toml::Value) {
@@ -115,18 +146,13 @@ impl Config {
         Ok(result)
     }
     pub fn validate(&self) -> Result<()> {
-        let primary = crate::hotkey::parse(&self.general.hotkey)?;
-        if !self.general.hotkey_code.is_empty()
-            && crate::hotkey::parse(&self.general.hotkey_code)? == primary
-        {
-            bail!("Dictation and code shortcuts must be different");
-        }
+        crate::hotkey::bindings(self)?;
         for (value, choices) in [
             (self.general.hotkey_mode.as_str(), &["hold", "toggle"][..]),
             (self.general.theme.as_str(), &["auto", "light", "dark"][..]),
             (
                 self.overlay.position.as_str(),
-                &["bottom-center", "top-center"][..],
+                &["bottom-center", "top-center", "custom"][..],
             ),
             (self.engine.device.as_str(), &["auto", "cuda", "cpu"][..]),
             (
@@ -145,6 +171,12 @@ impl Config {
                 &["auto", "type", "clipboard"][..],
             ),
             (self.postproc.style.as_str(), &["prose", "code", "auto"][..]),
+            (
+                self.enhance.style.as_str(),
+                &["concise", "thorough", "structured"][..],
+            ),
+            // Phase 1 accepts only by copying; verified replacement is not implemented.
+            (self.enhance.accept_mode.as_str(), &["clipboard"][..]),
         ] {
             if !choices.contains(&value) {
                 bail!("Unsupported configuration value: {value}");
@@ -171,6 +203,30 @@ impl Config {
         }
         if !(1..=10).contains(&self.engine.beam_size) {
             bail!("Beam size must be 1–10");
+        }
+        let p = &self.overlay.placement;
+        if !(p.x_fraction.is_finite()
+            && p.y_fraction.is_finite()
+            && (0.0..=1.0).contains(&p.x_fraction)
+            && (0.0..=1.0).contains(&p.y_fraction))
+        {
+            bail!("Overlay placement fractions must be 0–1");
+        }
+        let e = &self.enhance;
+        if e.threads > 16 {
+            bail!("Enhance threads must be 0 (automatic) or 1–16");
+        }
+        if e.unload_after_s > 600 {
+            bail!("Enhance unload delay must be 0–600 seconds");
+        }
+        if !(1_000..=120_000).contains(&e.load_timeout_ms) {
+            bail!("Enhance load timeout must be 1–120 seconds");
+        }
+        if !(1_000..=60_000).contains(&e.timeout_ms) {
+            bail!("Enhance rewrite timeout must be 1–60 seconds");
+        }
+        if e.model.len() > 128 {
+            bail!("Enhance model identifier is too long");
         }
         if !(1..=3650).contains(&self.privacy.history_retention_days) {
             bail!("Invalid history retention");
@@ -263,6 +319,49 @@ mod tests {
         assert!(Config::default()
             .patched(serde_json::json!({"audio":{"gain":"bad"}}))
             .is_err());
+    }
+    #[test]
+    fn enhance_defaults_and_migration() -> Result<()> {
+        let c: Config =
+            toml::from_str("[general]\nhotkey='Ctrl+Alt+D'\n[overlay]\nposition='top-center'")?;
+        c.validate()?;
+        assert!(!c.enhance.auto_rewrite);
+        assert_eq!(c.enhance.rewrite_hotkey, "");
+        assert_eq!(c.enhance.accept_hotkey, "");
+        assert_eq!(c.enhance.model, "qwen3-1.7b-q4_k_m");
+        assert_eq!(c.enhance.accept_mode, "clipboard");
+        assert!(!c.enhance.rewrite_code);
+        assert!(c.postproc.remove_duplicate_words);
+        assert_eq!(c.overlay.position, "top-center");
+        assert!(!c.overlay.placement.is_set());
+        Ok(())
+    }
+    #[test]
+    fn enhance_validation() {
+        let base = Config::default();
+        for patch in [
+            serde_json::json!({"enhance":{"style":"verbose"}}),
+            serde_json::json!({"enhance":{"accept_mode":"verified_selection"}}),
+            serde_json::json!({"enhance":{"threads":17}}),
+            serde_json::json!({"enhance":{"unload_after_s":601}}),
+            serde_json::json!({"enhance":{"timeout_ms":500}}),
+            serde_json::json!({"enhance":{"load_timeout_ms":200000}}),
+            serde_json::json!({"overlay":{"placement":{"x_fraction":1.5}}}),
+            serde_json::json!({"enhance":{"rewrite_hotkey":"Ctrl+Alt+D"}}),
+            serde_json::json!({"enhance":{"rewrite_hotkey":"Ctrl+Alt+R","accept_hotkey":"Ctrl+Alt+R"}}),
+            serde_json::json!({"enhance":{"accept_hotkey":"Escape"}}),
+        ] {
+            assert!(base.patched(patch.clone()).is_err(), "{patch}");
+        }
+        let ok = base
+            .patched(serde_json::json!({"enhance":{"rewrite_hotkey":"Ctrl+Alt+R","accept_hotkey":"Ctrl+Alt+A","style":"structured"},"overlay":{"position":"custom"}}))
+            .unwrap();
+        assert_eq!(ok.enhance.style, "structured");
+        // Unknown model IDs are retained, not rejected.
+        let unknown = base
+            .patched(serde_json::json!({"enhance":{"model":"other"}}))
+            .unwrap();
+        assert_eq!(unknown.enhance.model, "other");
     }
     #[test]
     fn atomic_roundtrip() -> Result<()> {

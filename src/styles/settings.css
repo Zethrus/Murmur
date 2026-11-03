@@ -104,3 +104,12 @@ h1 { margin: 0; font-size: var(--page-title-size); line-height: var(--page-title
 .history-entry { padding: var(--row-inset); border-top: var(--card-border); }
 .history-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--gap-sm) 0 0; }
 .boot-message, .boot-error { padding: var(--boot-inset); color: var(--text-muted); }
+.enhance-statement { font-size: var(--privacy-size); padding: var(--enhance-statement-inset); margin: 0; }
+.enhance-model { display: flex; flex-direction: column; gap: var(--enhance-model-gap); min-width: 0; }
+.enhance-model p { margin: 0; }
+.enhance-model-name { font-family: var(--font-mono); font-size: var(--enhance-model-name-size); font-weight: var(--row-label-weight); overflow-wrap: anywhere; }
+.enhance-model .button-group { margin-top: var(--gap-sm); }
+.enhance-consent { display: flex; flex-direction: column; gap: var(--gap-sm); padding: var(--enhance-model-inset); background: var(--nav-active-bg); border-top: var(--card-border); }
+.enhance-consent .hint { margin: 0; }
+.card > .button-group { padding: var(--card-note-inset); }
+.card > .field-error[data-tone="ok"] { color: var(--text-muted); }

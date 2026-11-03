@@ -1,10 +1,16 @@
 body[data-window="overlay"] { background: var(--overlay-canvas-bg); overflow: hidden; color: var(--text); }
 body[data-window="overlay"] #app { height: var(--viewport-height); display: flex; align-items: flex-end; justify-content: center; padding: var(--overlay-canvas-padding); pointer-events: none; }
 body[data-window="overlay"] #app[data-position="top-center"] { align-items: flex-start; }
-.pill { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--pill-preview-gap); min-height: var(--pill-h); width: var(--pill-compact-w); max-width: var(--pill-max-w); padding: var(--pill-inset); border-radius: var(--pill-radius); border: var(--pill-border); background: var(--overlay-bg); box-shadow: var(--pill-shadow); transform: scale(var(--overlay-scale)); transform-origin: bottom center; font-size: var(--pill-label-size); font-weight: var(--pill-weight); transition: var(--pill-transition); flex-shrink: 0; text-align: center; }
+.pill { pointer-events: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--pill-preview-gap); min-height: var(--pill-h); width: var(--pill-compact-w); max-width: var(--pill-max-w); padding: var(--pill-inset); border-radius: var(--pill-radius); border: var(--pill-border); background: var(--overlay-bg); box-shadow: var(--pill-shadow); transform: scale(var(--overlay-scale)); transform-origin: bottom center; font-size: var(--pill-label-size); font-weight: var(--pill-weight); transition: var(--pill-transition); flex-shrink: 0; text-align: center; user-select: none; }
 [data-position="top-center"] .pill { transform-origin: top center; }
+[data-busy="true"] .pill { pointer-events: none; opacity: var(--overlay-busy-opacity); }
 .pill-state { display: flex; align-items: center; justify-content: center; gap: var(--pill-state-gap); max-width: var(--layout-full); min-height: var(--bar-h); }
 .pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: var(--pill-label-max-w); }
+.drag-handle { flex-shrink: 0; display: grid; grid-template-columns: repeat(2, var(--drag-handle-dot)); align-content: center; gap: var(--drag-handle-gap); width: var(--drag-handle-w); height: var(--drag-handle-h); cursor: grab; opacity: var(--drag-handle-opacity); transition: opacity var(--overlay-button-motion); }
+.drag-handle:hover { opacity: var(--drag-handle-hover-opacity); }
+.drag-handle:active { cursor: grabbing; }
+.drag-handle i { display: block; width: var(--drag-handle-dot); height: var(--drag-handle-dot); border-radius: var(--drag-handle-radius); background: var(--text-muted); box-shadow: var(--drag-handle-dot) var(--space-none) var(--space-none) var(--text-muted); }
+[data-busy="true"] .drag-handle { cursor: default; }
 .indicator { flex-shrink: 0; width: var(--dot-size); height: var(--dot-size); border-radius: var(--dot-radius); background: var(--text-muted); }
 .bars { display: none; align-items: center; gap: var(--bar-gap); height: var(--bar-h); }
 .bars i { display: block; width: var(--bar-w); height: var(--bar-h); border-radius: var(--bar-radius); background: var(--meter-fill); transform: scaleY(var(--level, var(--bar-level))); transition: var(--bar-transition); }
@@ -18,4 +24,20 @@ body[data-window="overlay"] #app[data-position="top-center"] { align-items: flex
 [data-state="done"] .indicator { width: var(--bar-h); height: var(--bar-h); background: var(--overlay-canvas-bg); color: var(--ok); font-size: var(--pill-status-size); }
 [data-state="error"] .indicator { background: var(--warn); }
 [data-state="error"] .pill { width: var(--pill-error-w); }
+/* Enhance suggestion: wider surface, scrollable proposal, explicit actions. */
+.suggestion { display: flex; flex-direction: column; gap: var(--suggestion-gap); width: var(--layout-full); min-width: 0; text-align: left; }
+#app:not([data-enhance="none"]) .pill:has(.suggestion:not([hidden])) { width: var(--suggestion-w); min-width: var(--suggestion-min-w); max-width: var(--suggestion-w); border-radius: var(--suggestion-radius); align-items: stretch; }
+.suggestion-title { margin: 0; font-size: var(--suggestion-title-size); font-weight: var(--suggestion-title-weight); letter-spacing: var(--suggestion-title-tracking); color: var(--text-muted); text-transform: uppercase; }
+[data-enhance="notice"] .suggestion-title, [data-enhance="loading"] .suggestion-title, [data-enhance="rewriting"] .suggestion-title { display: none; }
+.suggestion-text { margin: 0; max-height: var(--suggestion-text-max-h); overflow: auto; padding: var(--suggestion-text-inset); border-radius: var(--suggestion-text-radius); background: var(--suggestion-text-bg); font-size: var(--suggestion-text-size); font-weight: var(--body-weight); line-height: var(--suggestion-text-height); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.suggestion-message { margin: 0; font-size: var(--suggestion-message-size); color: var(--text-muted); font-weight: var(--body-weight); }
+[data-enhance="loading"] .suggestion-message, [data-enhance="rewriting"] .suggestion-message { animation: pulse var(--pulse-duration) infinite alternate; }
+.suggestion-actions { display: flex; justify-content: flex-end; gap: var(--suggestion-actions-gap); }
+.suggestion-actions:not(:has(.overlay-button:not([hidden]))) { display: none; }
+.overlay-button { min-height: var(--overlay-button-h); padding: var(--overlay-button-inset); border-radius: var(--overlay-button-radius); border: var(--control-border); background: var(--surface-raised); font-size: var(--overlay-button-size); font-weight: var(--overlay-button-weight); cursor: pointer; transition: border-color var(--overlay-button-motion), background var(--overlay-button-motion); }
+.overlay-button:hover:not(:disabled) { border-color: var(--accent); background: var(--nav-active-bg); }
+.overlay-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+.overlay-button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(var(--pulse-high)); }
+.overlay-button:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
+.overlay-button:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; }
 @keyframes pulse { from { opacity: var(--pulse-low); } to { opacity: var(--pulse-high); } }

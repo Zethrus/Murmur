@@ -2,6 +2,7 @@ use crate::{
     config::Config,
     controller::{self, Action},
     engine::Engine,
+    enhance,
     history::History,
     hotkey, overlay,
     platform::{self, Paths},
@@ -44,6 +45,7 @@ pub struct AppState {
     pub app: AppHandle,
     pub paths: Paths,
     pub engine: Arc<Engine>,
+    pub enhance: enhance::runtime::Runtime,
     config: Mutex<Config>,
     transaction: Mutex<()>,
     status: Mutex<Status>,
@@ -89,6 +91,8 @@ impl AppState {
             "murmur starting"
         );
         let engine = Arc::new(Engine::new(paths.models.clone(), app.clone())?);
+        let enhance = enhance::runtime::Runtime::new(&app, paths.enhance_models.clone(), &config)
+            .context("Start Enhance worker")?;
         let (sender, receiver) = mpsc::channel();
         let status = Status {
             state: "idle".into(),
@@ -103,6 +107,7 @@ impl AppState {
             app,
             paths,
             engine,
+            enhance,
             config: Mutex::new(config),
             transaction: Mutex::new(()),
             status: Mutex::new(status),
@@ -120,6 +125,10 @@ impl AppState {
     }
     pub fn config(&self) -> Result<Config> {
         Ok(lock(&self.config)?.clone())
+    }
+    /// A pending or ready Enhance suggestion keeps the overlay visible regardless of idle_hide.
+    pub fn overlay_held(&self) -> bool {
+        self.enhance.holds_overlay()
     }
     pub fn status(&self) -> Result<Status> {
         let mut status = lock(&self.status)?.clone();
@@ -193,6 +202,7 @@ impl AppState {
             }
         }
         overlay::state(&self.app, state, &self.config()?.overlay)?;
+        self.enhance.publish(self);
         self.refresh_tray()
     }
     pub fn error(&self, message: &str) {
@@ -207,11 +217,11 @@ impl AppState {
         }
     }
     fn apply_runtime(&self, old: &Config, new: &Config) -> Result<()> {
-        hotkey::rebind(&self.app, &old.general, &new.general)?;
+        hotkey::rebind(&self.app, old, new)?;
         if let Err(error) = platform::set_autostart(&self.app, new.general.autostart)
             .and_then(|_| overlay::apply(&self.app, &new.overlay))
         {
-            let _ = hotkey::rebind(&self.app, &new.general, &old.general);
+            let _ = hotkey::rebind(&self.app, new, old);
             let _ = platform::set_autostart(&self.app, old.general.autostart);
             let _ = overlay::apply(&self.app, &old.overlay);
             return Err(error);
@@ -228,6 +238,7 @@ impl AppState {
             return Err(error);
         }
         *lock(&self.config)? = new.clone();
+        self.enhance.config_changed(self, &old, &new);
         self.app
             .emit("config", &new)
             .context("Emit config update")?;
@@ -244,6 +255,7 @@ impl AppState {
         }
         self.apply_runtime(&old, &new)?;
         *lock(&self.config)? = new.clone();
+        self.enhance.config_changed(self, &old, &new);
         self.app.emit("config", &new)?;
         self.send(Action::Reconfigure)?;
         self.refresh_tray()
@@ -327,6 +339,7 @@ impl AppState {
             }
         }
         self.engine.shutdown();
+        self.enhance.shutdown();
         if let Ok(mut sound) = self.sound.lock() {
             sound.shutdown();
         }
