@@ -239,7 +239,7 @@ impl Transport for Https {
                         } else {
                             "Could not reach the model server"
                         },
-                    ))
+                    ));
                 }
             }
         };

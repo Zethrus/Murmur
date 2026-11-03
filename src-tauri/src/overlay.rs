@@ -266,6 +266,21 @@ fn clear_background(app: &AppHandle) {
     }
 }
 
+/// Mutter draws a drop shadow around the overlay's whole window rectangle, which reads as a
+/// bordered box floating around the pill even though the window itself is transparent. A
+/// notification-type window is excluded from the shadow policy, so the pill stands alone.
+#[cfg(target_os = "linux")]
+fn suppress_window_shadow(app: &AppHandle) {
+    use gtk::prelude::*;
+    let Some(window) = app.get_webview_window("overlay") else {
+        return;
+    };
+    match window.gtk_window() {
+        Ok(gtk_window) => gtk_window.set_type_hint(gtk::gdk::WindowTypeHint::Notification),
+        Err(error) => tracing::debug!(%error, "overlay type hint skipped"),
+    }
+}
+
 /// Size and position the overlay without changing visibility or focus.
 pub fn position(app: &AppHandle, prefs: &Overlay) -> Result<()> {
     let window = app
@@ -316,6 +331,8 @@ pub fn apply(app: &AppHandle, prefs: &Overlay) -> Result<()> {
 }
 fn apply_main(app: &AppHandle, prefs: &Overlay) -> Result<()> {
     clear_background(app);
+    #[cfg(target_os = "linux")]
+    suppress_window_shadow(app);
     position(app, prefs)?;
     let window = app
         .get_webview_window("overlay")
