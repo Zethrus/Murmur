@@ -33,6 +33,8 @@ jobs:
       DO_NOT_TRACK: '1'
       PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
       PYINSTALLER_CONFIG_DIR: ${{ github.workspace }}/.cache/pyinstaller
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CARGO_BUILD_JOBS: '2'
     steps:
       - uses: actions/checkout@v4
 
@@ -92,9 +94,35 @@ jobs:
       - run: npm ci
 
       - run: npm run build
-
+      - run: npm run test:ui
+      - name: Provision and initialize Windows native toolchain
+        shell: pwsh
+        run: . ./scripts/prepare-windows-native.ps1
+      - name: Test Rust including unavailable Enhance backend
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
+          cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
+          if ($LASTEXITCODE -ne 0) { throw 'Rust tests without Enhance backend failed' }
       - name: Build the app and NSIS installer
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64 -C target-feature=-avx,-avx2,-fma,-f16c,-bmi2,-sse4.2
+          GGML_NATIVE: 'OFF'
+          GGML_AVX: 'OFF'
+          GGML_AVX2: 'OFF'
+          GGML_FMA: 'OFF'
+          GGML_F16C: 'OFF'
+          GGML_BMI2: 'OFF'
+          GGML_SSE42: 'OFF'
+          GGML_CPU_ALL_VARIANTS: 'OFF'
         run: npx tauri build --target x86_64-pc-windows-msvc
+
+      - name: Audit linked native CPU baseline
+        shell: pwsh
+        run: |
+          python scripts/audit-llama-cpu.py src-tauri/target/x86_64-pc-windows-msvc/release
+          if ($LASTEXITCODE -ne 0) { throw 'Unsupported native CPU baseline' }
 
       - name: Verify and stage unsigned artifacts
         shell: pwsh

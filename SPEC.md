@@ -3,6 +3,10 @@
 Implementation spec, v2 (cross-platform). Read this file completely before writing code.
 Build exactly this. Small single-purpose modules over large files. One codebase, two OSes.
 
+## Enhance (optional, phase 1)
+
+After immediate delivery of the original dictation, Enhance may suggest a local CPU rewrite in an interactive overlay. It defaults off; model download requires explicit action in Settings → Behavior. The built-in Qwen3-1.7B Q4_K_M model is pinned to one revision and checksum, stored separately from Whisper, and not bundled. Rewrite/accept shortcuts default unassigned. Code and terminal dictation is excluded unless opted in. Deterministic cleanup always runs while respecting Behavior switches; duplicate-word cleanup defaults on for prose. Accept copies to the clipboard and never replaces or pastes into the target app. Discard leaves text unchanged. Phase 2 guarded replacement, cloud inference, and persistent suggestion history are out of scope. See `docs/enhance-design.md` and `docs/enhance-validation.md` for implementation contracts and verification limits.
+
 ## Product
 
 Press (or hold) a global hotkey, speak, and the transcript is typed into whatever window has
@@ -39,7 +43,7 @@ Non-goals: cloud STT, accounts, telemetry, storing audio, Wayland-specific work.
 | Clipboard | `arboard` | `arboard` |
 | Tray | Tauri tray-icon (libappindicator via GTK) | Tauri tray-icon |
 | Autostart | `tauri-plugin-autostart` (.desktop) | same (HKCU Run) |
-| Overlay click-through | `set_ignore_cursor_events(true)` | same |
+| Overlay interaction | Nonfocusable interactive window; click-through only during delivery | same, native focus behavior needs runtime verification |
 | Cue audio | `rodio` | `rodio` (WASAPI) |
 | Paths | `~/.config/murmur`, `~/.local/share/murmur` | `%APPDATA%\Murmur`, `%LOCALAPPDATA%\Murmur` |
 

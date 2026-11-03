@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay-drag",
+  "description": "Overlay only: OS-driven window move for repositioning. Placement is persisted by Rust.",
+  "windows": [
+    "overlay"
+  ],
+  "permissions": [
+    "core:window:allow-start-dragging"
+  ]
+}

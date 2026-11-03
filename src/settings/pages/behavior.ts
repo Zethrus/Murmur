@@ -4,6 +4,7 @@ import {controls, setter} from "../controls";
 import {card, row, stack, el, button} from "../widgets/row";
 import {listEditor} from "../widgets/list-editor";
 import {replacements} from "../widgets/replacements";
+import {enhanceCard} from "../cards/enhance";
 export function behavior(ctx: PageContext): HTMLElement {
   const c = ctx.config, p = controls(ctx,"postproc"), i = controls(ctx,"injection"), transcript = el("pre","transcript",ctx.lastTranscript || "Your next completed dictation will appear here. Nothing is saved unless history is enabled.");
   ctx.subscribe("latency",event=>{ if (event.text !== undefined) transcript.textContent = event.text; });
@@ -25,6 +26,8 @@ export function behavior(ctx: PageContext): HTMLElement {
       i.toggle("capitalize","Capitalise sentences","Prose only. Identifiers and mixed-case tokens stay untouched.",c.postproc.style === "code"),
       i.toggle("remove_fillers","Remove fillers","Only removes the complete words listed below, including in code style."),
       row("Filler words","Edit the words removed when filler removal is enabled.",listEditor(c.postproc.fillers,setter(ctx,"postproc","fillers"),"filler word")),
+      ...(c.postproc.remove_duplicate_words === undefined ? [] : [p.toggle("remove_duplicate_words","Remove repeated words","Prose only. “the the” becomes “the”; deliberate pairs such as “had had” stay.")]),
       row("Replacements","Case-insensitive, longest phrase first. Protected code tokens are never rewritten.",replacements(c.postproc.replacements,setter(ctx,"postproc","replacements")))),
-    card("Last transcript",transcript));
+    enhanceCard(ctx),
+    card("Last transcript",el("p","card-note","Original delivery, exactly as sent to your app. Rewrite suggestions appear only in the overlay."),transcript));
 }

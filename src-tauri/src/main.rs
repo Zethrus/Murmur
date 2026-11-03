@@ -6,11 +6,14 @@ mod coding_tests;
 mod config;
 mod controller;
 mod engine;
+mod enhance;
 mod history;
 mod hotkey;
 mod inject;
 mod ipc;
 mod overlay;
+#[cfg(test)]
+mod overlay_tests;
 mod platform;
 mod postproc;
 mod punctuation;
@@ -24,12 +27,21 @@ use tauri::{
 
 fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let handle = app.handle().clone();
+    let overlay_view = handle
+        .get_webview_window("overlay")
+        .ok_or_else(|| anyhow::anyhow!("Overlay webview unavailable"))?;
+    anyhow::ensure!(
+        overlay_view
+            .resolve_command_scope::<serde_json::Value>("window", "start_dragging")?
+            .is_some(),
+        "Overlay start-dragging permission denied by the runtime ACL"
+    );
     let runtime = app::AppState::new(handle.clone())?;
     app.manage(runtime);
     let state = app.state::<app::AppState>();
     // Recoverable desktop limitations/conflicts must not prevent opening Settings.
     for result in [
-        hotkey::rebind(&handle, &state.config()?.general, &state.config()?.general),
+        hotkey::rebind(&handle, &state.config()?, &state.config()?),
         overlay::apply(&handle, &state.config()?.overlay),
         platform::set_autostart(&handle, state.config()?.general.autostart),
     ] {
@@ -139,6 +151,11 @@ fn main() {
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .setup(|app| setup(app).map_err(Into::into))
         .on_window_event(|window, event| {
+            if window.label() == "overlay" {
+                if let tauri::WindowEvent::Moved(_) = event {
+                    overlay::moved();
+                }
+            }
             if window.label() == "settings" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -168,7 +185,18 @@ fn main() {
             ipc::history_clear,
             ipc::pick_exclude_app,
             ipc::open_path,
-            ipc::apply_overlay_prefs
+            ipc::apply_overlay_prefs,
+            ipc::get_enhance_status,
+            ipc::get_enhance_model,
+            ipc::install_enhance_model,
+            ipc::cancel_enhance_download,
+            ipc::remove_enhance_model,
+            ipc::rewrite_last_dictation,
+            ipc::accept_enhancement,
+            ipc::discard_enhancement,
+            ipc::get_overlay_snapshot,
+            ipc::reset_overlay_position,
+            ipc::set_overlay_size
         ])
         .build(tauri::generate_context!());
     match application {

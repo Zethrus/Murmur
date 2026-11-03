@@ -8,7 +8,7 @@ use crate::{
     sound::Cue,
 };
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 type Reply<T> = Result<T, String>;
 fn error(e: impl std::fmt::Display) -> String {
@@ -176,6 +176,7 @@ pub async fn open_path(app: AppHandle, kind: String) -> Reply<()> {
                 .ok_or_else(|| anyhow::anyhow!("Config directory missing"))?,
             "data" | "logs" | "history" => &state.paths.data,
             "models" => &state.paths.models,
+            "enhance_models" => &state.paths.enhance_models,
             _ => anyhow::bail!("Unknown app folder kind"),
         };
         platform::open_path(path)
@@ -185,4 +186,134 @@ pub async fn open_path(app: AppHandle, kind: String) -> Reply<()> {
 #[tauri::command]
 pub fn apply_overlay_prefs(app: AppHandle, state: State<'_, AppState>) -> Reply<()> {
     overlay::apply(&app, &state.config().map_err(error)?.overlay).map_err(error)
+}
+
+fn require_window(window: &WebviewWindow, label: &str) -> Reply<()> {
+    if window.label() == label {
+        Ok(())
+    } else {
+        Err(format!(
+            "This command is only available from the {label} window"
+        ))
+    }
+}
+#[tauri::command]
+pub fn get_enhance_status(state: State<'_, AppState>) -> Reply<Value> {
+    Ok(state.enhance.service.status_json())
+}
+#[tauri::command]
+pub fn get_enhance_model(state: State<'_, AppState>) -> Reply<Value> {
+    let config = state.config().map_err(error)?;
+    Ok(state.enhance.service.model_json(&config.enhance.model))
+}
+#[tauri::command]
+pub fn install_enhance_model(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    model_id: String,
+    enable_after_install: bool,
+) -> Reply<Value> {
+    require_window(&window, "settings")?;
+    let id = state
+        .enhance
+        .install(&app, &model_id, enable_after_install)?;
+    Ok(json!({ "operation_id": id }))
+}
+#[tauri::command]
+pub async fn cancel_enhance_download(app: AppHandle, operation_id: String) -> Reply<()> {
+    let state = app.state::<AppState>();
+    if state.enhance.service.removing() {
+        return Err("Busy: model removal is running".into());
+    }
+    if let Some(id) = crate::enhance::runtime::parse_id(&operation_id) {
+        return tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<AppState>();
+            if !state.cancel_enhance_download(id).map_err(error)?
+                && state.enhance.service.removing()
+            {
+                return Err("Busy: model removal is running".into());
+            }
+            Ok(())
+        })
+        .await
+        .map_err(error)?;
+    }
+    Ok(())
+}
+#[tauri::command]
+pub async fn remove_enhance_model(
+    app: AppHandle,
+    window: WebviewWindow,
+    model_id: String,
+) -> Reply<()> {
+    require_window(&window, "settings")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.enhance.remove(&state, &model_id)
+    })
+    .await
+    .map_err(error)?
+}
+#[tauri::command]
+pub fn rewrite_last_dictation(state: State<'_, AppState>) -> Reply<Value> {
+    Ok(state
+        .enhance
+        .rewrite(&state, crate::enhance::session::Trigger::Manual))
+}
+#[tauri::command]
+pub async fn accept_enhancement(app: AppHandle, suggestion_id: String) -> Reply<Value> {
+    let id = crate::enhance::runtime::parse_id(&suggestion_id);
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.enhance.accept(&state, id)
+    })
+    .await
+    .map_err(error)
+}
+#[tauri::command]
+pub fn discard_enhancement(state: State<'_, AppState>, suggestion_id: String) -> Reply<()> {
+    let id = crate::enhance::runtime::parse_id(&suggestion_id);
+    state.enhance.discard(&state, id);
+    Ok(())
+}
+#[tauri::command]
+pub fn get_overlay_snapshot(state: State<'_, AppState>) -> Reply<Value> {
+    Ok(state.enhance.snapshot(&state))
+}
+#[tauri::command]
+pub async fn reset_overlay_position(app: AppHandle) -> Reply<()> {
+    blocking(move || {
+        overlay::suppress_moves();
+        app.state::<AppState>().update(json!({"overlay":{
+            "position":"bottom-center",
+            "placement":{"monitor_name":"","monitor_x":0,"monitor_y":0,"monitor_width":0,
+                "monitor_height":0,"x_fraction":0.5,"y_fraction":1.0}
+        }}))?;
+        Ok(())
+    })
+    .await
+}
+#[tauri::command]
+pub fn set_overlay_size(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    width: f64,
+    height: f64,
+    layout_revision: u64,
+    layout_instance: String,
+) -> Reply<()> {
+    require_window(&window, "overlay")?;
+    let prefs = state.config().map_err(error)?.overlay;
+    overlay::set_size(
+        &app,
+        &prefs,
+        width,
+        height,
+        layout_revision,
+        &layout_instance,
+    )
+    .map_err(error)?;
+    Ok(())
 }

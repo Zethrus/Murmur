@@ -104,6 +104,22 @@
   --pill-transition: width var(--dur-base) var(--ease-out), border-radius var(--dur-base) var(--ease-out);
   --pill-canvas-inset: 20px; --overlay-canvas-padding: calc(var(--pill-canvas-inset) * var(--overlay-scale)); --pill-error-w: 480px; --pill-preview-height: 40px;
   --pill-status-size: var(--fs-16); --pill-label-max-w: 440px;
+  /* Enhance overlay: suggestion surface, actions and drag handle. */
+  --suggestion-w: 560px; --suggestion-min-w: 320px; --suggestion-gap: var(--sp-2);
+  --suggestion-text-max-h: 160px; --suggestion-text-size: var(--fs-14); --suggestion-text-height: var(--lh-body);
+  --suggestion-text-inset: var(--sp-2) var(--sp-3); --suggestion-text-radius: var(--r-md);
+  --suggestion-text-bg: var(--surface-raised); --suggestion-title-size: var(--fs-11); --suggestion-title-weight: var(--weight-semibold);
+  --suggestion-title-tracking: var(--tracking-hint); --suggestion-message-size: var(--fs-12);
+  --suggestion-actions-gap: var(--sp-2); --suggestion-radius: var(--r-lg);
+  --overlay-button-h: 28px; --overlay-button-inset: var(--sp-1) var(--sp-3); --overlay-button-radius: var(--r-md);
+  --overlay-button-size: var(--fs-12); --overlay-button-weight: var(--weight-medium);
+  --overlay-button-motion: var(--dur-fast) var(--ease-out);
+  --drag-handle-w: 12px; --drag-handle-h: 16px; --drag-handle-dot: 3px; --drag-handle-gap: 2px;
+  --drag-handle-radius: var(--r-pill); --drag-handle-opacity: 0.55; --drag-handle-hover-opacity: 1;
+  --overlay-busy-opacity: 0.7; --work-area-inset: var(--sp-2);
+  /* Enhance settings card. */
+  --enhance-model-inset: var(--sp-4) var(--sp-5); --enhance-model-gap: var(--sp-1);
+  --enhance-model-name-size: var(--fs-14); --enhance-statement-inset: var(--sp-4) var(--sp-5) 0;
 
 }
 :root {

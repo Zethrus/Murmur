@@ -22,6 +22,8 @@ export class Element {
   addEventListener(type,handler) { const list=this.listeners.get(type)??[];list.push(handler);this.listeners.set(type,list); }
   async dispatch(type,props={}) { if(type === "click" && this.disabled)return;const event={type,target:this,preventDefault(){},stopPropagation(){},...props};for(const fn of this.listeners.get(type)??[])await fn(event); }
   focus() { this.ownerDocument.activeElement=this; }
+  /** Layout is not emulated; tests assign `rect` to model a rendered size. */
+  getBoundingClientRect() { const r=this.rect??{width:0,height:0};return {x:0,y:0,top:0,left:0,right:r.width,bottom:r.height,...r}; }
   matches(selector) {
     return selector.split(",").some(part=>{
       const chain=part.trim().split(/\s+/);const simple=chain.pop();if(!this.simple(simple))return false;
@@ -49,10 +51,17 @@ export class Element {
   }
 }
 export function makeDocument() {
-  const document={activeElement:null,createElement(tag){const node=new Element(tag);node.ownerDocument=document;return node;}};
+  const document={activeElement:null,createElement(tag){const node=new Element(tag);node.ownerDocument=document;return node;},
+    createElementNS(_namespace,tag){const node=new Element(tag);node.ownerDocument=document;return node;}};
   document.documentElement=document.createElement("html");document.body=document.createElement("body");document.documentElement.append(document.body);
   document.querySelector=s=>document.documentElement.querySelector(s);document.getElementById=id=>document.querySelector(`#${id}`);
   const root=document.createElement("div");root.id="app";document.body.append(root);return {document,root};
+}
+/** ResizeObserver stand-in: tests call trigger() after changing an element's rect. */
+export function resizeObservers() {
+  const live=new Set();
+  class ResizeObserver { constructor(fn){this.fn=fn;this.targets=new Set();live.add(this);} observe(t){this.targets.add(t);} unobserve(t){this.targets.delete(t);} disconnect(){this.targets.clear();live.delete(this);} }
+  return {ResizeObserver,live,trigger(){for(const o of live)o.fn([...o.targets].map(target=>({target})));}};
 }
 export function clock() {
   let now=0,id=0;const tasks=new Map();return {setTimeout(fn,delay){tasks.set(++id,{fn,at:now+delay});return id;},clearTimeout(id){tasks.delete(id);},

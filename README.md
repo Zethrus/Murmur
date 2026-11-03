@@ -6,7 +6,7 @@
 
 Local, private dictation for Linux/X11 and Windows 10/11 x64. Hold a global hotkey,
 speak, and Murmur inserts the transcript into the focused application. A small
-click-through overlay shows recording, preview and completion; the tray opens
+interactive, draggable overlay shows recording, preview and completion; the tray opens
 Settings. Coding mode handles technical vocabulary and spoken punctuation for
 editor prompts, chat boxes and terminals.
 
@@ -26,7 +26,8 @@ The icon mark, palette and regeneration steps are documented in
 Use a regular user account, not sudo. Prerequisites must already be installed:
 
 - Node.js 22+, npm, Rust stable/Cargo (1.92+ recommended), Python 3.10+ with venv/pip.
-- C/C++ build tools, pkg-config, WebKitGTK 4.1, libsoup 3, GTK3,
+- C/C++ build tools, CMake, Clang and libclang development libraries,
+  pkg-config, WebKitGTK 4.1, libsoup 3, GTK3,
   Ayatana AppIndicator, librsvg, ALSA, X11 and XKB development libraries.
 - `patchelf`, `file` and librsvg tools for bundles; `xprop` for focused-window detection.
 - An X11 desktop, working microphone/audio stack and tray support. Native Wayland
@@ -118,7 +119,8 @@ system webview/audio libraries; portable does not mean a fully static applicatio
 
 **Unverified on real Windows hardware.** Use x64 Windows 10/11 with Python 3.12
 (recommended), Node 22, Rust stable with the MSVC toolchain, Visual Studio C++ Build
-Tools/Windows SDK, and WebView2. Those prerequisites must already be available;
+Tools/Windows SDK, CMake, LLVM libclang (set `LIBCLANG_PATH` if needed),
+and WebView2. Those prerequisites must already be available;
 the script itself requires no administrator rights. Use a developer PowerShell
 if the linker/SDK is not discoverable from a normal shell.
 
@@ -144,6 +146,12 @@ and compatible NVIDIA drivers (for CUDA) remain runtime prerequisites. Unsigned
 builds may trigger SmartScreen; inspect the build source rather than disabling
 system protections. Run Murmur and its target apps at the same privilege level;
 Windows can block injection into elevated windows.
+
+## Enhance (optional)
+
+Linux x86-64 release builds enforce the original x86-64/SSE2 CPU baseline for the pinned llama.cpp backend: AVX, AVX2, FMA, F16C, BMI2 and SSE4.2 are disabled, and CI audits the generated CMake compiler flags. The build fails on unexpected flags. A minimum-CPU hardware run is still pending. The optional real-model evaluation can be run locally with `MURMUR_ENHANCE_MODEL=/path/to/model.gguf cargo test --manifest-path src-tauri/Cargo.toml real_model_rewrite_quality -- --ignored --nocapture`; it requires the installed model and makes no download request.
+
+Settings → Behavior offers local CPU rewriting after the original dictation is delivered. It is off by default. Only an explicit Install action downloads the pinned Qwen3-1.7B Q4_K_M model (~1.1 GB) from Hugging Face; subsequently rewriting runs offline. The model is not bundled. A rewrite preview appears in the overlay; Accept copies the proposal to the clipboard, but does not paste or replace previously typed text. Discard leaves the original unchanged. Rewrite and Accept hotkeys start unassigned with suggested bindings in Settings. Code and terminal dictation is not rewritten by default; it requires the explicit opt-in. A rewrite that exceeds its deadline stops with "Enhance stopped: generation exceeded the configured time limit. Original dictation is unchanged." See [the design](docs/enhance-design.md) and [validation limits](docs/enhance-validation.md). Native Windows overlay interaction and real-model rewrite quality are not verified yet; the 1.7B model mainly fixes punctuation, casing and fillers rather than expanding a prompt.
 
 ## Hotkeys
 

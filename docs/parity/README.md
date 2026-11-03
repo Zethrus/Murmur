@@ -21,14 +21,19 @@ physical screenshot size.
   empty device list and disconnected-microphone errors remain understandable.
 - [ ] Behavior: code/prose/auto style, code-app list, punctuation/newline controls,
   paste/typing choices, exclusions, fillers, replacements and last transcript.
+- [ ] Enhance: explicit model install/progress, disabled default, shortcut suggestions,
+  code/terminal opt-in and local-processing explanation match.
+- [ ] Enhance overlay: pending/ready previews, Accept copies without pasting, Discard,
+  no-changes and stale-result states; clicks/drags retain focus in the target app.
 - [ ] Privacy: local-only explanation, opt-in history, retention, search/clear,
   confirmation dialogs and correct platform-specific path labels.
 - [ ] Light, dark and auto themes: equivalent semantic color roles, contrasts,
   focus rings, disabled/hover/selected/error states and overlay theme updates.
 - [ ] Fonts: equivalent size, weight, line height and hierarchy; no clipping,
   unintended overflow or layout changes when the fallback family resolves.
-- [ ] Overlay: transparent, undecorated, click-through, always-on-top, no taskbar
-  button; top/bottom centering, scale and work-area placement are equivalent.
+- [ ] Overlay: transparent, undecorated, interactive without activating its window,
+  always-on-top, no taskbar button; draggable handle, stored monitor-relative placement,
+  resize and work-area clamping work on both platforms.
 - [ ] Overlay states: idle label, listening bars/preview (including wrapped text),
   transcribing dots, done check and amber error; hiding/transition behavior agrees.
 - [ ] Keyboard accessibility: tab order, visible focus, capture/reset behavior and

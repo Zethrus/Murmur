@@ -1,4 +1,4 @@
-use crate::{app::AppState, config::General, controller::Action};
+use crate::{app::AppState, config::Config, controller::Action};
 use anyhow::{bail, Context, Result};
 use std::{
     str::FromStr,
@@ -47,6 +47,43 @@ pub fn parse(accel: &str) -> Result<Shortcut> {
 pub fn serialize(shortcut: &Shortcut) -> String {
     shortcut.to_string()
 }
+/// What a registered global shortcut does. Routing is by purpose, not by the dictation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    Dictate,
+    Code,
+    Rewrite,
+    Accept,
+}
+/// Every nonempty shortcut in the configuration, validated together for collisions.
+pub fn bindings(config: &Config) -> Result<Vec<(Shortcut, Purpose)>> {
+    let mut keys = vec![(parse(&config.general.hotkey)?, Purpose::Dictate)];
+    for (accel, purpose, label) in [
+        (&config.general.hotkey_code, Purpose::Code, "code"),
+        (&config.enhance.rewrite_hotkey, Purpose::Rewrite, "rewrite"),
+        (&config.enhance.accept_hotkey, Purpose::Accept, "accept"),
+    ] {
+        if accel.trim().is_empty() {
+            continue;
+        }
+        let key = parse(accel)?;
+        if let Some((_, other)) = keys.iter().find(|(k, _)| *k == key) {
+            if *other == Purpose::Dictate && purpose == Purpose::Code {
+                bail!("Dictation and code shortcuts must be different");
+            }
+            bail!("The {label} shortcut is already used by another Murmur action");
+        }
+        keys.push((key, purpose));
+    }
+    Ok(keys)
+}
+fn purpose_of(config: &Config, shortcut: &Shortcut) -> Option<Purpose> {
+    bindings(config)
+        .ok()?
+        .into_iter()
+        .find(|(key, _)| key == shortcut)
+        .map(|(_, purpose)| purpose)
+}
 pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
     let shortcut = parse(accel)?;
     let pressed = Arc::new(AtomicBool::new(false));
@@ -57,16 +94,34 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
                 return;
             }
             let state = app.state::<AppState>();
-            if down && state.status().is_ok_and(|s| s.state == "transcribing") {
-                return;
-            }
-            if let Ok(config) = state.config() {
-                let code = parse(&config.general.hotkey_code).is_ok_and(|key| key == *shortcut);
-                let action = action_for(&config.general.hotkey_mode, down, code);
-                if let Some(action) = action {
-                    if let Err(error) = state.send(action) {
-                        state.error(&error.to_string());
+            let Ok(config) = state.config() else { return };
+            let action = match purpose_of(&config, shortcut) {
+                // Enhance actions are press-only and independent of hold/toggle mode.
+                Some(Purpose::Rewrite) if down => {
+                    if state
+                        .status()
+                        .is_ok_and(|s| matches!(s.state.as_str(), "listening" | "transcribing"))
+                    {
+                        None
+                    } else {
+                        Some(Action::Rewrite(state.enhance.shortcut_context()))
                     }
+                }
+                Some(Purpose::Accept) if down => {
+                    Some(Action::AcceptCurrent(state.enhance.shortcut_suggestion()))
+                }
+                Some(Purpose::Rewrite | Purpose::Accept) => None,
+                Some(purpose) => {
+                    if down && state.status().is_ok_and(|s| s.state == "transcribing") {
+                        return;
+                    }
+                    action_for(&config.general.hotkey_mode, down, purpose == Purpose::Code)
+                }
+                None => None,
+            };
+            if let Some(action) = action {
+                if let Err(error) = state.send(action) {
+                    state.error(&error.to_string());
                 }
             }
         })
@@ -94,20 +149,10 @@ fn action_for(mode: &str, down: bool, code: bool) -> Option<Action> {
         _ => None,
     }
 }
-fn shortcuts(general: &General) -> Result<Vec<Shortcut>> {
-    let mut keys = vec![parse(&general.hotkey)?];
-    if !general.hotkey_code.is_empty() {
-        let code = parse(&general.hotkey_code)?;
-        if keys.contains(&code) {
-            bail!("Dictation and code shortcuts must be different");
-        }
-        keys.push(code);
-    }
-    Ok(keys)
-}
-pub fn rebind(app: &AppHandle, old: &General, new: &General) -> Result<()> {
-    let before = shortcuts(old)?;
-    let after = shortcuts(new)?;
+/// Transactional: on any failure, registrations are restored to the old set.
+pub fn rebind(app: &AppHandle, old: &Config, new: &Config) -> Result<()> {
+    let before: Vec<Shortcut> = bindings(old)?.into_iter().map(|(k, _)| k).collect();
+    let after: Vec<Shortcut> = bindings(new)?.into_iter().map(|(k, _)| k).collect();
     let start = Instant::now();
     let mut added = Vec::new();
     for key in &after {
@@ -195,6 +240,29 @@ mod tests {
         for combo in ["Ctrl+Alt", "Shift", "", "Ctrl++D", "Ctrl+notakey", "Escape"] {
             assert!(parse(combo).is_err(), "{combo}");
         }
+    }
+    #[test]
+    fn bindings_route_by_purpose_and_reject_collisions() -> Result<()> {
+        let mut c = Config::default();
+        assert_eq!(bindings(&c)?.len(), 1);
+        c.general.hotkey_code = "Ctrl+Alt+C".into();
+        c.enhance.rewrite_hotkey = "Ctrl+Alt+R".into();
+        c.enhance.accept_hotkey = "Ctrl+Alt+A".into();
+        let keys = bindings(&c)?;
+        assert_eq!(keys.len(), 4);
+        assert_eq!(
+            purpose_of(&c, &parse("ctrl+alt+r")?),
+            Some(Purpose::Rewrite)
+        );
+        assert_eq!(purpose_of(&c, &parse("Ctrl+Alt+A")?), Some(Purpose::Accept));
+        assert_eq!(purpose_of(&c, &parse("Ctrl+Alt+C")?), Some(Purpose::Code));
+        assert_eq!(
+            purpose_of(&c, &parse("Ctrl+Alt+D")?),
+            Some(Purpose::Dictate)
+        );
+        c.enhance.accept_hotkey = "Control+Alt+C".into();
+        assert!(bindings(&c).is_err());
+        Ok(())
     }
     #[test]
     fn aliases() -> Result<()> {

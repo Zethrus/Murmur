@@ -1,12 +1,16 @@
 [package]
 name = "murmur"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Local, private dictation"
 
 [features]
+default = ["enhance-llama"]
 custom-protocol = ["tauri/custom-protocol"]
+# In-process CPU-only llama.cpp backend for Enhance. Without it, Enhance reports
+# `backend_unavailable` and dictation is unaffected.
+enhance-llama = ["dep:llama-cpp-2", "dep:llama-cpp-sys-2"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -20,7 +24,7 @@ cpal = "0.15"
 enigo = { version = "0.2", default-features = false, features = ["x11rb"] }
 arboard = "3"
 # Direct X11 access for modifier-state polling before synthetic typing.
-x11rb = { version = "0.13", default-features = false }
+x11rb = { version = "0.13", default-features = false, features = ["shape"] }
 
 rodio = { version = "0.20", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -35,6 +39,21 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 base64 = "0.22"
 regex = "1"
 hound = "3.5"
+# Enhance: explicit model download (HTTPS only, rustls) and streaming integrity checks.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+sha2 = "0.10"
+# Enhance: exact pins; wrapper defaults (openmp, GPU backends) disabled. The sys crate's own
+# "common" default is pulled in by the wrapper; no GPU backend feature is enabled anywhere.
+llama-cpp-2 = { version = "=0.1.160", default-features = false, optional = true }
+llama-cpp-sys-2 = { version = "=0.1.160", default-features = false, optional = true }
+# Free-space check before an explicit Enhance model download.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gdkx11 = "0.18"
 # Atomic replacement of existing configuration files on Windows.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

@@ -27,6 +27,17 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
       TMPDIR: ${{ github.workspace }}/.cache/tmp
       PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CARGO_BUILD_JOBS: '2'
+      RUSTFLAGS: '-C target-cpu=x86-64 -C target-feature=-avx,-avx2,-fma,-f16c,-bmi2,-sse4.2'
+      GGML_NATIVE: 'OFF'
+      GGML_AVX: 'OFF'
+      GGML_AVX2: 'OFF'
+      GGML_FMA: 'OFF'
+      GGML_F16C: 'OFF'
+      GGML_BMI2: 'OFF'
+      GGML_SSE42: 'OFF'
+      GGML_CPU_ALL_VARIANTS: 'OFF'
     steps:
       - uses: actions/checkout@v4
       - name: Prepare temporary directory
@@ -36,15 +47,19 @@ jobs:
           set -euo pipefail
           # Hosted runners start bare; a self-hosted machine usually already has the stack and
           # must not require passwordless sudo.
-          if pkg-config --exists webkit2gtk-4.1 libsoup-3.0 alsa; then
+          if pkg-config --exists webkit2gtk-4.1 libsoup-3.0 alsa && \
+             command -v cmake >/dev/null && command -v clang >/dev/null && \
+             command -v g++ >/dev/null && \
+             (compgen -G '/usr/lib/llvm-*/lib/libclang.so*' >/dev/null || \
+              test -f "${LIBCLANG_PATH:-/nonexistent}/libclang.so"); then
             echo "Build dependencies already present; skipping apt install."
             exit 0
           fi
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
             libayatana-appindicator3-dev librsvg2-dev libasound2-dev \
-            build-essential pkg-config patchelf libxkbcommon-dev libx11-dev \
-            libgtk-3-dev librsvg2-bin file
+            build-essential cmake clang libclang-dev llvm-dev pkg-config patchelf \
+            libxkbcommon-dev libx11-dev libgtk-3-dev librsvg2-bin file
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -75,10 +90,19 @@ jobs:
           test -s src-tauri/binaries/murmur-engine-x86_64-unknown-linux-gnu
       - run: npm ci
       - run: npm run build
+      - run: npm run test:ui
+      - name: Test Rust including unavailable Enhance backend
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
+      - name: Test speech sidecar
+        run: engine/.venv/bin/python -m pip install pytest && engine/.venv/bin/python -m pytest engine/tests -q
       - name: Build app, deb and AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: npx tauri build
+      - name: Audit generated llama.cpp CPU flags
+        run: python scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release"
       - name: Verify and stage unsigned artifacts
         run: |
           set -euo pipefail

@@ -25,11 +25,19 @@ if ($env:OS -ne 'Windows_NT') { throw 'Run this script on Windows x64.' }
 $Root = Split-Path -Parent $PSScriptRoot
 Push-Location $Root
 try {
-    foreach ($Command in @('python', 'node', 'npm', 'cargo', 'rustup')) {
+    . (Join-Path $PSScriptRoot 'prepare-windows-native.ps1')
+    foreach ($Command in @('python', 'node', 'npm', 'cargo', 'rustup', 'cmake', 'clang-cl', 'cl.exe')) {
         if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
             throw "Missing prerequisite: $Command (see README.md)"
         }
     }
+    if ($env:RUSTFLAGS) { throw 'Release RUSTFLAGS must be empty: the build enforces the x86-64/SSE2 baseline.' }
+    $env:RUSTFLAGS = '-C target-cpu=x86-64 -C target-feature=-avx,-avx2,-fma,-f16c,-bmi2,-sse4.2'
+    foreach ($Flag in @('GGML_NATIVE','GGML_AVX','GGML_AVX2','GGML_FMA','GGML_F16C','GGML_BMI2','GGML_SSE42','GGML_CPU_ALL_VARIANTS')) {
+        [Environment]::SetEnvironmentVariable($Flag, 'OFF', 'Process')
+    }
+    if (-not $env:CMAKE_BUILD_PARALLEL_LEVEL) { $env:CMAKE_BUILD_PARALLEL_LEVEL = '2' }
+    if (-not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = '2' }
     Invoke-Native 'python' @('-c', "import struct, sys; assert sys.version_info >= (3, 10); assert struct.calcsize('P') == 8, '64-bit Python required'")
     Invoke-Native 'node' @('-e', "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)")
     $env:TMP = Join-Path $Root '.cache\tmp'
@@ -87,6 +95,7 @@ try {
     $App = Join-Path $Release 'murmur.exe'
     $PortableEngine = Join-Path $Release 'murmur-engine.exe'
     Assert-Artifact $App
+    Invoke-Native 'python' @((Join-Path $PSScriptRoot 'audit-llama-cpu.py'), $Release, '--artifact', $App)
     # The portable pair must work without the checkout or Python installed.
     Copy-Item -LiteralPath $Frozen -Destination $PortableEngine -Force
     Assert-Artifact $PortableEngine

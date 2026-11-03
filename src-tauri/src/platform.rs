@@ -14,6 +14,8 @@ pub struct Paths {
     pub config: PathBuf,
     pub data: PathBuf,
     pub models: PathBuf,
+    /// Enhance model store, separate from the Whisper models directory.
+    pub enhance_models: PathBuf,
     pub history: PathBuf,
 }
 impl Paths {
@@ -51,10 +53,54 @@ impl Paths {
         Ok(Self {
             config: config.join("config.toml"),
             models: data.join("models"),
+            enhance_models: data.join("enhance").join("models"),
             history: data.join("history.sqlite"),
             data,
         })
     }
+}
+/// Bytes available to this user on the filesystem holding `path` (or its nearest existing
+/// ancestor). `None` when it cannot be determined; callers then skip the pre-check.
+pub fn available_space(path: &Path) -> Option<u64> {
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        probe = probe.parent()?.to_path_buf();
+    }
+    available_space_at(&probe)
+}
+#[cfg(unix)]
+fn available_space_at(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    #[allow(clippy::unnecessary_cast)]
+    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+}
+#[cfg(windows)]
+fn available_space_at(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut free: u64 = 0;
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return None;
+    }
+    Some(free)
+}
+#[cfg(not(any(unix, windows)))]
+fn available_space_at(_: &Path) -> Option<u64> {
+    None
 }
 fn env_path(key: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(
