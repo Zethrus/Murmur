@@ -68,10 +68,10 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         app,
         &[&label, &dictate, &mute, &enabled, &settings, &reload, &quit],
     )?;
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Missing application icon"))?;
+    // The tray uses the single-colour glyph, not the app tile: at 22 px the tile reads as a dark
+    // blob, while the blue mic keeps its silhouette against both dark and light panels.
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))
+        .map_err(|error| anyhow::anyhow!("Load tray icon: {error}"))?;
     TrayIconBuilder::with_id("murmur")
         .icon(icon)
         .tooltip("Murmur — no model")

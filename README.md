@@ -18,6 +18,8 @@ substitute for microphone, GPU, hotkey and desktop testing.
 
 Screenshots: placeholders pending a matched Linux/Windows capture set. See the
 [design-parity checklist and capture instructions](docs/parity/README.md).
+The icon mark, palette and regeneration steps are documented in
+[docs/branding](docs/branding/README.md).
 
 ## Linux installation
 

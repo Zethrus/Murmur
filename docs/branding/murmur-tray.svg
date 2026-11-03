@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="204 202 616 616" fill="none">
+  <path fill="currentColor" d="M372 436V344A140 140 0 0 1 652 344V436C636 444 612 445 582 445C558 445 534 426 512 419C490 412 466 393 442 393C412 393 388 410 372 436Z"/>
+  <path fill="currentColor" d="M372 436C396 431 418 427 442 427C466 427 490 446 512 453C534 460 558 479 582 479C612 479 636 462 652 436V528A140 140 0 0 1 372 528Z"/>
+  <path stroke="currentColor" stroke-width="56" stroke-linecap="round" d="M304 420V528A208 208 0 0 0 720 528V420"/>
+  <rect x="484" y="740" width="56" height="50" fill="currentColor"/>
+  <rect x="392" y="778" width="240" height="40" rx="20" fill="currentColor"/>
+</svg>
