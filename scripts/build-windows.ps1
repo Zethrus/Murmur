@@ -45,7 +45,7 @@ try {
     Write-Host '[1/5] Preparing engine venv and dependencies...'
     Invoke-Native 'python' @('-m', 'venv', 'engine\.venv')
     $Python = Join-Path $Root 'engine\.venv\Scripts\python.exe'
-    Invoke-Native $Python @('-m', 'pip', 'install', '-r', 'engine\requirements.txt', 'pyinstaller')
+    Invoke-Native $Python @('-m', 'pip', 'install', '-r', 'engine\requirements-cuda.txt', 'pyinstaller')
     Invoke-Native $Python @('-c', 'import faster_whisper, ctranslate2, PyInstaller')
 
     Write-Host '[2/5] Freezing murmur-engine.exe...'

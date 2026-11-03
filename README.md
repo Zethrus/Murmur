@@ -38,7 +38,7 @@ From the repository root:
 ```
 
 The installer builds the Python engine in place at `~/.local/share/murmur/engine`
-(a venv from `engine/requirements.txt`, including the CUDA wheels so GPU inference
+(a venv from `engine/requirements-cuda.txt`, including the CUDA wheels so GPU inference
 works on NVIDIA hardware), runs `npm ci`, then `npx tauri build` (which also builds
 the frontend). Linux does **not** ship a frozen interpreter: `murmur-engine` is a small
 launcher that execs the venv with the CUDA libraries on `LD_LIBRARY_PATH`, which keeps
@@ -90,7 +90,7 @@ Unrelated applications' files are not removed. No privileged install is supporte
 mkdir -p .cache/tmp .cache/pip
 export TMPDIR="$PWD/.cache/tmp" PIP_CACHE_DIR="$PWD/.cache/pip"
 python3 -m venv --system-site-packages engine/.venv
-engine/.venv/bin/python -m pip install -r engine/requirements.txt pyinstaller
+engine/.venv/bin/python -m pip install -r engine/requirements-cuda.txt pyinstaller
 npm ci
 npm run tauri dev                # desktop app; source Python engine from the venv
 # npm run dev                   # browser UI only: no Rust IPC

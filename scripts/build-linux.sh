@@ -7,7 +7,7 @@ mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
 if [[ ! -x engine/.venv/bin/python ]]; then
   /usr/bin/python3 -m venv --system-site-packages engine/.venv
 fi
-engine/.venv/bin/python -m pip install -r engine/requirements.txt pyinstaller
+engine/.venv/bin/python -m pip install -r engine/requirements-cuda.txt pyinstaller
 npm ci
 npm run build
 scripts/engine-sidecar.sh --build

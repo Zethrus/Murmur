@@ -1,8 +1,9 @@
 name: Linux build
 
 on:
-  push:
-    branches: ['master', 'main']
+  # Releases build on v* tags through release.yml. Branch pushes do not trigger a full build:
+  # one self-hosted runner means every push would queue a 20-minute job, and Actions artifact
+  # storage on this account is small.
   pull_request:
   workflow_dispatch:
   workflow_call:

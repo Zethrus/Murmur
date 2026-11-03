@@ -38,7 +38,7 @@ if [[ ! -x "$ENGINE_DIR/.venv/bin/python" ]]; then
 fi
 PYTHON="$ENGINE_DIR/.venv/bin/python"
 "$PYTHON" -m pip install --upgrade pip >/dev/null
-"$PYTHON" -m pip install -r engine/requirements.txt
+"$PYTHON" -m pip install -r engine/requirements-cuda.txt
 "$PYTHON" -c 'import faster_whisper, ctranslate2, numpy, huggingface_hub'
 rm -rf "$ENGINE_DIR/murmur_engine"
 cp -r engine/murmur_engine "$ENGINE_DIR/murmur_engine"

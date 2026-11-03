@@ -7,7 +7,7 @@ export HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
 mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
 PYTHON="$ROOT/engine/.venv/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
-  printf '%s\n' 'Create engine/.venv and install engine/requirements.txt first.' >&2
+  printf '%s\n' 'Create engine/.venv and install engine/requirements-cuda.txt first.' >&2
   exit 1
 fi
 if [[ "${1:-}" == --build ]]; then
