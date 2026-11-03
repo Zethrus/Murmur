@@ -16,6 +16,12 @@ body[data-window="settings"] { background: var(--bg); color: var(--text); overfl
 .settings-main { overflow: auto; padding: var(--page-inset); min-width: 0; }
 .settings-main > * { max-width: var(--content-max-w); margin-inline: auto; }
 .page-header { margin-bottom: var(--gap-xl); }
+.page-heading { display: flex; align-items: center; gap: var(--gap-lg); }
+.page-heading-text { min-width: 0; }
+.page-logo { flex-shrink: 0; width: var(--page-logo-size); height: var(--page-logo-size); }
+.page-logo .logo-tile { fill: var(--surface-raised); }
+.page-logo .logo-capsule { fill: var(--accent); }
+.page-logo .logo-cradle { fill: var(--accent); stroke: var(--accent); opacity: var(--logo-cradle-opacity); }
 .eyebrow { margin: 0 0 var(--gap-sm); font-size: var(--hint-size); letter-spacing: var(--hint-tracking); color: var(--text-muted); font-weight: var(--title-weight); }
 h1 { margin: 0; font-size: var(--page-title-size); line-height: var(--page-title-height); font-weight: var(--title-weight); }
 .page-description { color: var(--text-muted); margin: var(--page-title-gap) 0 0; }

@@ -27,6 +27,22 @@ function brandMark(){
   return svg;
 }
 
+/** The app logo: the packaged icon tile, so the header carries the same mark as the launcher. */
+function appLogo(){
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns,"svg");
+  svg.setAttribute("viewBox","0 0 1024 1024"); svg.setAttribute("class","page-logo");
+  svg.setAttribute("role","img"); svg.setAttribute("aria-label","Murmur");
+  svg.innerHTML = [
+    '<rect class="logo-tile" width="1024" height="1024" rx="180"/>',
+    '<path class="logo-capsule" d="M372 436V344A140 140 0 0 1 652 344V436C636 444 612 445 582 445C558 445 534 426 512 419C490 412 466 393 442 393C412 393 388 410 372 436Z"/>',
+    '<path class="logo-capsule" d="M372 436C396 431 418 427 442 427C466 427 490 446 512 453C534 460 558 479 582 479C612 479 636 462 652 436V528A140 140 0 0 1 372 528Z"/>',
+    '<path class="logo-cradle" fill="none" stroke-width="56" stroke-linecap="round" d="M304 420V528A208 208 0 0 0 720 528V420"/>',
+    '<rect class="logo-cradle" x="484" y="740" width="56" height="50"/>',
+    '<rect class="logo-cradle" x="392" y="778" width="240" height="40" rx="20"/>'
+  ].join("");
+  return svg;
+}
+
 export async function mountSettings(root: HTMLElement): Promise<void> {
   root.replaceChildren(el("p","boot-message","Opening your workspace…"));
   let config: Config, status: Status, version = "", page: Page = "General", disposed = false, saving = 0, lastTranscript = "", generation = 0;
@@ -42,7 +58,9 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   const header = el("header","page-header"), eyebrow = el("p","eyebrow","YOUR WORKSPACE"), title = el("h1"), description = el("p","page-description"), content = el("div","page-content"), notice = el("p","app-notice"), banner = el("div","model-banner");
   notice.setAttribute("role","status"); notice.setAttribute("aria-live","polite");
   banner.append(el("span","","Choose a speech model to start dictating"),button("Choose model",()=>navigate("Engine"),"primary"));
-  header.append(eyebrow,title,description); main.append(header,banner,notice,content); sidebar.append(brand,nav,footer); shell.append(sidebar,main); root.replaceChildren(shell);
+  const heading = el("div","page-heading"), headingText = el("div","page-heading-text");
+  headingText.append(eyebrow,title,description); heading.append(appLogo(),headingText); header.append(heading);
+  main.append(header,banner,notice,content); sidebar.append(brand,nav,footer); shell.append(sidebar,main); root.replaceChildren(shell);
   const report = (e: unknown): void => { notice.textContent = String(e); notice.dataset.tone = "error"; };
   const theme = (): void => { document.documentElement.dataset.theme = config.general.theme; };
   const chrome = (): void => { dot.dataset.online = String(status.sidecar_alive); engineStatus.textContent = !status.sidecar_alive ? "Engine offline" : !status.model_available ? "No model selected" : status.state === "idle" ? "Ready when you are" : status.state;

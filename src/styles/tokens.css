@@ -73,6 +73,7 @@
   --sidebar-inset: var(--sp-6) var(--sp-4); --sidebar-brand-inset: var(--sp-2) var(--sp-3) var(--sp-8);
   --sidebar-footer-inset: var(--sp-4) var(--sp-3); --nav-inset: var(--sp-3);
   --brand-size: var(--fs-22); --brand-mark-size: 32px; --brand-mark-radius: var(--r-md);
+  --page-logo-size: 44px; --logo-cradle-opacity: 0.62;
   --brand-mark-weight: var(--weight-semibold); --nav-number-size: var(--fs-11); --nav-number-w: 20px;
   --nav-active-bg: color-mix(in srgb, var(--accent) 10%, var(--surface));
   --nav-hover-bg: var(--surface-raised); --nav-radius: var(--r-md); --footer-size: var(--fs-11);
