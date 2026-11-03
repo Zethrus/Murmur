@@ -46,10 +46,11 @@ jobs:
         run: |
           set -euo pipefail
           # Hosted runners start bare; a self-hosted machine usually already has the stack and
-          # must not require passwordless sudo.
+          # must not require passwordless sudo. bindgen needs the libclang library, not the
+          # clang driver: cmake builds llama.cpp with g++, so requiring `clang` here forced a
+          # sudo apt install on machines that can already build.
           if pkg-config --exists webkit2gtk-4.1 libsoup-3.0 alsa && \
-             command -v cmake >/dev/null && command -v clang >/dev/null && \
-             command -v g++ >/dev/null && \
+             command -v cmake >/dev/null && command -v g++ >/dev/null && \
              (compgen -G '/usr/lib/llvm-*/lib/libclang.so*' >/dev/null || \
               test -f "${LIBCLANG_PATH:-/nonexistent}/libclang.so"); then
             echo "Build dependencies already present; skipping apt install."
@@ -100,9 +101,14 @@ jobs:
       - name: Build app, deb and AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
-        run: npx tauri build
+        run: |
+          set -euo pipefail
+          # Same x86-64/SSE2 baseline definition the release script uses; the audit below
+          # fails closed if the generated llama.cpp flags drift from it.
+          source scripts/cpu-baseline.sh
+          npx tauri build
       - name: Audit generated llama.cpp CPU flags
-        run: python scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release"
+        run: python scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release" --artifact "$CARGO_TARGET_DIR/release/murmur"
       - name: Verify and stage unsigned artifacts
         run: |
           set -euo pipefail
