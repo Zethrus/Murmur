@@ -3,7 +3,7 @@ body[data-window="settings"] { background: var(--bg); color: var(--text); overfl
 .sidebar { display: flex; flex-direction: column; padding: var(--sidebar-inset); background: var(--surface); border-right: var(--card-border); }
 .brand { display: flex; align-items: center; gap: var(--gap-md); padding: var(--sidebar-brand-inset); }
 .brand-name { font-size: var(--brand-size); font-weight: var(--title-weight); letter-spacing: var(--hint-tracking); }
-.brand-mark { display: grid; place-items: center; width: var(--brand-mark-size); height: var(--brand-mark-size); border-radius: var(--brand-mark-radius); background: var(--accent); color: var(--accent-contrast); font-weight: var(--brand-mark-weight); }
+.brand-mark { display: block; flex-shrink: 0; width: var(--brand-mark-size); height: var(--brand-mark-size); color: var(--accent); }
 .navigation { display: flex; flex-direction: column; gap: var(--gap-xs); }
 .button.nav-button { display: flex; width: var(--layout-full); gap: var(--gap-md); text-align: left; align-items: center; border-color: var(--overlay-canvas-bg); background: var(--overlay-canvas-bg); padding: var(--nav-inset); border-radius: var(--nav-radius); }
 .nav-button[aria-current="page"] { background: var(--nav-active-bg); color: var(--accent); }

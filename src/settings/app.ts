@@ -12,6 +12,21 @@ const descriptions: Record<Page,string> = {
   General:"A quieter way to get your thoughts down.", Engine:"A capable voice, running entirely on your device.",
   Audio:"Help Murmur hear you clearly.", Behavior:"Your words, delivered just the way you work.", Privacy:"Private by default. Always under your control."
 };
+/** The Murmur mark: microphone capsule with a wave slit, the same glyph as the tray icon. */
+function brandMark(){
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns,"svg");
+  svg.setAttribute("viewBox","204 202 616 616"); svg.setAttribute("class","brand-mark");
+  svg.setAttribute("role","img"); svg.setAttribute("aria-label","Murmur");
+  svg.innerHTML = [
+    '<path fill="currentColor" d="M372 436V344A140 140 0 0 1 652 344V436C636 444 612 445 582 445C558 445 534 426 512 419C490 412 466 393 442 393C412 393 388 410 372 436Z"/>',
+    '<path fill="currentColor" d="M372 436C396 431 418 427 442 427C466 427 490 446 512 453C534 460 558 479 582 479C612 479 636 462 652 436V528A140 140 0 0 1 372 528Z"/>',
+    '<path fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round" d="M304 420V528A208 208 0 0 0 720 528V420"/>',
+    '<rect x="484" y="740" width="56" height="50" fill="currentColor"/>',
+    '<rect x="392" y="778" width="240" height="40" rx="20" fill="currentColor"/>'
+  ].join("");
+  return svg;
+}
+
 export async function mountSettings(root: HTMLElement): Promise<void> {
   root.replaceChildren(el("p","boot-message","Opening your workspace…"));
   let config: Config, status: Status, version = "", page: Page = "General", disposed = false, saving = 0, lastTranscript = "", generation = 0;
@@ -21,7 +36,7 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   [config,status,version] = await Promise.all([call("get_config"),call("get_status"),appVersion()]);
   if (disposed) return;
   const shell = el("div","settings-shell"), sidebar = el("aside","sidebar"), brand = el("div","brand"), nav = el("nav","navigation"), footer = el("footer","sidebar-footer"), main = el("main","settings-main");
-  brand.append(el("span","brand-mark","m"),el("span","brand-name","murmur")); nav.setAttribute("aria-label","Settings pages");
+  brand.append(brandMark(),el("span","brand-name","murmur")); nav.setAttribute("aria-label","Settings pages");
   const dot = el("i","status-dot"), engineStatus = el("span","status-label"), footerLine = el("div","footer-line"); dot.setAttribute("aria-hidden","true"); footerLine.append(dot,engineStatus);
   footer.append(footerLine,el("span","version",`Version ${version} · On-device dictation`));
   const header = el("header","page-header"), eyebrow = el("p","eyebrow","YOUR WORKSPACE"), title = el("h1"), description = el("p","page-description"), content = el("div","page-content"), notice = el("p","app-notice"), banner = el("div","model-banner");
