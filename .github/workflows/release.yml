@@ -5,7 +5,9 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: read
+  # The called build workflows attach release assets, so they need contents: write here too;
+  # a reusable workflow may never request more permission than its caller grants.
+  contents: write
 
 jobs:
   # Both build workflows attach their own assets when the ref is a v* tag, so the release does not
