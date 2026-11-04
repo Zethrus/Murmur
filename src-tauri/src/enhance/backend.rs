@@ -81,8 +81,30 @@ pub fn default_backend() -> Box<dyn Backend + Send> {
     }
 }
 
-pub const fn compiled() -> bool {
-    cfg!(feature = "enhance-llama")
+/// Check before any native backend call; Rust itself stays on the SSE2 baseline.
+pub fn cpu_supported() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("fma")
+            && std::is_x86_feature_detected!("f16c")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        true
+    }
+}
+
+pub fn compiled() -> bool {
+    cfg!(feature = "enhance-llama") && cpu_supported()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn compiled_matches_default_backend_availability() {
+        assert_eq!(super::compiled(), super::default_backend().available());
+    }
 }
 
 #[cfg(test)]

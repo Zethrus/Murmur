@@ -12,15 +12,16 @@ import re
 import shlex
 import sys
 
+BASELINE_ON = ("GGML_AVX", "GGML_AVX2", "GGML_FMA", "GGML_F16C", "GGML_BMI2", "GGML_SSE42")
 BASELINE_OFF = (
-    "GGML_NATIVE", "GGML_AVX", "GGML_AVX2", "GGML_AVX512", "GGML_AVX512_BF16",
-    "GGML_AVX512_VBMI", "GGML_AVX512_VNNI", "GGML_AVX_VNNI", "GGML_FMA",
-    "GGML_F16C", "GGML_BMI2", "GGML_SSE42", "GGML_CPU_ALL_VARIANTS",
+    "GGML_NATIVE", "GGML_AVX512", "GGML_AVX512_BF16", "GGML_AVX512_VBMI",
+    "GGML_AVX512_VNNI", "GGML_AVX_VNNI", "GGML_CPU_ALL_VARIANTS",
     "GGML_AMX_BF16", "GGML_AMX_INT8", "GGML_AMX_TILE",
 )
-# x86-64-v2, SSE3/SSSE3/SSE4, POPCNT, AES, BMI, AVX and native tuning all
-# raise the advertised SSE2 minimum. Reject unknown -m CPU switches too.
-ALLOWED_M = {"64", "sse", "sse2", "no-avx", "no-avx2", "no-fma", "no-f16c", "no-bmi2", "no-sse4.2", "no-native"}
+# Rust stays at SSE2; only the guarded native backend may use these extensions.
+# Reject unknown -m CPU switches and flags that disable the required extensions.
+ALLOWED_M = {"64", "sse", "sse2", "avx", "avx2", "fma", "f16c", "bmi2", "sse4.2", "no-native"}
+REQUIRED_FEATURES = {"avx", "avx2", "fma", "f16c", "bmi2", "sse4.2"}
 CPU_SWITCH = re.compile(r"(?<![\w-])(-march=[^\s\"']+|-mcpu=[^\s\"']+|-m[a-zA-Z0-9_.+-]+|/arch:[^\s\"']+)", re.I)
 
 
@@ -74,6 +75,7 @@ def linked_cache(target, artifact):
 
 
 def audit_flags(text, origin, seen):
+    baseline = False
     # Make/Ninja invoke the compiler from the build root, not flags.make's directory.
     # Shell quotes may surround the whole @argument or just its filename.
     pattern = r'''(?<![\w@])(?:["']@([^"']+)["']|@(?:"([^"]+)"|'([^']+)'|([^\s"';]+)))'''
@@ -87,11 +89,13 @@ def audit_flags(text, origin, seen):
         if not response.is_file() or response in seen[1]:
             raise ValueError(f"{origin}: unresolved or recursive response file @{name}")
         seen[1].add(response)
-        audit_flags(response.read_text(), response, seen)
+        baseline |= audit_flags(response.read_text(), response, seen)
         seen[1].remove(response)
     # Clang's frontend features may bypass CMake GGML options and -m switches.
     for match in re.finditer(r'(?:-Xclang\s+)?-target-feature\s+(?:-Xclang\s+)?([+-][\w.-]+)', text):
-        if match.group(1).lower() not in ('+sse', '+sse2') and not match.group(1).startswith('-'):
+        feature = match.group(1).lower()
+        if (feature.startswith('+') and feature[1:] not in REQUIRED_FEATURES | {'sse', 'sse2'}
+                or feature.startswith('-') and feature[1:] in REQUIRED_FEATURES):
             raise ValueError(f"{origin}: unsupported CPU flag {match.group(0)}")
     stripped = re.sub(r'(?:-Xclang\s+)?-target-feature\s+(?:-Xclang\s+)?[+-][\w.-]+', '', text)
     if re.search(r'(?<![\w-])(?:-Xclang|-target-feature|-mattr=|-target-cpu=|/clang:)', stripped):
@@ -101,15 +105,25 @@ def audit_flags(text, origin, seen):
         if flag.startswith('-m') and not flag.startswith(('-march=', '-mcpu=')):
             if flag[2:] in ALLOWED_M or flag.startswith('-mtune='):
                 continue
-        elif flag == '-march=x86-64' or flag == '/arch:sse2':
+        elif flag == '-march=x86-64':
+            baseline = True
+            continue
+        elif flag == '/arch:avx2':
+            # MSVC spells the same baseline switch differently; ggml emits it for GGML_AVX2.
+            baseline = True
             continue
         raise ValueError(f"{origin}: unsupported CPU flag {flag}")
+    return baseline
 
 
 def audit_cache(cache, windows=False):
     lines = cache.read_text().splitlines()
     values = dict(line.split(":BOOL=", 1) for line in lines if ":BOOL=" in line)
-    for name in BASELINE_OFF:
+    for name in BASELINE_ON:
+        if values.get(name) != "ON":
+            raise ValueError(f"{cache}: {name} must be ON, got {values.get(name)!r}")
+    disabled = set(BASELINE_OFF) | {name for name in values if name.startswith(("GGML_AVX512", "GGML_AMX"))}
+    for name in sorted(disabled):
         if values.get(name) != "OFF":
             raise ValueError(f"{cache}: {name} must be OFF, got {values.get(name)!r}")
     files = [p for pattern in ('flags.make', 'compile_commands.json', 'build.ninja')
@@ -117,6 +131,7 @@ def audit_cache(cache, windows=False):
     if not files:
         raise ValueError(f"{cache}: no generated compiler flags to audit (Windows baseline unverified)")
     seen = (cache.parent, set())
+    baseline = False
     for file in files:
         if file.name == 'compile_commands.json':
             entries = json.loads(file.read_text())
@@ -134,16 +149,18 @@ def audit_cache(cache, windows=False):
                 if command is not None and arguments is not None:
                     raise ValueError(f"{file}: ambiguous compiler arguments")
                 if isinstance(command, str):
-                    audit_flags(command, file, (cwd, set()))
+                    baseline |= audit_flags(command, file, (cwd, set()))
                 elif isinstance(arguments, list) and arguments and all(isinstance(arg, str) for arg in arguments):
-                    audit_flags(' '.join(shlex.quote(arg) for arg in arguments), file, (cwd, set()))
+                    baseline |= audit_flags(' '.join(shlex.quote(arg) for arg in arguments), file, (cwd, set()))
                 else:
                     raise ValueError(f"{file}: missing compiler arguments")
         else:
-            audit_flags(file.read_text(), file, seen)
+            baseline |= audit_flags(file.read_text(), file, seen)
     for line in lines:
         if re.match(r'CMAKE_(?:C|CXX)_FLAGS(?:_[A-Z_]+)?:STRING=', line):
-            audit_flags(line.split('=', 1)[1], cache, seen)
+            baseline |= audit_flags(line.split('=', 1)[1], cache, seen)
+    if not baseline:
+        raise ValueError(f"{cache}: compiler flags must contain -march=x86-64 or /arch:AVX2")
     return len(files)
 
 
@@ -152,7 +169,7 @@ def audit(target, artifact=None):
     artifact = artifact or target / ("murmur.exe" if sys.platform == "win32" else "murmur")
     cache = linked_cache(target, artifact)
     count = audit_cache(cache, windows=artifact.suffix.lower() == ".exe")
-    print(f"CPU baseline x86-64/SSE2: linked {cache} ({count} compiler flag files) clean")
+    print(f"CPU contract baseline Rust + AVX2 llama.cpp: linked {cache} ({count} compiler flag files) clean")
 
 
 if __name__ == "__main__":
