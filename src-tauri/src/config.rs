@@ -107,6 +107,7 @@ section!(CompanionButtons {
 });
 section!(Companion {
     enabled: bool = false,
+    ptt: bool = false,
     transport: String = "auto".into(),
     usb_port: String = "".into(),
     ble_address: String = "".into(),

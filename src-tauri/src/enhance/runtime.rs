@@ -178,12 +178,14 @@ impl Runtime {
 
     pub fn set_partial(&self, state: &AppState, text: &str) {
         *lock(&self.partial) = text.to_owned();
+        state.companion.publish_text(text);
         let _ = state.app.emit("partial", json!({ "text": text }));
         self.publish(state);
     }
 
     /// A new dictation started: forget the previous one and cancel pending work.
     pub fn begin_dictation(&self, state: &AppState) {
+        state.companion.clear_pending();
         let session = self.session.clone();
         let worker = self.service.clone();
         let app = state.app.clone();
@@ -207,6 +209,8 @@ impl Runtime {
         path: InjectionPath,
         config: &Config,
     ) {
+        // This is the text that was actually delivered, not the last preliminary partial.
+        state.companion.publish_final_text(&delivered_text);
         let separator = if config.injection.trailing_space {
             " "
         } else {
@@ -273,7 +277,11 @@ impl Runtime {
     ) -> Value {
         let reply = |status: RewriteStatus, message: Option<String>| json!({ "status": status, "message": message });
         let Ok(config) = state.config() else {
-            tracing::info!(?trigger, reason = "config_unavailable", "Enhance rewrite skipped");
+            tracing::info!(
+                ?trigger,
+                reason = "config_unavailable",
+                "Enhance rewrite skipped"
+            );
             return reply(
                 RewriteStatus::Unavailable,
                 Some("Configuration unavailable".into()),
@@ -304,14 +312,22 @@ impl Runtime {
             if let Err(status) = session.check(trigger, gate, Instant::now()) {
                 // RewriteStatus serializes to the short machine-readable gate reason.
                 let reason = json!(status);
-                tracing::info!(?trigger, reason = reason.as_str(), "Enhance rewrite skipped");
+                tracing::info!(
+                    ?trigger,
+                    reason = reason.as_str(),
+                    "Enhance rewrite skipped"
+                );
                 let message = session.message.clone();
                 drop(session);
                 self.changed(state);
                 return reply(status, message);
             }
             let Some((entry, model_path)) = self.service.job_entry(&config.enhance.model) else {
-                tracing::info!(?trigger, reason = "model_missing", "Enhance rewrite skipped");
+                tracing::info!(
+                    ?trigger,
+                    reason = "model_missing",
+                    "Enhance rewrite skipped"
+                );
                 session.notice("Enhance model is not available.", Instant::now());
                 drop(session);
                 self.changed(state);
@@ -336,22 +352,35 @@ impl Runtime {
             let threads = job.threads;
             session.started(request_id, self.service.loaded(), trigger);
             if !self.service.worker.submit(job) {
-                tracing::info!(request_id, ?trigger, reason = "submit_rejected", "Enhance rewrite skipped");
+                tracing::info!(
+                    request_id,
+                    ?trigger,
+                    reason = "submit_rejected",
+                    "Enhance rewrite skipped"
+                );
                 session.discard(Some(request_id));
                 drop(session);
                 self.changed(state);
                 return reply(RewriteStatus::Busy, None);
             }
-            tracing::info!(request_id, ?trigger, threads, timeout_ms = config.enhance.timeout_ms, installed = gate.installed, "Enhance job submitted");
+            tracing::info!(
+                request_id,
+                ?trigger,
+                threads,
+                timeout_ms = config.enhance.timeout_ms,
+                installed = gate.installed,
+                "Enhance job submitted"
+            );
         };
         self.changed(state);
         reply(RewriteStatus::Queued, None)
     }
 
     pub fn on_worker(&self, state: &AppState, event: WorkerEvent) {
-        let visible = {
+        let (visible, suggestion) = {
             let mut session = lock(&self.session);
-            match event {
+            let finished = matches!(event, WorkerEvent::Finished { .. });
+            let visible = match event {
                 WorkerEvent::Loading { request_id } => session.progress(request_id, Phase::Loading),
                 WorkerEvent::Rewriting { request_id } => {
                     session.progress(request_id, Phase::Rewriting)
@@ -373,8 +402,17 @@ impl Runtime {
                     )
                 }
                 WorkerEvent::Unloaded => false,
-            }
+            };
+            let suggestion = if finished && visible && session.phase() == Phase::Ready {
+                session.suggestion.as_ref().map(|s| s.proposed.clone())
+            } else {
+                None
+            };
+            (visible, suggestion)
         };
+        if let Some(text) = suggestion {
+            state.companion.publish_suggestion(&text);
+        }
         if visible {
             self.changed(state);
         }

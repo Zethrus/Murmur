@@ -25,13 +25,14 @@ export interface CompanionButtons {
   ok_long: CompanionVerb; up_long: CompanionVerb; down_long: CompanionVerb;
 }
 export interface CompanionConfig {
-  enabled: boolean; transport: CompanionTransport; usb_port: string; ble_address: string;
+  enabled: boolean; ptt: boolean; transport: CompanionTransport; usb_port: string; ble_address: string;
   buttons: CompanionButtons;
 }
 /** Live link state, mirroring `companion::Status` in Rust. */
 export interface CompanionStatus {
   enabled: boolean; connected: boolean; transport: string; port: string;
   device: string; protocol: number; last_button: string; error: string | null;
+  rssi: number | null; battery: number | null; latency_ms: number;
 }
 export type EnhanceStyle = "concise" | "thorough" | "structured";
 export interface EnhanceConfig {

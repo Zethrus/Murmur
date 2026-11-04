@@ -16,10 +16,10 @@ const verbs: [CompanionVerb, string][] = [
 
 /** Physical buttons in reading order: config key, label, hint. */
 const buttons: [keyof CompanionButtons, string, string][] = [
-  ["ok", "OK", "The obvious one: one press to talk, one to stop."],
+  ["ok", "OK", "In toggle mode, one press starts dictation and the next stops it."],
   ["up", "Up", "Press-only. Does nothing while a dictation is running."],
   ["down", "Down", "Copies the suggestion the overlay is showing."],
-  ["back", "Back", "Dismisses the suggestion without copying it. Holding Back exits the app on the device."],
+  ["back", "Back", "Dismisses the suggestion. Holding Back while listening asks to discard; otherwise it exits the app."],
   ["left", "Left", "Unused by default."],
   ["right", "Right", "Unused by default."],
   ["ok_long", "OK (long press)", "Hold for 500 ms or more."],
@@ -32,7 +32,7 @@ const buttons: [keyof CompanionButtons, string, string][] = [
  * this section, or a truncated config, must still render a usable page rather than throwing.
  */
 const defaults: CompanionConfig = {
-  enabled: false, transport: "auto", usb_port: "", ble_address: "",
+  enabled: false, ptt: false, transport: "auto", usb_port: "", ble_address: "",
   buttons: {
     ok: "dictate_toggle", up: "enhance", down: "accept", back: "dismiss",
     left: "none", right: "none", ok_long: "cancel", up_long: "none", down_long: "none",
@@ -46,9 +46,11 @@ export function companion(ctx: PageContext): HTMLElement {
 
   const dot = el("i", "status-dot"), headline = el("span", "status-label", "Companion disabled");
   const detail = el("p", "card-note", "Enable the companion, then connect the Flipper with a data cable.");
+  const quality = el("p", "card-note", "Link quality: RSSI — · battery — · latency —");
   dot.setAttribute("aria-hidden", "true");
 
   const render = (status: CompanionStatus) => {
+    quality.textContent = `Link quality: RSSI ${status.rssi == null ? "—" : `${status.rssi} dBm`} · battery ${status.battery == null ? "—" : `${status.battery}%`} · latency ${status.connected ? `${status.latency_ms} ms` : "—"}`;
     dot.classList.toggle("ok", status.connected);
     headline.textContent = status.connected
       ? `Connected${status.device ? ` · ${status.device}` : ""}`
@@ -81,13 +83,18 @@ export function companion(ctx: PageContext): HTMLElement {
     card("Flipper Zero",
       stack(dot, headline),
       detail,
+      quality,
       row("Enable companion", "Listens for the Flipper over the selected link. Off by default, and it never touches dictation when disabled.",
         toggle(c.enabled, (on) => save({enabled: on}))),
-      row("Transport", "USB is the wired path. Bluetooth arrives in the next phase and needs pairing on both ends.",
-        select(c.transport, [["auto", "Automatic (USB first)"], ["usb", "USB cable"], ["ble", "Bluetooth (next phase)"]],
+      row("Transport", "Choose a cable, Bluetooth, or automatic discovery.",
+        select(c.transport, [["auto", "Automatic"], ["usb", "USB cable"], ["ble", "Bluetooth"]],
           (value) => save({transport: value as CompanionConfig["transport"]}))),
       row("Serial device", "Leave blank to discover the Flipper automatically. Only needed when several ACM devices are attached.",
         stack(port, detect)),
+      row("BLE device", "Leave blank to discover the Flipper automatically.",
+        textField(c.ble_address, (value) => save({ble_address: value}), "auto-discover")),
+      row("Push-to-talk", "Hold OK to dictate and release it to stop.",
+        toggle(c.ptt, (on) => save({ptt: on}))),
       row("Reconnect", "Re-pushes the button map and retries the link without restarting Murmur.",
         button("Reconnect now", async () => { await call("companion_resync"); }))),
     card("Buttons",
