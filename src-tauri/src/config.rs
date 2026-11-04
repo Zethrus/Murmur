@@ -91,7 +91,7 @@ section!(Enhance {
     threads: u32 = 0,
     unload_after_s: u64 = 120,
     load_timeout_ms: u64 = 30000,
-    timeout_ms: u64 = 15000
+    timeout_ms: u64 = 60000
 });
 section!(Config {
     general: General = General::default(),
@@ -127,8 +127,13 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let config: Self = toml::from_str(&fs::read_to_string(path).context("Read config")?)
+        let mut config: Self = toml::from_str(&fs::read_to_string(path).context("Read config")?)
             .context("Parse config TOML")?;
+        // Default migration: old installs inherited a deadline too short for CPU inference.
+        // Apply only on disk load; live patches retain an explicitly chosen 15 seconds.
+        if config.enhance.timeout_ms == 15000 {
+            config.enhance.timeout_ms = 60000;
+        }
         config.validate()?;
         Ok(config)
     }
@@ -222,8 +227,8 @@ impl Config {
         if !(1_000..=120_000).contains(&e.load_timeout_ms) {
             bail!("Enhance load timeout must be 1–120 seconds");
         }
-        if !(1_000..=60_000).contains(&e.timeout_ms) {
-            bail!("Enhance rewrite timeout must be 1–60 seconds");
+        if !(1_000..=120_000).contains(&e.timeout_ms) {
+            bail!("Enhance rewrite timeout must be 1–120 seconds");
         }
         if e.model.len() > 128 {
             bail!("Enhance model identifier is too long");
@@ -337,6 +342,27 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn enhance_timeout_default_migration_on_load_only() -> Result<()> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/config-timeout-test.toml");
+        fs::create_dir_all(path.parent().unwrap())?;
+        for (contents, expected) in [
+            ("[enhance]\ntimeout_ms = 15000", 60000),
+            ("[enhance]\ntimeout_ms = 20000", 20000),
+            ("[enhance]", 60000),
+        ] {
+            fs::write(&path, contents)?;
+            assert_eq!(Config::load(&path)?.enhance.timeout_ms, expected);
+        }
+        fs::remove_file(&path)?;
+        assert_eq!(Config::load(&path)?.enhance.timeout_ms, 60000);
+        let patched = Config::default().patched(serde_json::json!({"enhance":{"timeout_ms":15000}}))?;
+        assert_eq!(patched.enhance.timeout_ms, 15000);
+        for timeout in [1000, 60000, 120000] {
+            assert!(Config::default().patched(serde_json::json!({"enhance":{"timeout_ms":timeout}})).is_ok());
+        }
+        Ok(())
+    }
+    #[test]
     fn enhance_validation() {
         let base = Config::default();
         for patch in [
@@ -345,6 +371,7 @@ mod tests {
             serde_json::json!({"enhance":{"threads":17}}),
             serde_json::json!({"enhance":{"unload_after_s":601}}),
             serde_json::json!({"enhance":{"timeout_ms":500}}),
+            serde_json::json!({"enhance":{"timeout_ms":120001}}),
             serde_json::json!({"enhance":{"load_timeout_ms":200000}}),
             serde_json::json!({"overlay":{"placement":{"x_fraction":1.5}}}),
             serde_json::json!({"enhance":{"rewrite_hotkey":"Ctrl+Alt+D"}}),

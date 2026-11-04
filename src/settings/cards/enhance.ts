@@ -11,7 +11,7 @@ export const SUGGESTED_REWRITE = "Ctrl+Alt+Shift+R";
 export const SUGGESTED_ACCEPT = "Ctrl+Alt+Shift+A";
 const STATEMENT = "Rewrites run locally on your CPU. Dictation audio and text are never uploaded. Internet access is used only when you explicitly download a model. Your original dictation is delivered immediately.";
 const ACTIVE_PHASES = new Set(["starting","downloading","verifying"]);
-const DEFAULTS: EnhanceConfig = {auto_rewrite:false,rewrite_hotkey:"",accept_hotkey:"",style:"concise",model:"qwen3-1.7b-q4_k_m",accept_mode:"clipboard",rewrite_code:false,threads:0,unload_after_s:120,load_timeout_ms:30000,timeout_ms:15000};
+const DEFAULTS: EnhanceConfig = {auto_rewrite:false,rewrite_hotkey:"",accept_hotkey:"",style:"concise",model:"qwen3-1.7b-q4_k_m",accept_mode:"clipboard",rewrite_code:false,threads:0,unload_after_s:120,load_timeout_ms:30000,timeout_ms:60000};
 
 /** Survives page re-renders so a revisited Behavior page paints the last known state before rehydrating from the backend. */
 let cache: {model?: EnhanceModel; status?: EnhanceStatus; download?: EnhanceDownload} = {};

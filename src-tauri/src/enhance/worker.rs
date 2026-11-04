@@ -130,47 +130,68 @@ fn run_job(
     sink: &Sink,
     verified: &mut Verified,
 ) -> Result<Outcome, EnhanceError> {
-    let prompt = prompt::build(&job.body, job.preset, &job.dictionary)?;
-    if !backend.available() {
-        return Err(EnhanceError::new(
-            ErrorCode::BackendUnavailable,
-            "This build of Murmur does not include the Enhance engine",
-        ));
-    }
-    if !backend.loaded() {
-        sink(WorkerEvent::Loading {
+    // Log every outcome, including load failures and panics, without prompt/output text.
+    // A missing elapsed value means generation was never entered.
+    let mut generate_started: Option<Instant> = None;
+    let mut generate_elapsed: Option<u64> = None;
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let prompt = prompt::build(&job.body, job.preset, &job.dictionary)?;
+        if !backend.available() {
+            return Err(EnhanceError::new(
+                ErrorCode::BackendUnavailable,
+                if cfg!(feature = "enhance-llama") && !super::backend::cpu_supported() {
+                    "This CPU does not support AVX2, so local rewriting is unavailable."
+                } else {
+                    "This build of Murmur does not include the Enhance engine"
+                },
+            ));
+        }
+        if !backend.loaded() {
+            sink(WorkerEvent::Loading {
+                request_id: job.request_id,
+            });
+            let budget = Budget {
+                cancel: cancel.clone(),
+                deadline: Instant::now() + job.load_timeout,
+                timeout_code: ErrorCode::LoadTimeout,
+            };
+            verify(job.entry, &job.model_path, &budget, verified)?;
+            backend.load(&job.model_path, job.threads, &budget)?;
+        } else {
+            // Recheck cheap metadata; a changed file forces a fresh hash on next load.
+            let budget = Budget {
+                cancel: cancel.clone(),
+                deadline: Instant::now() + job.load_timeout,
+                timeout_code: ErrorCode::LoadTimeout,
+            };
+            if let Err(error) = verify(job.entry, &job.model_path, &budget, verified) {
+                backend.unload();
+                return Err(error);
+            }
+        }
+        sink(WorkerEvent::Rewriting {
             request_id: job.request_id,
         });
         let budget = Budget {
             cancel: cancel.clone(),
-            deadline: Instant::now() + job.load_timeout,
-            timeout_code: ErrorCode::LoadTimeout,
+            deadline: Instant::now() + job.timeout,
+            timeout_code: ErrorCode::Timeout,
         };
-        verify(job.entry, &job.model_path, &budget, verified)?;
-        backend.load(&job.model_path, job.threads, &budget)?;
-    } else {
-        // Recheck cheap metadata; a changed file forces a fresh hash on next load.
-        let budget = Budget {
-            cancel: cancel.clone(),
-            deadline: Instant::now() + job.load_timeout,
-            timeout_code: ErrorCode::LoadTimeout,
-        };
-        if let Err(error) = verify(job.entry, &job.model_path, &budget, verified) {
-            backend.unload();
-            return Err(error);
-        }
-    }
-    sink(WorkerEvent::Rewriting {
-        request_id: job.request_id,
+        tracing::debug!(request_id = job.request_id, "Enhance generation started");
+        generate_started = Some(Instant::now());
+        let raw = backend.generate(&prompt, &budget);
+        generate_elapsed = generate_started.map(|start| start.elapsed().as_millis() as u64);
+        let raw = raw?;
+        budget.check()?;
+        output::parse(&raw, &prompt, &job.body)
+    }))
+    .unwrap_or_else(|_| {
+        Err(EnhanceError::new(ErrorCode::InferenceFailed, "The Enhance engine failed"))
     });
-    let budget = Budget {
-        cancel: cancel.clone(),
-        deadline: Instant::now() + job.timeout,
-        timeout_code: ErrorCode::Timeout,
-    };
-    let raw = backend.generate(&prompt, &budget)?;
-    budget.check()?;
-    output::parse(&raw, &prompt, &job.body)
+    let elapsed_ms = generate_elapsed.or_else(|| generate_started.map(|start| start.elapsed().as_millis() as u64));
+    let error_code = result.as_ref().err().map(|error| error.code.as_str());
+    tracing::info!(request_id = job.request_id, ok = result.is_ok(), error_code = error_code.as_deref(), elapsed_ms, "Enhance job finished");
+    result
 }
 
 impl Worker {
@@ -236,12 +257,7 @@ impl Worker {
                             }
                         }
                         Some(Ok((job, cancel))) => {
-                            let result = catch_unwind(AssertUnwindSafe(|| {
-                                run_job(backend.as_mut(), &job, &cancel, &sink, &mut verified)
-                            }))
-                            .unwrap_or_else(|_| {
-                                Err(EnhanceError::new(ErrorCode::InferenceFailed, "The Enhance engine failed"))
-                            });
+                            let result = run_job(backend.as_mut(), &job, &cancel, &sink, &mut verified);
                             if matches!(&result, Err(e) if matches!(e.code, ErrorCode::InferenceFailed | ErrorCode::Corrupt | ErrorCode::LoadFailed)) {
                                 backend.unload();
                                 verified = None;
@@ -357,8 +373,27 @@ pub fn effective_threads(configured: u32) -> u32 {
     if configured > 0 {
         return configured.min(16);
     }
-    let cpus = thread::available_parallelism()
+    let logical = thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(2);
-    cpus.saturating_sub(1).clamp(1, 4)
+    automatic_threads(logical)
+}
+
+fn automatic_threads(logical: u32) -> u32 {
+    // Approximate physical cores on larger SMT machines without oversubscribing inference.
+    let physical = if logical >= 8 { logical / 2 } else { logical };
+    physical.clamp(2, 8)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn automatic_threads_use_available_hardware() {
+        for (logical, expected) in [(1, 2), (2, 2), (4, 4), (8, 4), (16, 8), (32, 8)] {
+            assert_eq!(super::automatic_threads(logical), expected);
+        }
+        for (configured, expected) in [(1, 1), (2, 2), (4, 4), (8, 8), (16, 16), (32, 16)] {
+            assert_eq!(super::effective_threads(configured), expected);
+        }
+    }
 }

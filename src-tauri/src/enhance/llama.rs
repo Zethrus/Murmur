@@ -19,7 +19,7 @@ use llama_cpp_2::{
 use std::{num::NonZeroU32, path::Path};
 
 /// Prefill chunk size bounds the interval between cancellation checks.
-const PREFILL_CHUNK: usize = 32;
+const PREFILL_CHUNK: usize = 256;
 
 #[derive(Default)]
 pub struct Llama {
@@ -35,7 +35,7 @@ fn fail(code: ErrorCode, message: &str) -> EnhanceError {
 
 impl Backend for Llama {
     fn available(&self) -> bool {
-        true
+        super::backend::cpu_supported()
     }
     fn loaded(&self) -> bool {
         self.model.is_some()

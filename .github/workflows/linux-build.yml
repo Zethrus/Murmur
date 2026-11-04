@@ -29,14 +29,15 @@ jobs:
       PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       CARGO_BUILD_JOBS: '2'
-      RUSTFLAGS: '-C target-cpu=x86-64 -C target-feature=-avx,-avx2,-fma,-f16c,-bmi2,-sse4.2'
+      RUSTFLAGS: '-C target-cpu=x86-64'
       GGML_NATIVE: 'OFF'
-      GGML_AVX: 'OFF'
-      GGML_AVX2: 'OFF'
-      GGML_FMA: 'OFF'
-      GGML_F16C: 'OFF'
-      GGML_BMI2: 'OFF'
-      GGML_SSE42: 'OFF'
+      GGML_AVX512: 'OFF'
+      GGML_AVX: 'ON'
+      GGML_AVX2: 'ON'
+      GGML_FMA: 'ON'
+      GGML_F16C: 'ON'
+      GGML_BMI2: 'ON'
+      GGML_SSE42: 'ON'
       GGML_CPU_ALL_VARIANTS: 'OFF'
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +109,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: |
           set -euo pipefail
-          # Same x86-64/SSE2 baseline definition the release script uses; the audit below
+          # Same baseline Rust + AVX2 llama.cpp contract the release script uses; the audit below
           # fails closed if the generated llama.cpp flags drift from it.
           source scripts/cpu-baseline.sh
           npx tauri build

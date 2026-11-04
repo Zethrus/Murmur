@@ -107,14 +107,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests without Enhance backend failed' }
       - name: Build the app and NSIS installer
         env:
-          RUSTFLAGS: -C target-cpu=x86-64 -C target-feature=-avx,-avx2,-fma,-f16c,-bmi2,-sse4.2
+          RUSTFLAGS: -C target-cpu=x86-64
           GGML_NATIVE: 'OFF'
-          GGML_AVX: 'OFF'
-          GGML_AVX2: 'OFF'
-          GGML_FMA: 'OFF'
-          GGML_F16C: 'OFF'
-          GGML_BMI2: 'OFF'
-          GGML_SSE42: 'OFF'
+          GGML_AVX512: 'OFF'
+          GGML_AVX: 'ON'
+          GGML_AVX2: 'ON'
+          GGML_FMA: 'ON'
+          GGML_F16C: 'ON'
+          GGML_BMI2: 'ON'
+          GGML_SSE42: 'ON'
           GGML_CPU_ALL_VARIANTS: 'OFF'
         run: npx tauri build --target x86_64-pc-windows-msvc
 

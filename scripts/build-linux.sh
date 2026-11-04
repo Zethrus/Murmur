@@ -8,7 +8,7 @@ export TMPDIR="$ROOT/.cache/tmp" PIP_CACHE_DIR="$ROOT/.cache/pip"
 mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
-# Baseline: x86-64/SSE2, shared with CI so release artifacts cannot drift.
+# Baseline Rust + AVX2 llama.cpp, shared with CI so release artifacts cannot drift.
 . "$ROOT/scripts/cpu-baseline.sh"
 # bindgen needs libclang (checked below); the C/C++ compiler is g++, not the clang driver.
 for tool in cmake g++; do

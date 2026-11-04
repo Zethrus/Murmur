@@ -17,6 +17,8 @@ esac
   printf 'Run as your regular Linux user, without sudo.\n' >&2; exit 1;
 }
 cd "$ROOT"
+# Share the native CPU contract with local release builds and CI.
+. "$ROOT/scripts/cpu-baseline.sh"
 for cmd in python3 node npm npx rustc cargo pkg-config cc; do
   command -v "$cmd" >/dev/null || { printf 'Missing prerequisite: %s\n' "$cmd" >&2; exit 1; }
 done

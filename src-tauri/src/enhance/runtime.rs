@@ -273,6 +273,7 @@ impl Runtime {
     ) -> Value {
         let reply = |status: RewriteStatus, message: Option<String>| json!({ "status": status, "message": message });
         let Ok(config) = state.config() else {
+            tracing::info!(?trigger, reason = "config_unavailable", "Enhance rewrite skipped");
             return reply(
                 RewriteStatus::Unavailable,
                 Some("Configuration unavailable".into()),
@@ -297,15 +298,20 @@ impl Runtime {
                         .as_ref()
                         .is_none_or(|r| r.dictation_id != dictation)
             }) {
+                tracing::info!(?trigger, reason = "expired", "Enhance rewrite skipped");
                 return reply(RewriteStatus::Expired, None);
             }
             if let Err(status) = session.check(trigger, gate, Instant::now()) {
+                // RewriteStatus serializes to the short machine-readable gate reason.
+                let reason = json!(status);
+                tracing::info!(?trigger, reason = reason.as_str(), "Enhance rewrite skipped");
                 let message = session.message.clone();
                 drop(session);
                 self.changed(state);
                 return reply(status, message);
             }
             let Some((entry, model_path)) = self.service.job_entry(&config.enhance.model) else {
+                tracing::info!(?trigger, reason = "model_missing", "Enhance rewrite skipped");
                 session.notice("Enhance model is not available.", Instant::now());
                 drop(session);
                 self.changed(state);
@@ -327,13 +333,16 @@ impl Runtime {
                 timeout: Duration::from_millis(config.enhance.timeout_ms),
                 unload_after: Duration::from_secs(config.enhance.unload_after_s),
             };
+            let threads = job.threads;
             session.started(request_id, self.service.loaded(), trigger);
             if !self.service.worker.submit(job) {
+                tracing::info!(request_id, ?trigger, reason = "submit_rejected", "Enhance rewrite skipped");
                 session.discard(Some(request_id));
                 drop(session);
                 self.changed(state);
                 return reply(RewriteStatus::Busy, None);
             }
+            tracing::info!(request_id, ?trigger, threads, timeout_ms = config.enhance.timeout_ms, installed = gate.installed, "Enhance job submitted");
         };
         self.changed(state);
         reply(RewriteStatus::Queued, None)
