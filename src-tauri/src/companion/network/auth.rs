@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    net::IpAddr,
+    net::{IpAddr, Ipv6Addr},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -67,37 +67,49 @@ pub struct Pairing {
     pub expires_at: u64,
 }
 #[derive(Default)]
-pub struct CodeSlot(Option<Pairing>);
+pub struct CodeSlot {
+    pairing: Option<Pairing>,
+    failures: u8,
+}
 impl CodeSlot {
     pub fn regenerate(&mut self, at: u64) -> Result<Pairing> {
         let code = loop {
             let raw = random_hex::<4>()?;
             let number = u32::from_str_radix(&raw, 16)? % 1_000_000;
             let candidate = format!("{number:06}");
-            if self.0.as_ref().is_none_or(|old| old.code != candidate) {
+            if self
+                .pairing
+                .as_ref()
+                .is_none_or(|old| old.code != candidate)
+            {
                 break Pairing {
                     code: candidate,
                     expires_at: at + 300,
                 };
             }
         };
-        self.0 = Some(code.clone());
+        self.pairing = Some(code.clone());
+        self.failures = 0;
         Ok(code)
     }
     pub fn consume(&mut self, candidate: &str, at: u64) -> bool {
-        let Some(current) = self.0.as_ref() else {
+        let Some(current) = self.pairing.as_ref() else {
             return false;
         };
         if at >= current.expires_at {
-            self.0 = None;
+            self.pairing = None;
             return false;
         }
-        if candidate.len() != 6 || !candidate.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
-        let valid: bool = current.code.as_bytes().ct_eq(candidate.as_bytes()).into();
+        let valid = candidate.len() == 6
+            && candidate.bytes().all(|b| b.is_ascii_digit())
+            && bool::from(current.code.as_bytes().ct_eq(candidate.as_bytes()));
         if valid {
-            self.0 = None;
+            self.pairing = None;
+        } else {
+            self.failures += 1;
+            if self.failures >= 5 {
+                self.pairing = None;
+            }
         }
         valid
     }
@@ -108,30 +120,32 @@ pub struct RateLimiter {
     failed: HashMap<IpAddr, (u8, u64)>,
 }
 impl RateLimiter {
+    const MAX_SOURCES: usize = 1024;
     fn key(ip: IpAddr) -> IpAddr {
         match ip {
-            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+            IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or_else(|| IpAddr::V6(Ipv6Addr::from(u128::from(v6) & (!0u128 << 64)))),
             _ => ip,
         }
     }
     pub fn allowed(&mut self, ip: IpAddr, at: u64) -> bool {
+        self.failed.retain(|_, (_, until)| at < *until);
         let ip = Self::key(ip);
-        if let Some((count, until)) = self.failed.get(&ip).copied() {
-            if count >= 5 {
-                if at < until {
-                    return false;
-                }
-                self.failed.remove(&ip);
-            }
+        match self.failed.get(&ip) {
+            Some((count, _)) => *count < 5,
+            None => self.failed.len() < Self::MAX_SOURCES,
         }
-        true
     }
     pub fn failure(&mut self, ip: IpAddr, at: u64) {
         let ip = Self::key(ip);
-        let entry = self.failed.entry(ip).or_insert((0, 0));
-        entry.0 += 1;
-        if entry.0 >= 5 {
-            entry.1 = at + 60;
+        if self.failed.contains_key(&ip) || self.failed.len() < Self::MAX_SOURCES {
+            let entry = self.failed.entry(ip).or_insert((0, at.saturating_add(60)));
+            entry.0 = entry.0.saturating_add(1);
+            if entry.0 == 5 {
+                entry.1 = at.saturating_add(60);
+            }
         }
     }
     pub fn success(&mut self, ip: IpAddr) {
@@ -181,6 +195,9 @@ impl Auth {
     }
     pub fn list(&self) -> Vec<PublicDevice> {
         self.devices.iter().map(PublicDevice::from).collect()
+    }
+    pub fn has_device(&self, id: &str) -> bool {
+        self.devices.iter().any(|device| device.id == id)
     }
     pub fn revoke(&mut self, id: &str) -> Result<bool> {
         let mut next = self.devices.clone();
@@ -308,5 +325,55 @@ mod tests {
             limiter.failure(ip, 71);
         }
         assert!(!limiter.allowed("::ffff:127.0.0.1".parse().unwrap(), 71));
+    }
+    #[test]
+    fn five_sources_burn_pairing_code() {
+        let data = std::env::temp_dir().join(format!(
+            "murmur-pairing-test-{}",
+            random_hex::<8>().unwrap()
+        ));
+        let mut auth = Auth::load(&data).unwrap();
+        let code = auth.show_code().unwrap().code;
+        let wrong = format!("{:06}", (code.parse::<u32>().unwrap() + 1) % 1_000_000);
+        for source in 1..=5 {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, source));
+            assert!(matches!(
+                auth.authenticate(ip, &wrong, "phone").unwrap(),
+                Err("invalid_credential")
+            ));
+        }
+        let sixth: IpAddr = "10.0.0.6".parse().unwrap();
+        assert!(matches!(
+            auth.authenticate(sixth, &code, "phone").unwrap(),
+            Err("invalid_credential")
+        ));
+        let replacement = auth.show_code().unwrap();
+        assert!(auth
+            .authenticate(sixth, &replacement.code, "phone")
+            .unwrap()
+            .is_ok());
+        std::fs::remove_dir_all(data).unwrap();
+    }
+    #[test]
+    fn limiter_groups_ipv6_and_bounds_entries() {
+        let mut limiter = RateLimiter::default();
+        let first: IpAddr = "fe80::1".parse().unwrap();
+        for _ in 0..5 {
+            assert!(limiter.allowed(first, 10));
+            limiter.failure(first, 10);
+        }
+        assert!(!limiter.allowed("fe80::2".parse().unwrap(), 10));
+        for source in 0..RateLimiter::MAX_SOURCES + 100 {
+            let ip = IpAddr::V6(Ipv6Addr::from(
+                (0xfd00u128 << 112) | ((source as u128) << 64),
+            ));
+            if limiter.allowed(ip, 10) {
+                limiter.failure(ip, 10);
+            }
+        }
+        assert_eq!(limiter.failed.len(), RateLimiter::MAX_SOURCES);
+        assert!(!limiter.allowed("2001:db8::1".parse().unwrap(), 10));
+        assert!(limiter.allowed("2001:db8::1".parse().unwrap(), 70));
+        assert!(limiter.failed.is_empty());
     }
 }

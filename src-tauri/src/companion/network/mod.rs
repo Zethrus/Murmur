@@ -3,7 +3,7 @@ mod listener;
 pub use murmur::{auth, lan, tls, wire};
 
 use crate::{app::AppState, config::CompanionNetwork};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -42,7 +42,7 @@ pub struct Status {
 }
 struct Shared {
     app: AppHandle,
-    auth: Mutex<auth::Auth>,
+    auth: Option<Mutex<auth::Auth>>,
     sessions: Mutex<HashMap<String, watch::Sender<bool>>>,
     fingerprint: Mutex<Option<String>>,
     error: Mutex<Option<String>>,
@@ -63,24 +63,34 @@ pub struct Network {
     thread: Mutex<Option<thread::JoinHandle<()>>>,
 }
 impl Network {
-    pub fn new(app: AppHandle, data: &Path) -> Result<Self> {
+    pub fn new(app: AppHandle, data: &Path) -> Self {
         let (changes, _) = watch::channel(Some(Settings {
             enabled: false,
             bind: "127.0.0.1".into(),
             port: 8787,
         }));
-        Ok(Self {
+        let (auth, error) = match auth::Auth::load(data) {
+            Ok(auth) => (Some(Mutex::new(auth)), None),
+            Err(error) => {
+                tracing::warn!(%error, "Companion token store unavailable");
+                (
+                    None,
+                    Some(format!("Companion token store unavailable: {error:#}")),
+                )
+            }
+        };
+        Self {
             shared: Arc::new(Shared {
                 app,
-                auth: Mutex::new(auth::Auth::load(data)?),
+                auth,
                 sessions: Mutex::new(HashMap::new()),
                 fingerprint: Mutex::new(None),
-                error: Mutex::new(None),
+                error: Mutex::new(error),
                 rejected_peers: AtomicU64::new(0),
             }),
             changes,
             thread: Mutex::new(None),
-        })
+        }
     }
     pub fn start(&self) {
         self.config_changed();
@@ -104,6 +114,13 @@ impl Network {
                     loop {
                         let setting = changes.borrow_and_update().clone();
                         let Some(setting) = setting else { break };
+                        if shared.auth.is_none() {
+                            shared.close_all();
+                            if changes.changed().await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
                         if setting.enabled {
                             if let Err(error) =
                                 listener::run(shared.clone(), &setting, &mut changes).await
@@ -157,14 +174,31 @@ impl Network {
             fingerprint: self.shared.fingerprint.lock().unwrap().clone(),
             error: self.shared.error.lock().unwrap().clone(),
             rejected_peers: self.shared.rejected_peers.load(Ordering::Relaxed),
-            devices: self.shared.auth.lock().unwrap().list(),
+            devices: self
+                .shared
+                .auth
+                .as_ref()
+                .map_or_else(Vec::new, |auth| auth.lock().unwrap().list()),
         }
     }
     pub fn pairing(&self) -> Result<auth::Pairing> {
-        self.shared.auth.lock().unwrap().show_code()
+        self.shared
+            .auth
+            .as_ref()
+            .context("Companion token store unavailable")?
+            .lock()
+            .unwrap()
+            .show_code()
     }
     pub fn revoke(&self, id: &str) -> Result<bool> {
-        let removed = self.shared.auth.lock().unwrap().revoke(id)?;
+        let removed = self
+            .shared
+            .auth
+            .as_ref()
+            .context("Companion token store unavailable")?
+            .lock()
+            .unwrap()
+            .revoke(id)?;
         if removed {
             if let Some(stop) = self.shared.sessions.lock().unwrap().remove(id) {
                 let _ = stop.send(true);

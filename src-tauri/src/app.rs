@@ -133,7 +133,7 @@ impl AppState {
             model_available: false,
             error: None,
         };
-        let companion_network = crate::companion::network::Network::new(app.clone(), &paths.data)?;
+        let companion_network = crate::companion::network::Network::new(app.clone(), &paths.data);
         Ok(Self {
             app: app.clone(),
             paths,

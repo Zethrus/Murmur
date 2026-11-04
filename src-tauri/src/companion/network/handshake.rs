@@ -2,7 +2,7 @@
 use crate::{auth::Auth, wire};
 use anyhow::{bail, Result};
 use futures::{SinkExt, StreamExt};
-use std::{net::IpAddr, sync::Mutex, time::Duration};
+use std::{net::IpAddr, sync::Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{
     tungstenite::{
@@ -56,7 +56,7 @@ pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
         &format!("HELLO {protocol} {} host", env!("CARGO_PKG_VERSION")),
     )
     .await?;
-    let hello = tokio::time::timeout(Duration::from_secs(10), next_line(ws)).await??;
+    let hello = next_line(ws).await?;
     let mut parts = hello.split(' ');
     if parts.next() != Some("HELLO")
         || parts.next().and_then(|v| v.parse::<u8>().ok()) != Some(protocol)
@@ -74,7 +74,7 @@ pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
         send_line(ws, "AUTH DENY hello").await?;
         return Ok(None);
     }
-    let auth_line = tokio::time::timeout(Duration::from_secs(10), next_line(ws)).await??;
+    let auth_line = next_line(ws).await?;
     let credential = auth_line.strip_prefix("AUTH ").unwrap_or("");
     let decision = auth.lock().unwrap().authenticate(peer, credential, name)?;
     match decision {
