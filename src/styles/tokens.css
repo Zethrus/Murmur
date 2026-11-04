@@ -41,13 +41,14 @@
   --scrollbar-w: 10px; --hairline: 1px;
   --shadow-light-1: 0 2px 8px #10131a0d; --shadow-light-2: 0 8px 24px #10131a26;
   --shadow-dark-1: 0 2px 8px #00000030; --shadow-dark-2: 0 8px 24px #00000066;
-  --overlay-light: #fffffff2; --overlay-dark: #171b24f2;
+  --overlay-light: rgba(255, 255, 255, 0.62); --overlay-dark: rgba(16, 20, 28, 0.62);
+  --overlay-blur: 18px; --overlay-tint: 160%;
   --row-height: 60px; --sidebar-w: 240px; --card-radius: var(--r-lg);
   --switch-track: 32px; --switch-h: 20px; --switch-radius: var(--r-pill);
   --slider-thumb: 14px; --slider-track-h: 4px;
-  --pill-h: 48px; --pill-max-w: 560px; --pill-min-w: 88px; --pill-radius: var(--r-pill);
-  --pill-inset: var(--sp-3) var(--sp-5); --pill-gap: var(--sp-3);
-  --pill-shadow: var(--shadow-2); --pill-weight: var(--weight-medium);
+  --pill-h: 40px; --pill-max-w: 520px; --pill-min-w: 88px; --pill-radius: var(--r-pill);
+  --pill-inset: var(--sp-2) var(--sp-4); --pill-gap: var(--sp-3);
+  --pill-shadow: 0 6px 24px rgba(0, 0, 0, 0.16); --pill-weight: var(--weight-medium);
   --pill-label-size: var(--fs-13); --pill-preview-size: var(--fs-13);
   --pill-preview-lines: 2; --pill-preview-w: 440px; --pill-preview-gap: var(--sp-1);
   --overlay-scale: 1; --overlay-inset: var(--sp-2); --overlay-layer: var(--z-overlay);
@@ -102,7 +103,7 @@
   --boot-inset: var(--sp-8); --pill-border: var(--hairline) solid var(--border);
   --pill-expanded-radius: 24px; --pill-state-gap: var(--sp-3); --pill-compact-w: 200px;
   --pill-transition: width var(--dur-base) var(--ease-out), border-radius var(--dur-base) var(--ease-out);
-  --pill-canvas-inset: 20px; --overlay-canvas-padding: calc(var(--pill-canvas-inset) * var(--overlay-scale)); --pill-error-w: 480px; --pill-preview-height: 40px;
+  --pill-canvas-inset: 12px; --overlay-canvas-padding: calc(var(--pill-canvas-inset) * var(--overlay-scale)); --pill-error-w: 480px; --pill-preview-height: 30px;
   --pill-status-size: var(--fs-16); --pill-label-max-w: 440px;
   /* Enhance overlay: suggestion surface, actions and drag handle. */
   --suggestion-w: 560px; --suggestion-min-w: 320px; --suggestion-gap: var(--sp-2);
