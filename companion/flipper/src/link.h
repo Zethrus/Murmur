@@ -24,6 +24,8 @@ MurmurTransport link_transport(MurmurLink* link);
 
 /** Queue one line for the host. Silently drops when the queue is full. */
 void link_send(MurmurLink* link, const char* line);
+/** Queue a reply on the transport that supplied the most recent line. */
+void link_send_reply(MurmurLink* link, const char* line);
 /** Flush one queued line if a transport is free. Call regularly from the app loop. */
 void link_service(MurmurLink* link);
 /** Pull one complete line, if one has arrived. */

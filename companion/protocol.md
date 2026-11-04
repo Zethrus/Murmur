@@ -1,10 +1,10 @@
-# Murmur companion protocol, version 3
+# Murmur companion protocol, version 4
 
 Line-delimited ASCII. One message per line, terminated by `\n` (a `\r\n` peer is also
 accepted). Maximum 220 bytes per line, including the terminator. No JSON, no binary frames,
 no allocation on the hot path.
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 `PROTOCOL_VERSION` is defined once here and mirrored in exactly two places:
 
@@ -15,7 +15,15 @@ PROTOCOL_VERSION = 3
 
 `node scripts/check-protocol-version.mjs` fails the build when any of the three disagree.
 
-## What version 3 adds
+## What version 4 adds
+
+`D DISCARD` confirms the device's discard prompt independently of the button map.
+`D ACCEPT <index>` identifies the selected RAM history preview (0 is newest). The host
+cannot accept an old dictation from this preview because it has no host dictation ID and
+only 40 characters; it re-sends the current suggestion if one exists, or replies
+`A ACCEPT UNAVAILABLE`. It never accepts a different suggestion by accident.
+
+## What version 3 added
 
 `PTT <0|1>` announces push-to-talk mode, and `B OK PRESS` / `B OK RELEASE` report
 the two edges of the OK key while that mode is enabled. Version 2 added `T`, `G`, `Q`,
@@ -52,7 +60,7 @@ renegotiate:
 HELLO <protocol> <app_version> <role>
 ```
 
-- `protocol` — integer, currently `3`
+- `protocol` — integer, currently `4`
 - `app_version` — the Murmur version, e.g. `0.3.0`
 - `role` — `flipper`, `host`, or (later) `phone`
 
@@ -67,6 +75,8 @@ are ignored, never fatal.
 | `B OK` / `B UP` / `B DOWN` / `B BACK` / `B LEFT` / `B RIGHT` | short press |
 | `B OK PRESS` / `B OK RELEASE` | OK down/up in push-to-talk mode (v3) |
 | `B OK LONG` / `B BACK LONG` | long press (>= 500 ms) |
+| `D DISCARD` | confirmed discard, independent of the button map (v4) |
+| `D ACCEPT <index>` | select a RAM history preview; 0 is newest (v4) |
 | `P` | heartbeat |
 | `P <token>` | echo of a timed probe, verbatim (v2) |
 | `Q <percent>` | battery percentage, every 30 s (v2) |
@@ -81,6 +91,7 @@ are ignored, never fatal.
 | `S READY` | a rewrite suggestion is available |
 | `S ERROR <code>` | last action failed; code is a short token, e.g. `timeout` |
 | `A <verb> <result>` | acknowledgement, e.g. `A DICTATE ON`, `A ACCEPT OK` |
+| `A ACCEPT UNAVAILABLE` | selected history entry cannot be accepted; no current suggestion to show (v4) |
 | `CFG <KEY>=<VERB> ...` | button map pushed from Settings |
 | `PTT <0\|1>` | push-to-talk mode announcement (v3) |
 | `T <text>` | live dictation text (v2) |
@@ -111,8 +122,8 @@ CFG BACK=DISMISS DOWN=ACCEPT OK=DICTATE_TOGGLE OK_LONG=CANCEL UP=ENHANCE
 Verbs: `DICTATE_TOGGLE`, `ENHANCE`, `ACCEPT`, `DISMISS`, `CANCEL`, `NONE`. The host is the
 source of truth; the Flipper caches the last `CFG` line so the map survives a reconnect
 while Murmur is not running. Outside listening, `BACK LONG` exits the app and is never
-sent. During listening, `BACK LONG` opens a discard prompt; confirming sends `B OK LONG`
-for the mapped cancel action.
+sent. During listening, `BACK LONG` opens a discard prompt; confirming sends `D DISCARD`
+to cancel regardless of the mapped OK-long action. A real `B OK LONG` still follows its map.
 
 ## Liveness and latency
 
@@ -127,11 +138,12 @@ closes the transport and retries with backoff (1 s, doubling to 5 s).
 ## Transports
 
 - **USB** — the Flipper app claims `usb_cdc_single`; the host opens the CDC device.
-- **BLE** — the Flipper app runs the BLE serial profile (`8fe5b3d5-…` service, write
-  `…d6`, notify `…d7`); the host connects as a GATT central over `btleplug`. Bonding is the
+- **BLE** — the Flipper app runs the BLE serial profile (`8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000`
+  service, write `19ed82ae-ed21-4c9d-4145-228e62fe0000`, indicate
+  `19ed82ae-ed21-4c9d-4145-228e61fe0000`); the host connects as a GATT central over `btleplug`. Bonding is the
   firmware's: the Flipper shows a PIN, the host enters it once and keeps the key.
-- Both may run at once. A line is always answered on the transport it arrived on, and USB
-  wins when both are talking, which is what makes `transport = "auto"` safe.
+- Both may run at once. A reply is queued for the transport on which its request arrived;
+  unsolicited lines use the active transport.
 
 ## Change policy
 

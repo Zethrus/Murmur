@@ -1,4 +1,4 @@
-//! Murmur companion protocol, version 3.
+//! Murmur companion protocol, version 4.
 //!
 //! Pure encoding and decoding. No I/O on the hot path. Version 2 adds live text (`T`),
 //! the enhancement suggestion (`G`) and device telemetry (`Q`, `L`) — see
@@ -6,7 +6,7 @@
 //! are [`text`] and [`suggestion`], and neither traces.
 
 /// Wire protocol revision. Mirrored in `companion/flipper/src/protocol.h`.
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 /// Longest accepted line, including the newline. Sized so a full ten-key button
 /// map fits on one `CFG` line.
 pub const MAX_LINE: usize = 220;
@@ -98,12 +98,26 @@ pub enum Inbound {
         button: Button,
         long: bool,
     },
-    Ptt { pressed: bool },
-    PttMode { enabled: bool },
+    Ptt {
+        pressed: bool,
+    },
+    PttMode {
+        enabled: bool,
+    },
+    /// Explicit discard confirmation; independent of the remappable button map.
+    Discard,
+    /// Device history selection. The host may only redisplay its current suggestion.
+    AcceptHistory {
+        index: u8,
+    },
     /// Bare heartbeat (`None`) or the echo of a timed probe (`Some(token)`).
-    Ping { token: Option<String> },
+    Ping {
+        token: Option<String>,
+    },
     /// Device battery percentage, sent every 30 s.
-    Battery { percent: u8 },
+    Battery {
+        percent: u8,
+    },
     /// Well-formed but unrecognised: ignored for forward compatibility.
     Unknown,
 }
@@ -149,6 +163,14 @@ pub fn parse(line: &str) -> Inbound {
         Some("PTT") => match (parts.next(), parts.next()) {
             (Some("0"), None) => Inbound::PttMode { enabled: false },
             (Some("1"), None) => Inbound::PttMode { enabled: true },
+            _ => Inbound::Unknown,
+        },
+        Some("D") => match (parts.next(), parts.next(), parts.next()) {
+            (Some("DISCARD"), None, None) => Inbound::Discard,
+            (Some("ACCEPT"), Some(index), None) => match index.parse::<u8>() {
+                Ok(index) if index < 3 => Inbound::AcceptHistory { index },
+                _ => Inbound::Unknown,
+            },
             _ => Inbound::Unknown,
         },
         Some("B") => {
@@ -314,7 +336,13 @@ mod tests {
         assert_eq!(parse(&ptt(false)), Inbound::PttMode { enabled: false });
         assert_eq!(parse("B OK PRESS"), Inbound::Ptt { pressed: true });
         assert_eq!(parse("B OK RELEASE"), Inbound::Ptt { pressed: false });
-        assert_eq!(parse("B OK"), Inbound::Press { button: Button::Ok, long: false });
+        assert_eq!(
+            parse("B OK"),
+            Inbound::Press {
+                button: Button::Ok,
+                long: false
+            }
+        );
         assert_eq!(parse("B OK PRESS EXTRA"), Inbound::Unknown);
     }
 
@@ -383,6 +411,21 @@ mod tests {
             );
             assert!(button.long_key().ends_with("_long"));
         }
+    }
+
+    #[test]
+    fn device_actions_are_distinct_from_button_presses() {
+        assert_eq!(parse("D DISCARD"), Inbound::Discard);
+        assert_eq!(parse("D ACCEPT 0"), Inbound::AcceptHistory { index: 0 });
+        assert_eq!(parse("D ACCEPT 2"), Inbound::AcceptHistory { index: 2 });
+        assert_eq!(parse("D ACCEPT 3"), Inbound::Unknown);
+        assert_eq!(
+            parse("B OK LONG"),
+            Inbound::Press {
+                button: Button::Ok,
+                long: true
+            }
+        );
     }
 
     #[test]

@@ -277,7 +277,7 @@ impl Controller {
             self.prune_at = now + Duration::from_secs(86_400);
         }
         if self.active
-            && self.config.overlay.show_preview
+            && (self.config.overlay.show_preview || self.config.companion.enabled)
             && self.preview.is_none()
             && now >= self.preview_at
         {

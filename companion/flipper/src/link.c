@@ -17,7 +17,14 @@ typedef struct {
     uint8_t buffer[LINK_RING];
     volatile size_t head;
     volatile size_t tail;
+    char line[MURMUR_MAX_LINE];
+    size_t line_length;
 } LinkRing;
+
+typedef struct {
+    char line[MURMUR_MAX_LINE];
+    MurmurTransport via;
+} PendingLine;
 
 struct MurmurLink {
     FuriHalUsbInterface* previous;
@@ -31,12 +38,10 @@ struct MurmurLink {
     LinkRing ble;
     MurmurTransport source;
 
-    char pending[LINK_TX_SLOTS][MURMUR_MAX_LINE];
+    PendingLine pending[LINK_TX_SLOTS];
     uint8_t pending_head;
     uint8_t pending_tail;
 
-    char line[MURMUR_MAX_LINE];
-    size_t line_length;
 };
 
 static void ring_push(LinkRing* ring, const uint8_t* data, size_t size) {
@@ -86,7 +91,8 @@ bool link_open(MurmurLink* link) {
     furi_hal_cdc_set_callbacks(0, &link->callbacks, link);
     link->usb_configured = true;
     link->pending_head = link->pending_tail = 0;
-    link->line_length = 0;
+    link->usb.line_length = 0;
+    link->ble.line_length = 0;
     return true;
 }
 
@@ -132,31 +138,48 @@ bool link_connected(MurmurLink* link) {
     return link->usb_connected || ble_connected();
 }
 
-/** Replies follow the host that is talking; USB wins when both are. */
+/** Unsolicited messages use the active transport; replies retain their source. */
 static MurmurTransport outbound(MurmurLink* link) {
+    if(link->source == MurmurTransportUsb && link->usb_connected) return link->source;
+    if(link->source == MurmurTransportBle && ble_connected()) return link->source;
     if(link->usb_connected) return MurmurTransportUsb;
     if(ble_connected()) return MurmurTransportBle;
     return MurmurTransportNone;
 }
 
-void link_send(MurmurLink* link, const char* line) {
+static void queue_line(MurmurLink* link, const char* line, MurmurTransport via) {
     if(!link || !line) return;
     uint8_t next = (link->pending_head + 1) % LINK_TX_SLOTS;
     if(next == link->pending_tail) {
         return; /* full: the host is not draining, drop the newest line */
     }
-    snprintf(link->pending[link->pending_head], MURMUR_MAX_LINE, "%s\n", line);
+    PendingLine* pending = &link->pending[link->pending_head];
+    snprintf(pending->line, MURMUR_MAX_LINE, "%s\n", line);
+    pending->via = via;
     link->pending_head = next;
+}
+
+void link_send(MurmurLink* link, const char* line) {
+    if(link) queue_line(link, line, outbound(link));
+}
+
+void link_send_reply(MurmurLink* link, const char* line) {
+    if(link) queue_line(link, line, link->source);
 }
 
 void link_service(MurmurLink* link) {
     if(!link) return;
     if(link->pending_tail == link->pending_head) return;
 
-    MurmurTransport via = outbound(link);
-    if(via == MurmurTransportNone) return;
+    MurmurTransport via = link->pending[link->pending_tail].via;
+    if(via == MurmurTransportNone ||
+       (via == MurmurTransportUsb && !link->usb_connected) ||
+       (via == MurmurTransportBle && !ble_connected())) {
+        link->pending_tail = (link->pending_tail + 1) % LINK_TX_SLOTS;
+        return; /* a vanished peer must not block replies to the other transport */
+    }
 
-    const char* line = link->pending[link->pending_tail];
+    const char* line = link->pending[link->pending_tail].line;
     size_t length = strlen(line);
     bool sent;
     if(via == MurmurTransportUsb) {
@@ -175,19 +198,19 @@ static bool drain_ring(MurmurLink* link, LinkRing* ring, MurmurTransport source,
         char byte = (char)ring->buffer[ring->tail];
         ring->tail = (ring->tail + 1) % LINK_RING;
         if(byte == '\n' || byte == '\r') {
-            if(link->line_length == 0) continue;
-            link->line[link->line_length] = '\0';
-            strncpy(out, link->line, cap - 1);
+            if(ring->line_length == 0) continue;
+            ring->line[ring->line_length] = '\0';
+            strncpy(out, ring->line, cap - 1);
             out[cap - 1] = '\0';
-            link->line_length = 0;
+            ring->line_length = 0;
             link->source = source;
             return true;
         }
-        if(link->line_length + 1 >= sizeof(link->line)) {
-            link->line_length = 0; /* unterminated garbage: resynchronise */
+        if(ring->line_length + 1 >= sizeof(ring->line)) {
+            ring->line_length = 0; /* unterminated garbage: resynchronise */
             continue;
         }
-        link->line[link->line_length++] = byte;
+        ring->line[ring->line_length++] = byte;
     }
     return false;
 }

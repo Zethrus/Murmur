@@ -60,13 +60,20 @@ pub struct Companion {
 /// partial transcript is only interesting until the next one arrives.
 enum Outbound {
     Text(String),
+    FinalText(String),
     Suggestion(String),
+}
+
+#[derive(Default)]
+struct OutboundSlot {
+    queued: Option<Outbound>,
+    final_text: Option<String>,
 }
 
 struct Shared {
     app: AppHandle,
     status: Mutex<Status>,
-    outbound: Mutex<Option<Outbound>>,
+    outbound: Mutex<OutboundSlot>,
     /// Bumped when the configuration changes; the supervisor reloads and resends `CFG`.
     revision: AtomicU64,
     started: AtomicBool,
@@ -79,7 +86,7 @@ impl Companion {
             shared: Arc::new(Shared {
                 app,
                 status: Mutex::new(Status::default()),
-                outbound: Mutex::new(None),
+                outbound: Mutex::new(OutboundSlot::default()),
                 revision: AtomicU64::new(1),
                 started: AtomicBool::new(false),
                 stop: AtomicBool::new(false),
@@ -120,7 +127,27 @@ impl Companion {
             return;
         }
         if let Ok(mut slot) = self.shared.outbound.lock() {
-            *slot = Some(Outbound::Text(text.to_string()));
+            slot.queued = Some(Outbound::Text(text.to_string()));
+        }
+    }
+
+    /// The delivered text must survive a suggestion arriving before the next link tick.
+    pub fn publish_final_text(&self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        if let Ok(mut slot) = self.shared.outbound.lock() {
+            slot.final_text = Some(text.to_string());
+            if matches!(slot.queued, Some(Outbound::Text(_))) {
+                slot.queued = None;
+            }
+        }
+    }
+
+    pub fn clear_pending(&self) {
+        if let Ok(mut slot) = self.shared.outbound.lock() {
+            *slot = OutboundSlot::default();
         }
     }
 
@@ -131,7 +158,7 @@ impl Companion {
             return;
         }
         if let Ok(mut slot) = self.shared.outbound.lock() {
-            *slot = Some(Outbound::Suggestion(text.to_string()));
+            slot.queued = Some(Outbound::Suggestion(text.to_string()));
         }
     }
 
@@ -228,6 +255,9 @@ fn supervise(shared: Arc<Shared>) {
         };
         if !config.companion.enabled {
             session = None;
+            if let Ok(mut slot) = shared.outbound.lock() {
+                *slot = OutboundSlot::default();
+            }
             publish(
                 &shared,
                 Status {
@@ -339,7 +369,11 @@ fn supervise(shared: Arc<Shared>) {
             }
         }
         if active.negotiated && active.ptt_for != Some(config.companion.ptt) {
-            if active.link.write_line(&protocol::ptt(config.companion.ptt)).is_ok() {
+            if active
+                .link
+                .write_line(&protocol::ptt(config.companion.ptt))
+                .is_ok()
+            {
                 active.ptt_for = Some(config.companion.ptt);
             }
         }
@@ -357,7 +391,11 @@ fn supervise(shared: Arc<Shared>) {
                                 tracing::info!(%app, protocol, "Companion handshake complete");
                                 let _ = active.link.write_line(&map_line);
                                 active.cfg_for = map_line.clone();
-                                if active.link.write_line(&protocol::ptt(config.companion.ptt)).is_ok() {
+                                if active
+                                    .link
+                                    .write_line(&protocol::ptt(config.companion.ptt))
+                                    .is_ok()
+                                {
                                     active.ptt_for = Some(config.companion.ptt);
                                 }
                                 publish(
@@ -453,17 +491,51 @@ fn supervise(shared: Arc<Shared>) {
                                 continue;
                             }
                             let ack = shared.app.try_state::<AppState>().and_then(|state| {
-                                state.send(if pressed {
-                                    crate::controller::Action::Start
-                                } else {
-                                    crate::controller::Action::Stop
-                                }).ok()
+                                state
+                                    .send(if pressed {
+                                        crate::controller::Action::Start
+                                    } else {
+                                        crate::controller::Action::Stop
+                                    })
+                                    .ok()
                             });
                             if ack.is_some() {
                                 let _ = active.link.write_line(&protocol::ack(
-                                    "dictate_toggle", if pressed { "ON" } else { "OFF" },
+                                    "dictate_toggle",
+                                    if pressed { "ON" } else { "OFF" },
                                 ));
                                 active.phase = String::new();
+                            }
+                        }
+                        protocol::Inbound::Discard => {
+                            if !active.negotiated {
+                                continue;
+                            }
+                            if let Some(state) = shared.app.try_state::<AppState>() {
+                                if state.send(crate::controller::Action::Cancel).is_ok() {
+                                    let _ = active.link.write_line(&protocol::ack("CANCEL", "OK"));
+                                    active.phase = String::new();
+                                }
+                            }
+                        }
+                        protocol::Inbound::AcceptHistory { index: _ } => {
+                            if !active.negotiated {
+                                continue;
+                            }
+                            // Device history contains only 40-character previews and no
+                            // host dictation IDs. Accepting by index could accept a different
+                            // current suggestion, so show that suggestion instead.
+                            let suggestion = shared.app.try_state::<AppState>().and_then(|state| {
+                                state.enhance.snapshot(&state)["enhancement"]["proposed_text"]
+                                    .as_str()
+                                    .map(str::to_owned)
+                            });
+                            if let Some(text) = suggestion {
+                                let _ = active.link.write_line(&protocol::suggestion(&text));
+                            } else {
+                                let _ = active
+                                    .link
+                                    .write_line(&protocol::ack("ACCEPT", "UNAVAILABLE"));
                             }
                         }
                         // A heartbeat is presence, not a request: answering it would make
@@ -478,6 +550,12 @@ fn supervise(shared: Arc<Shared>) {
                                     active.latency_ms =
                                         sent.elapsed().as_millis().min(9_999) as u32;
                                     active.probe_sent = None;
+                                    let rssi = active.link.rssi().unwrap_or(0).clamp(-127, 0) as i8;
+                                    if let Err(error) = active.link.write_line(
+                                        &protocol::link_stats(active.latency_ms as u16, rssi),
+                                    ) {
+                                        tracing::warn!(%error, "Companion link stats write failed");
+                                    }
                                     publish(&shared, session_status(&config, active, true));
                                 }
                             }
@@ -556,26 +634,40 @@ fn supervise(shared: Arc<Shared>) {
         // Live text and suggestions. Text is coalesced and rate-limited so a fast partial
         // cannot flood a BLE link; a suggestion goes out once, immediately.
         if active.negotiated {
-            let next = shared
-                .outbound
-                .lock()
-                .ok()
-                .and_then(|mut slot| slot.take());
+            let next = shared.outbound.lock().ok().and_then(|mut slot| {
+                slot.final_text
+                    .take()
+                    .map(Outbound::FinalText)
+                    .or_else(|| slot.queued.take())
+            });
             if let Some(outbound) = next {
-                let (line, is_text) = match &outbound {
+                let (line, is_partial) = match &outbound {
                     Outbound::Text(body) => (protocol::text(body), true),
+                    Outbound::FinalText(body) => (protocol::text(body), false),
                     Outbound::Suggestion(body) => (protocol::suggestion(body), false),
                 };
-                if is_text && !text_due(active.last_text, Instant::now()) {
+                if is_partial && !text_due(active.last_text, Instant::now()) {
                     // Too soon: keep the newest text and try again on the next tick.
                     if let Ok(mut slot) = shared.outbound.lock() {
-                        if slot.is_none() {
-                            *slot = Some(outbound);
+                        if slot.queued.is_none() {
+                            slot.queued = Some(outbound);
                         }
                     }
                 } else {
-                    if active.link.write_line(&line).is_ok() && is_text {
-                        active.last_text = Instant::now();
+                    match active.link.write_line(&line) {
+                        Ok(()) if !matches!(outbound, Outbound::Suggestion(_)) => {
+                            active.last_text = Instant::now();
+                        }
+                        Err(_) if matches!(outbound, Outbound::FinalText(_)) => {
+                            if let Ok(mut slot) = shared.outbound.lock() {
+                                if slot.final_text.is_none() {
+                                    if let Outbound::FinalText(body) = outbound {
+                                        slot.final_text = Some(body);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

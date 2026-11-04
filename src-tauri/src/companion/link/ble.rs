@@ -20,24 +20,74 @@ use btleplug::api::{
 };
 use btleplug::platform::Manager;
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 use super::Link;
 
 /// Flipper's serial service. Matched by string so this module does not depend on `uuid`.
-const SERIAL_SERVICE: &str = "8fe5b3d5-2e7f-4a98-2a48-7acc60fe0505";
+const SERIAL_SERVICE: &str = "8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000";
 /// Write characteristic: central → Flipper.
-const SERIAL_RX: &str = "8fe5b3d6-2e7f-4a98-2a48-7acc60fe0505";
-/// Notify characteristic: Flipper → central.
-const SERIAL_TX: &str = "8fe5b3d7-2e7f-4a98-2a48-7acc60fe0505";
+const SERIAL_RX: &str = "19ed82ae-ed21-4c9d-4145-228e62fe0000";
+/// Indicate characteristic: Flipper → central.
+const SERIAL_TX: &str = "19ed82ae-ed21-4c9d-4145-228e61fe0000";
+const FLOW_CONTROL: &str = "19ed82ae-ed21-4c9d-4145-228e63fe0000";
+const RPC_STATUS: &str = "19ed82ae-ed21-4c9d-4145-228e64fe0000";
 
 /// A single BLE write is limited by the negotiated MTU; 20 bytes is always safe and the
 /// line protocol reassembles on the far side.
 const CHUNK: usize = 20;
 const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
+const OUTBOUND_CAPACITY: usize = 16;
+
+struct OutboundQueue {
+    frames: Mutex<VecDeque<Vec<u8>>>,
+    ready: Notify,
+}
+
+impl OutboundQueue {
+    fn push(&self, line: &str) -> std::io::Result<()> {
+        let is_text = line.starts_with("T ") || line == "T";
+        let mut frames = self
+            .frames
+            .lock()
+            .map_err(|_| std::io::Error::other("BLE queue poisoned"))?;
+        if frames.len() == OUTBOUND_CAPACITY {
+            if let Some(oldest_text) = frames
+                .iter()
+                .position(|frame| frame.starts_with(b"T ") || frame == b"T\n")
+            {
+                frames.remove(oldest_text);
+            } else if is_text {
+                return Ok(()); // All queued frames are controls; the next T replaces this one.
+            } else {
+                tracing::warn!("Companion BLE outbound queue full; control frame was not queued");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "BLE outbound queue full",
+                ));
+            }
+        }
+        let mut frame = line.as_bytes().to_vec();
+        frame.push(b'\n');
+        frames.push_back(frame);
+        drop(frames);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    async fn pop(&self) -> Vec<u8> {
+        loop {
+            let notified = self.ready.notified();
+            if let Some(frame) = self.frames.lock().expect("BLE queue poisoned").pop_front() {
+                return frame;
+            }
+            notified.await;
+        }
+    }
+}
 
 pub struct BleLink {
-    outbound: mpsc::UnboundedSender<Vec<u8>>,
+    outbound: Arc<OutboundQueue>,
     inbound: Arc<Mutex<VecDeque<String>>>,
     connected: Arc<AtomicBool>,
     rssi: Arc<AtomicI32>,
@@ -64,7 +114,11 @@ impl BleLink {
         let tx_uuid = found.tx;
         let rx_uuid = found.rx;
 
-        let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let outbound = Arc::new(OutboundQueue {
+            frames: Mutex::new(VecDeque::with_capacity(OUTBOUND_CAPACITY)),
+            ready: Notify::new(),
+        });
+        let task_outbound = outbound.clone();
         let inbound = Arc::new(Mutex::new(VecDeque::<String>::new()));
         let connected = Arc::new(AtomicBool::new(true));
         let rssi = Arc::new(AtomicI32::new(found.rssi));
@@ -110,11 +164,15 @@ impl BleLink {
                             }
                         }
                     }
-                    outgoing = outbound_rx.recv() => {
-                        let Some(bytes) = outgoing else { break };
+                    bytes = task_outbound.pop() => {
                         for chunk in bytes.chunks(CHUNK) {
+                            let write_type = if rx_uuid.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE) {
+                                WriteType::WithoutResponse
+                            } else {
+                                WriteType::WithResponse
+                            };
                             if peripheral
-                                .write(&rx_uuid, chunk, WriteType::WithoutResponse)
+                                .write(&rx_uuid, chunk, write_type)
                                 .await
                                 .is_err()
                             {
@@ -166,12 +224,13 @@ struct Found {
 }
 
 async fn discover(preferred: &str) -> Result<Found> {
-    let manager = Manager::new().await.context("asking the OS for a BLE adapter")?;
+    let manager = Manager::new()
+        .await
+        .context("asking the OS for a BLE adapter")?;
     let adapters = manager.adapters().await.context("listing BLE adapters")?;
-    let adapter = adapters
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("No Bluetooth adapter found. Plug in a dongle or enable Bluetooth."))?;
+    let adapter = adapters.into_iter().next().ok_or_else(|| {
+        anyhow!("No Bluetooth adapter found. Plug in a dongle or enable Bluetooth.")
+    })?;
 
     adapter
         .start_scan(ScanFilter::default())
@@ -192,7 +251,12 @@ async fn discover(preferred: &str) -> Result<Found> {
                 && (address.eq_ignore_ascii_case(preferred)
                     || name.to_lowercase().contains(&preferred.to_lowercase()));
             if matches_preferred || (preferred.is_empty() && matches_name) {
-                chosen = Some((peripheral, name, address, properties.rssi.unwrap_or(0) as i32));
+                chosen = Some((
+                    peripheral,
+                    name,
+                    address,
+                    properties.rssi.unwrap_or(0) as i32,
+                ));
                 break;
             }
         }
@@ -222,45 +286,80 @@ async fn discover(preferred: &str) -> Result<Found> {
         .context("reading the device's GATT services")?;
 
     let characteristics = peripheral.characteristics();
-    let in_serial = |c: &Characteristic| c.service_uuid.to_string().eq_ignore_ascii_case(SERIAL_SERVICE);
-    let writable = |c: &Characteristic| {
-        c.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
-            || c.properties.contains(CharPropFlags::WRITE)
-    };
-    let notifying = |c: &Characteristic| c.properties.contains(CharPropFlags::NOTIFY);
-
-    // Prefer the serial service by UUID, then fall back to the first service of the right
-    // shape so a firmware that renumbers its GATT still works.
-    let mut rx = characteristics
-        .iter()
-        .find(|c| in_serial(c) && writable(c))
-        .cloned();
-    let mut tx = characteristics
-        .iter()
-        .find(|c| in_serial(c) && notifying(c))
-        .cloned();
-    if rx.is_none() {
-        rx = characteristics.iter().find(|c| writable(c)).cloned();
-    }
-    if tx.is_none() {
-        tx = characteristics.iter().find(|c| notifying(c)).cloned();
-    }
-
-    let rx = rx.ok_or_else(|| anyhow!("The Flipper has no writable serial characteristic"))?;
-    let tx = tx.ok_or_else(|| anyhow!("The Flipper has no notifying serial characteristic"))?;
+    let (rx, tx) = select_serial_characteristics(&characteristics)?;
     peripheral
         .subscribe(&tx)
         .await
-        .context("subscribing to the Flipper's serial notifications")?;
+        .context("subscribing to the Flipper's serial indications")?;
 
     Ok(Found {
         peripheral,
-        name: if name.is_empty() { "Flipper".into() } else { name },
+        name: if name.is_empty() {
+            "Flipper".into()
+        } else {
+            name
+        },
         address,
         rssi,
         rx,
         tx,
     })
+}
+
+fn select_serial_characteristics(
+    characteristics: &std::collections::BTreeSet<Characteristic>,
+) -> Result<(Characteristic, Characteristic)> {
+    let in_serial = |c: &Characteristic| {
+        c.service_uuid
+            .to_string()
+            .eq_ignore_ascii_case(SERIAL_SERVICE)
+    };
+    let data_characteristic = |c: &Characteristic| {
+        in_serial(c)
+            && ![FLOW_CONTROL, RPC_STATUS]
+                .iter()
+                .any(|uuid| c.uuid.to_string().eq_ignore_ascii_case(uuid))
+    };
+    let writable = |c: &Characteristic| {
+        c.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
+            || c.properties.contains(CharPropFlags::WRITE)
+    };
+    let notifying = |c: &Characteristic| {
+        c.properties
+            .intersects(CharPropFlags::INDICATE | CharPropFlags::NOTIFY)
+    };
+
+    // A fallback is confined to the serial service and excludes qFlipper's control
+    // characteristics; a different service must never be used for protocol data.
+    let rx = characteristics
+        .iter()
+        .find(|c| {
+            data_characteristic(c)
+                && c.uuid.to_string().eq_ignore_ascii_case(SERIAL_RX)
+                && writable(c)
+        })
+        .or_else(|| {
+            characteristics
+                .iter()
+                .find(|c| data_characteristic(c) && writable(c))
+        })
+        .cloned();
+    let tx = characteristics
+        .iter()
+        .find(|c| {
+            data_characteristic(c)
+                && c.uuid.to_string().eq_ignore_ascii_case(SERIAL_TX)
+                && notifying(c)
+        })
+        .or_else(|| {
+            characteristics
+                .iter()
+                .find(|c| data_characteristic(c) && notifying(c))
+        })
+        .cloned();
+    let rx = rx.ok_or_else(|| anyhow!("The Flipper has no writable serial characteristic"))?;
+    let tx = tx.ok_or_else(|| anyhow!("The Flipper has no indicating serial characteristic"))?;
+    Ok((rx, tx))
 }
 
 impl Link for BleLink {
@@ -271,11 +370,7 @@ impl Link for BleLink {
                 "Bluetooth link is down",
             ));
         }
-        let mut bytes = line.as_bytes().to_vec();
-        bytes.push(b'\n');
-        self.outbound
-            .send(bytes)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "BLE writer stopped"))
+        self.outbound.push(line)
     }
 
     fn poll_line(&mut self) -> std::io::Result<Option<String>> {
@@ -304,5 +399,51 @@ impl Drop for BleLink {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn characteristic(uuid: &str, service: &str, properties: CharPropFlags) -> Characteristic {
+        Characteristic {
+            uuid: uuid.parse().unwrap(),
+            service_uuid: service.parse().unwrap(),
+            properties,
+            descriptors: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn flipper_serial_data_ignores_flow_control_and_rpc_status() {
+        let characteristics = [
+            characteristic(
+                FLOW_CONTROL,
+                SERIAL_SERVICE,
+                CharPropFlags::WRITE | CharPropFlags::NOTIFY,
+            ),
+            characteristic(RPC_STATUS, SERIAL_SERVICE, CharPropFlags::INDICATE),
+            characteristic(
+                SERIAL_RX,
+                SERIAL_SERVICE,
+                CharPropFlags::WRITE_WITHOUT_RESPONSE,
+            ),
+            characteristic(SERIAL_TX, SERIAL_SERVICE, CharPropFlags::INDICATE),
+            characteristic(
+                SERIAL_RX,
+                "0000180a-0000-1000-8000-00805f9b34fb",
+                CharPropFlags::WRITE,
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let (rx, tx) = select_serial_characteristics(&characteristics).unwrap();
+        assert_eq!(rx.uuid.to_string(), SERIAL_RX);
+        assert_eq!(tx.uuid.to_string(), SERIAL_TX);
+        assert_eq!(rx.service_uuid.to_string(), SERIAL_SERVICE);
+        assert_eq!(tx.service_uuid.to_string(), SERIAL_SERVICE);
     }
 }

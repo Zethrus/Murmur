@@ -61,6 +61,7 @@ typedef struct {
     int8_t history_view;
     bool history_finalizing;
     bool history_has_current;
+    bool discarded_turn;
 
     uint16_t latency_ms;
     int8_t rssi;
@@ -292,21 +293,26 @@ static void handle_message(MurmurApp* app, const char* line) {
     app->last_rx = furi_get_tick();
 
     switch(message.type) {
-    case MurmurMessageHello:
+    case MurmurMessageHello: {
         app->peer_protocol = message.protocol;
         strncpy(app->peer_app, message.app, sizeof(app->peer_app) - 1);
         app->negotiated = (message.protocol == MURMUR_PROTOCOL_VERSION);
+        /* Reply on the incoming link even when another transport is connected. */
+        char hello[MURMUR_MAX_LINE];
+        murmur_hello(hello, sizeof(hello), MURMUR_COMPANION_VERSION);
+        link_send_reply(app->link, hello);
         if(!app->negotiated) {
             snprintf(app->notice, sizeof(app->notice), "Update the app");
         }
         break;
+    }
     case MurmurMessageConfig:
         app->map = message.map;
         config_save(&app->map);
         break;
     case MurmurMessageState:
         if(message.phase != MurmurPhaseListen) app->discard_prompt = false;
-        if(app->phase == MurmurPhaseListen && message.phase != MurmurPhaseListen) {
+        if(app->phase == MurmurPhaseListen && message.phase != MurmurPhaseListen && !app->discarded_turn) {
             app->history_finalizing = true;
             app->history_has_current = app->live[0] != '\0';
             remember_text(app, false);
@@ -319,6 +325,7 @@ static void handle_message(MurmurApp* app, const char* line) {
         if(message.phase == MurmurPhaseIdle || message.phase == MurmurPhaseListen || message.phase == MurmurPhaseReady) {
             app->live[0] = '\0';
             if(message.phase == MurmurPhaseListen) {
+                app->discarded_turn = false;
                 app->history_finalizing = false;
                 app->history_has_current = false;
                 app->suggestion[0] = '\0';
@@ -333,6 +340,7 @@ static void handle_message(MurmurApp* app, const char* line) {
         strncpy(app->last_action, message.app, sizeof(app->last_action) - 1);
         break;
     case MurmurMessageText:
+        if(app->discarded_turn) break;
         strncpy(app->live, message.text, sizeof(app->live) - 1);
         app->live[sizeof(app->live) - 1] = '\0';
         if(app->history_finalizing && app->live[0]) {
@@ -345,6 +353,7 @@ static void handle_message(MurmurApp* app, const char* line) {
         strncpy(app->suggestion, message.text, sizeof(app->suggestion) - 1);
         app->suggestion[sizeof(app->suggestion) - 1] = '\0';
         app->suggestion_scroll = 0;
+        app->history_view = -1;
         break;
     case MurmurMessageLink:
         app->latency_ms = message.latency_ms;
@@ -356,7 +365,7 @@ static void handle_message(MurmurApp* app, const char* line) {
         if(message.text[0]) {
             char echo[MURMUR_MAX_LINE];
             snprintf(echo, sizeof(echo), "P %s", message.text);
-            link_send(app->link, echo);
+            link_send_reply(app->link, echo);
         }
         break;
     case MurmurMessageNone:
@@ -442,9 +451,13 @@ int32_t murmur_companion_app(void* p) {
             MurmurButton button;
             if(app->discard_prompt) {
                 if(event.key == InputKeyOk && event.type == InputTypeShort) {
-                    send_line(app, "B OK LONG");
+                    send_line(app, "D DISCARD");
                     app->discard_prompt = false;
                     app->suppress_ok_release = true;
+                    app->discarded_turn = true;
+                    app->history_finalizing = false;
+                    app->history_has_current = false;
+                    app->live[0] = '\0';
                 } else if(event.key == InputKeyBack && event.type == InputTypeShort) {
                     app->discard_prompt = false;
                 }
@@ -474,8 +487,9 @@ int32_t murmur_companion_app(void* p) {
                             (button == MurmurButtonRight ? 1 : app->history_count - 1)) % app->history_count;
                     } else if(app->phase == MurmurPhaseIdle && app->history_view >= 0 &&
                               button == MurmurButtonDown && !long_press) {
-                        send_line(app, "B DOWN");
-                        app->history_view = -1;
+                        char request[24];
+                        snprintf(request, sizeof(request), "D ACCEPT %u", (unsigned)app->history_view);
+                        send_line(app, request);
                     } else if(!handle_suggestion_key(app, button, long_press)) {
                         handle_press(app, button, long_press);
                     }
