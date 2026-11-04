@@ -442,6 +442,8 @@ mod tests {
     #[test]
     fn empty_text_still_produces_a_valid_frame() {
         assert_eq!(text("   "), "T");
+        assert_eq!(frame(&text("")), b"T\n");
+        assert!(frame(&text("")).len() <= MAX_LINE);
         assert_eq!(suggestion(""), "G");
     }
 

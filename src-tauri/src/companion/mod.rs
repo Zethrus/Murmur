@@ -68,6 +68,23 @@ enum Outbound {
 struct OutboundSlot {
     queued: Option<Outbound>,
     final_text: Option<String>,
+    final_published: bool,
+}
+
+impl OutboundSlot {
+    fn queue_partial(&mut self, text: &str) {
+        if !self.final_published {
+            self.queued = Some(Outbound::Text(text.to_string()));
+        }
+    }
+
+    fn queue_final(&mut self, text: &str) {
+        self.final_published = true;
+        self.final_text = Some(text.to_string());
+        if matches!(self.queued, Some(Outbound::Text(_))) {
+            self.queued = None;
+        }
+    }
 }
 
 struct Shared {
@@ -127,21 +144,16 @@ impl Companion {
             return;
         }
         if let Ok(mut slot) = self.shared.outbound.lock() {
-            slot.queued = Some(Outbound::Text(text.to_string()));
+            slot.queue_partial(text);
         }
     }
 
     /// The delivered text must survive a suggestion arriving before the next link tick.
+    /// An empty final clears the device's provisional preview.
     pub fn publish_final_text(&self, text: &str) {
         let text = text.trim();
-        if text.is_empty() {
-            return;
-        }
         if let Ok(mut slot) = self.shared.outbound.lock() {
-            slot.final_text = Some(text.to_string());
-            if matches!(slot.queued, Some(Outbound::Text(_))) {
-                slot.queued = None;
-            }
+            slot.queue_final(text);
         }
     }
 
@@ -730,6 +742,31 @@ mod tests {
         let start = Instant::now();
         assert!(!text_due(start, start + Duration::from_millis(249)));
         assert!(text_due(start, start + TEXT_INTERVAL));
+    }
+
+    #[test]
+    fn late_preview_cannot_replace_final_text() {
+        let mut slot = OutboundSlot::default();
+        slot.queue_partial("preview");
+        slot.queue_final("finished");
+        slot.queue_partial("late preview");
+        assert!(slot.queued.is_none());
+        assert!(matches!(slot.final_text.as_deref(), Some("finished")));
+        let mut next_turn = OutboundSlot::default();
+        next_turn.queue_partial("new preview");
+        assert!(matches!(next_turn.queued, Some(Outbound::Text(_))));
+    }
+
+    #[test]
+    fn empty_final_replaces_pending_preview_with_clear_frame() {
+        let mut slot = OutboundSlot::default();
+        slot.queue_partial("preview");
+        slot.queue_final("");
+        assert!(slot.queued.is_none());
+        assert_eq!(
+            slot.final_text.as_deref().map(protocol::text),
+            Some("T".into())
+        );
     }
 
     #[test]

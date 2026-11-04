@@ -45,6 +45,24 @@ def test_status_does_not_load(models: Models) -> None:
     assert status["device"] == "unloaded" and not status["model_available"]
 
 
+def test_warm_loads_without_transcribing_and_status_stays_non_loading(
+    models: Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(models, "installed", lambda name: True)
+    session = Mock()
+    constructor = Mock(return_value=session)
+    monkeypatch.setattr("faster_whisper.WhisperModel", constructor)
+    rpc, out = server(models)
+    rpc.handle('{"id":1,"method":"status","params":{"device":"cpu"}}')
+    assert constructor.call_count == 0
+    rpc.handle('{"id":2,"method":"warm","params":{"device":"cpu"}}')
+    messages = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert messages[0]["result"]["loaded"] is False
+    assert messages[1]["result"]["loaded"] is True
+    constructor.assert_called_once()
+    session.transcribe.assert_not_called()
+
+
 @pytest.mark.parametrize("method", ["transcribe", "partial"])
 def test_transcription_dispatch(models: Models, method: str) -> None:
     rpc, out = server(models)

@@ -166,9 +166,9 @@ bool murmur_parse(const char* line, MurmurMessage* out) {
         strncpy(out->app, line + 2, sizeof(out->app) - 1);
         return true;
     }
-    if(strncmp(line, "T ", 2) == 0) {
+    if(strcmp(line, "T") == 0 || strncmp(line, "T ", 2) == 0) {
         out->type = MurmurMessageText;
-        strncpy(out->text, line + 2, sizeof(out->text) - 1);
+        if(line[1] == ' ') strncpy(out->text, line + 2, sizeof(out->text) - 1);
         return true;
     }
     if(strncmp(line, "G ", 2) == 0) {

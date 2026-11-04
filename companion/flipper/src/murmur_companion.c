@@ -22,6 +22,7 @@
 
 #define LIVE_MAX (MURMUR_TEXT_MAX * 2)
 #define TEXT_LINES 6
+#define LIVE_LINES 4
 #define TEXT_COLS 21
 #define HISTORY_SLOTS 3
 #define HISTORY_CHARS 40
@@ -102,40 +103,39 @@ static void input_callback(InputEvent* event, void* context) {
 /** Word wrap into at most `max_lines` rows of `cols` characters. Returns the row count. */
 static size_t wrap_lines(const char* text, char rows[TEXT_LINES][TEXT_COLS + 1], size_t max_lines,
                          bool keep_tail) {
-    size_t count = 0;
     size_t length = strlen(text);
-    size_t cursor = 0;
-
-    while(cursor < length && count < max_lines) {
-        size_t remaining = length - cursor;
-        size_t take = remaining < TEXT_COLS ? remaining : TEXT_COLS;
-        if(take < remaining) {
-            /* Prefer a break at the last space inside the window. */
-            size_t space = take;
-            while(space > 0 && text[cursor + space] != ' ') space--;
-            if(space > 0) take = space;
+    size_t start = 0;
+    for(;;) {
+        size_t count = 0;
+        size_t cursor = start;
+        while(cursor < length && count < max_lines) {
+            size_t remaining = length - cursor;
+            size_t take = remaining < TEXT_COLS ? remaining : TEXT_COLS;
+            if(take < remaining) {
+                /* Prefer a break at the last space inside the window. */
+                size_t space = take;
+                while(space > 0 && text[cursor + space] != ' ') space--;
+                if(space > 0) take = space;
+            }
+            memcpy(rows[count], text + cursor, take);
+            rows[count][take] = '\0';
+            count++;
+            cursor += take;
+            while(cursor < length && text[cursor] == ' ') cursor++;
         }
-        memcpy(rows[count], text + cursor, take);
-        rows[count][take] = '\0';
-        count++;
-        cursor += take;
-        while(cursor < length && text[cursor] == ' ') cursor++;
+        if(!keep_tail || cursor == length) return count;
+        /* Skip the oldest word until the newest text fits in the visible rows. */
+        size_t next = start;
+        while(next < length && text[next] != ' ') next++;
+        start = next < length ? next + 1 : start + 1;
+        while(start < length && text[start] == ' ') start++;
     }
-
-    if(keep_tail && cursor < length && count) {
-        /* Keep the newest words visible: re-wrap the tail instead of the head. */
-        size_t start = length > (size_t)(TEXT_COLS * max_lines) ?
-                           length - (size_t)(TEXT_COLS * max_lines) :
-                           0;
-        while(start < length && text[start] != ' ') start++;
-        if(start < length) return wrap_lines(text + start, rows, max_lines, false);
-    }
-    return count;
 }
 
-static void draw_text_block(Canvas* canvas, const char* text, int16_t top, bool keep_tail) {
+static void draw_text_block(Canvas* canvas, const char* text, int16_t top, size_t max_lines,
+                            bool keep_tail) {
     char rows[TEXT_LINES][TEXT_COLS + 1];
-    size_t count = wrap_lines(text, rows, TEXT_LINES, keep_tail);
+    size_t count = wrap_lines(text, rows, max_lines, keep_tail);
     for(size_t i = 0; i < count; i++) {
         if(rows[i][0] == '\0') continue;
         canvas_draw_str(canvas, 2, (int16_t)(top + 7 + (int16_t)i * 8), rows[i]);
@@ -172,7 +172,7 @@ static void draw_callback(Canvas* canvas, void* context) {
 
     if(app->phase == MurmurPhaseIdle && app->history_view >= 0) {
         uint8_t slot = (app->history_next + HISTORY_SLOTS - 1 - (uint8_t)app->history_view) % HISTORY_SLOTS;
-        draw_text_block(canvas, app->history[slot], 12, false);
+        draw_text_block(canvas, app->history[slot], 12, LIVE_LINES, false);
         canvas_draw_line(canvas, 0, 52, 127, 52);
         char index[8];
         snprintf(index, sizeof(index), "%u/%u", (unsigned)app->history_view + 1, (unsigned)app->history_count);
@@ -197,7 +197,7 @@ static void draw_callback(Canvas* canvas, void* context) {
     }
 
     if(app->live[0]) {
-        draw_text_block(canvas, app->live, 12, true);
+        draw_text_block(canvas, app->live, 12, LIVE_LINES, true);
     } else {
         canvas_draw_str_aligned(canvas, 64, 30, AlignCenter, AlignCenter,
                                 murmur_phase_text(app->phase));
@@ -246,6 +246,25 @@ static void remember_text(MurmurApp* app, bool replace) {
         if(app->history_count < HISTORY_SLOTS) app->history_count++;
     }
     app->history_view = -1;
+}
+
+static void clear_provisional_history(MurmurApp* app) {
+    if(!app->history_has_current || !app->history_count) return;
+    app->history_next = (app->history_next + HISTORY_SLOTS - 1) % HISTORY_SLOTS;
+    app->history[app->history_next][0] = '\0';
+    app->history_count--;
+    app->history_view = -1;
+}
+
+static void clear_live_turn(MurmurApp* app) {
+    app->live[0] = '\0';
+    app->history_finalizing = false;
+    app->history_has_current = false;
+}
+
+/* Pure phase rule. */
+static bool clear_live_on_phase_change(MurmurPhase previous, MurmurPhase next) {
+    return previous != MurmurPhaseListen && next == MurmurPhaseListen;
 }
 
 static void handle_press(MurmurApp* app, MurmurButton button, bool long_press) {
@@ -310,9 +329,11 @@ static void handle_message(MurmurApp* app, const char* line) {
         app->map = message.map;
         config_save(&app->map);
         break;
-    case MurmurMessageState:
+    case MurmurMessageState: {
         if(message.phase != MurmurPhaseListen) app->discard_prompt = false;
-        if(app->phase == MurmurPhaseListen && message.phase != MurmurPhaseListen && !app->discarded_turn) {
+        if(app->phase == MurmurPhaseListen &&
+           (message.phase == MurmurPhaseThink || message.phase == MurmurPhaseReady) &&
+           !app->discarded_turn) {
             app->history_finalizing = true;
             app->history_has_current = app->live[0] != '\0';
             remember_text(app, false);
@@ -321,18 +342,21 @@ static void handle_message(MurmurApp* app, const char* line) {
             notification_message(app->notifications,
                                  message.phase == MurmurPhaseReady ? &sequence_ready_vibro : &sequence_single_vibro);
         }
+        bool new_turn = clear_live_on_phase_change(app->phase, message.phase);
+        bool aborted_turn = app->phase == MurmurPhaseListen && message.phase == MurmurPhaseIdle;
         app->phase = message.phase;
-        if(message.phase == MurmurPhaseIdle || message.phase == MurmurPhaseListen || message.phase == MurmurPhaseReady) {
-            app->live[0] = '\0';
-            if(message.phase == MurmurPhaseListen) {
-                app->discarded_turn = false;
-                app->history_finalizing = false;
-                app->history_has_current = false;
-                app->suggestion[0] = '\0';
-                app->history_view = -1;
-            }
+        if(new_turn) {
+            clear_live_turn(app);
+            app->discarded_turn = false;
+            app->suggestion[0] = '\0';
+            app->history_view = -1;
+        }
+        if(aborted_turn || message.phase == MurmurPhaseError) {
+            clear_live_turn(app);
+            if(message.phase == MurmurPhaseError) app->suggestion[0] = '\0';
         }
         break;
+    }
     case MurmurMessagePtt:
         app->ptt = message.ptt;
         break;
@@ -344,16 +368,21 @@ static void handle_message(MurmurApp* app, const char* line) {
         }
         break;
     case MurmurMessageText:
-        if(app->discarded_turn) break;
+        if(app->discarded_turn || app->phase == MurmurPhaseError || app->phase == MurmurPhaseOffline) break;
+        if(!message.text[0]) {
+            clear_provisional_history(app);
+            clear_live_turn(app);
+            break;
+        }
         strncpy(app->live, message.text, sizeof(app->live) - 1);
         app->live[sizeof(app->live) - 1] = '\0';
         if(app->history_finalizing && app->live[0]) {
             remember_text(app, app->history_has_current);
             app->history_has_current = true;
-            if(app->phase == MurmurPhaseIdle || app->phase == MurmurPhaseReady) app->live[0] = '\0';
         }
         break;
     case MurmurMessageSuggestion:
+        if(app->phase == MurmurPhaseError || app->phase == MurmurPhaseOffline) break;
         strncpy(app->suggestion, message.text, sizeof(app->suggestion) - 1);
         app->suggestion[sizeof(app->suggestion) - 1] = '\0';
         app->suggestion_scroll = 0;
@@ -391,6 +420,8 @@ static void service_timers(MurmurApp* app) {
     if(!app->connected) {
         app->phase = MurmurPhaseOffline;
         app->discard_prompt = false;
+        clear_live_turn(app);
+        app->suggestion[0] = '\0';
         return;
     }
     if(!app->negotiated && now - app->last_hello >= HELLO_RETRY_MS) {
@@ -413,6 +444,8 @@ static void service_timers(MurmurApp* app) {
     if(app->last_rx != 0 && now - app->last_rx > LINK_TIMEOUT_MS) {
         app->negotiated = false;
         app->phase = MurmurPhaseOffline;
+        clear_live_turn(app);
+        app->suggestion[0] = '\0';
         snprintf(app->notice, sizeof(app->notice), "Link timed out");
     }
 }

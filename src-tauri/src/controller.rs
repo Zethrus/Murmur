@@ -45,6 +45,42 @@ pub fn params(pcm: &[f32], config: &Config) -> Value {
         "initial_prompt":config.engine.dictionary.join(", "),"model":config.engine.model,
         "device":config.engine.device,"compute_type":config.engine.compute_type})
 }
+
+fn preview_due(active: bool, in_flight: bool, since_result: Duration, had_result: bool) -> bool {
+    let interval = if had_result {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_millis(800)
+    };
+    active && !in_flight && since_result >= interval
+}
+
+fn preview_valid(epoch: u64, current: u64, active: bool, stopped: Option<u64>) -> bool {
+    (active && epoch == current) || stopped == Some(epoch)
+}
+
+fn warm_engine(app: &AppHandle, config: &Config) {
+    let app = app.clone();
+    let config_engine = config.engine.clone();
+    let parameters = json!({"model":config.engine.model,"device":config.engine.device,
+        "compute_type":config.engine.compute_type});
+    if let Err(error) = thread::Builder::new()
+        .name("murmur-engine-warm".into())
+        .spawn(move || {
+            let state = app.state::<AppState>();
+            match state.engine.request("warm", parameters) {
+                Ok(result) => {
+                    if let Err(error) = state.cache_warm_status(&config_engine, &result) {
+                        tracing::warn!(%error, "Cache warmed speech model status");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "Warm speech model"),
+            }
+        })
+    {
+        tracing::warn!(%error, "Start speech model warmup");
+    }
+}
 struct Controller {
     audio: Option<AudioCapture>,
     injector: inject::Injector,
@@ -54,8 +90,10 @@ struct Controller {
     started: Instant,
     reset_at: Option<Instant>,
     hide_at: Option<Instant>,
-    preview_at: Instant,
+    preview_result_at: Instant,
+    preview_had_result: bool,
     preview: Option<JoinHandle<()>>,
+    stopped_preview_epoch: Option<u64>,
     prune_at: Instant,
     config: Config,
 }
@@ -70,8 +108,10 @@ impl Controller {
             started: Instant::now(),
             reset_at: None,
             hide_at: Some(Instant::now() + Duration::from_millis(1500)),
-            preview_at: Instant::now(),
+            preview_result_at: Instant::now(),
+            preview_had_result: false,
             preview: None,
+            stopped_preview_epoch: None,
             prune_at: Instant::now(),
             config,
         }
@@ -114,7 +154,9 @@ impl Controller {
         self.active = true;
         self.epoch += 1;
         self.started = Instant::now();
-        self.preview_at = Instant::now() + Duration::from_secs(2);
+        self.preview_result_at = self.started;
+        self.preview_had_result = false;
+        self.stopped_preview_epoch = None;
         self.reset_at = None;
         self.hide_at = None;
         state.enhance.begin_dictation(state);
@@ -126,6 +168,7 @@ impl Controller {
     fn idle(&mut self, state: &AppState) -> Result<()> {
         self.active = false;
         self.epoch += 1;
+        self.stopped_preview_epoch = None;
         self.reset_at = None;
         self.hide_at = Some(Instant::now() + Duration::from_millis(1500));
         hotkey::escape(&state.app, false)?;
@@ -138,6 +181,8 @@ impl Controller {
                 audio.cancel();
             }
             self.idle(state)?;
+        } else {
+            self.stopped_preview_epoch = None;
         }
         Ok(())
     }
@@ -145,8 +190,6 @@ impl Controller {
         if !self.active {
             return Ok(());
         }
-        self.active = false;
-        self.epoch += 1;
         hotkey::escape(&state.app, false)?;
         let duration = self.started.elapsed().as_millis() as u64;
         let pcm = self
@@ -219,8 +262,14 @@ impl Controller {
                 })?;
             }
         }
+        if text.is_empty() {
+            state.companion.publish_final_text("");
+        }
         state.refresh_engine()?;
         state.transition("done")?;
+        self.active = false;
+        self.stopped_preview_epoch = self.preview.as_ref().map(|_| self.epoch);
+        self.epoch += 1;
         self.reset_at = Some(Instant::now() + Duration::from_millis(900));
         // The original is delivered first; Enhance only ever runs afterwards.
         if let Some(path) = delivered {
@@ -236,6 +285,7 @@ impl Controller {
         }
         self.active = false;
         self.epoch += 1;
+        self.stopped_preview_epoch = None;
         let _ = hotkey::escape(&state.app, false);
         state.error(error);
         state.cue(Cue::Error);
@@ -276,10 +326,13 @@ impl Controller {
             })?;
             self.prune_at = now + Duration::from_secs(86_400);
         }
-        if self.active
-            && (self.config.overlay.show_preview || self.config.companion.enabled)
-            && self.preview.is_none()
-            && now >= self.preview_at
+        if (self.config.overlay.show_preview || self.config.companion.enabled)
+            && preview_due(
+                self.active,
+                self.preview.is_some(),
+                now.saturating_duration_since(self.preview_result_at),
+                self.preview_had_result,
+            )
         {
             let pcm = self
                 .audio
@@ -300,7 +353,6 @@ impl Controller {
                     })
                     .context("Start preview worker")?,
             );
-            self.preview_at = now + Duration::from_secs(2);
         }
         Ok(())
     }
@@ -329,12 +381,29 @@ impl Controller {
                 if let Some(job) = self.preview.take() {
                     let _ = job.join();
                 }
+                let valid =
+                    preview_valid(epoch, self.epoch, self.active, self.stopped_preview_epoch);
                 if epoch == self.epoch && self.active {
-                    if let Ok(result) = result {
-                        state
-                            .enhance
-                            .set_partial(state, result["text"].as_str().unwrap_or(""));
-                    }
+                    self.preview_result_at = Instant::now();
+                    self.preview_had_result = true;
+                }
+                if self.stopped_preview_epoch == Some(epoch) {
+                    self.stopped_preview_epoch = None;
+                }
+                match (valid, result) {
+                    (true, Ok(result)) => state
+                        .enhance
+                        .set_partial(state, result["text"].as_str().unwrap_or("")),
+                    (false, Ok(result)) => tracing::debug!(
+                        chars = result["text"].as_str().map_or(0, str::len),
+                        reason = "stale turn",
+                        "Preview dropped"
+                    ),
+                    (_, Err(_)) => tracing::debug!(
+                        chars = 0,
+                        reason = "engine request failed",
+                        "Preview dropped"
+                    ),
                 }
             }
             Action::ToggleMute => {
@@ -374,7 +443,10 @@ impl Controller {
                     self.prepare_audio(state)?;
                 }
                 if engine_changed {
-                    state.refresh_engine()?;
+                    let result = state.refresh_engine()?;
+                    if result["model_available"].as_bool() == Some(true) {
+                        warm_engine(&state.app, &self.config);
+                    }
                 }
                 if !self.active {
                     self.hide_at = Some(Instant::now() + Duration::from_millis(1500));
@@ -396,8 +468,12 @@ pub fn run(app: AppHandle, receiver: mpsc::Receiver<Action>) {
         }
     };
     let mut controller = Controller::new(config);
-    if let Err(error) = state.refresh_engine() {
-        state.error(&error.to_string());
+    match state.refresh_engine() {
+        Ok(result) if result["model_available"].as_bool() == Some(true) => {
+            warm_engine(&app, &controller.config);
+        }
+        Err(error) => state.error(&error.to_string()),
+        _ => {}
     }
     if let Err(error) = controller.prepare_audio(&state) {
         state.error(&error.to_string());
@@ -419,5 +495,29 @@ pub fn run(app: AppHandle, receiver: mpsc::Receiver<Action>) {
     let _ = controller.cancel(&state);
     if let Some(job) = controller.preview.take() {
         let _ = job.join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{preview_due, preview_valid};
+    use std::time::Duration;
+
+    #[test]
+    fn preview_waits_since_previous_result_and_skips_in_flight() {
+        assert!(!preview_due(true, false, Duration::from_millis(799), false));
+        assert!(preview_due(true, false, Duration::from_millis(800), false));
+        assert!(!preview_due(true, false, Duration::from_millis(999), true));
+        assert!(preview_due(true, false, Duration::from_secs(1), true));
+        assert!(!preview_due(true, true, Duration::from_secs(5), true));
+        assert!(!preview_due(false, false, Duration::from_secs(5), true));
+    }
+
+    #[test]
+    fn stopped_turn_accepts_its_preview_but_cancelled_turn_does_not() {
+        assert!(preview_valid(7, 8, false, Some(7)));
+        assert!(!preview_valid(7, 8, false, None));
+        assert!(preview_valid(8, 8, true, None));
+        assert!(!preview_valid(7, 9, true, None));
     }
 }
