@@ -14,9 +14,15 @@ jobs:
   # depend on Actions artifact storage (the account quota is small and fills after one build).
   linux:
     uses: ./.github/workflows/linux-build.yml
+  # Both jobs are gated behind repository variables because the account is currently locked on
+  # billing: GitHub-hosted runners refuse to start, so they would fail without doing any work.
+  # Set ENABLE_WINDOWS / ENABLE_FLIPPER to "true" in Settings -> Secrets and variables -> Actions
+  # -> Variables once that is resolved. Unset means skipped, and publish only needs Linux.
   windows:
+    if: vars.ENABLE_WINDOWS == 'true'
     uses: ./.github/workflows/windows-build.yml
   flipper:
+    if: vars.ENABLE_FLIPPER == 'true'
     uses: ./.github/workflows/flipper-build.yml
   publish:
     needs: [linux, windows, flipper]
