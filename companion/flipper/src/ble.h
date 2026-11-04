@@ -21,5 +21,17 @@ void ble_stop(void);
 /** True while a central is connected. */
 bool ble_connected(void);
 
-/** Queue bytes for the central. Returns false when nothing is connected. */
+/** True while the serial profile is active and waiting for a central. */
+bool ble_advertising(void);
+
+/** Bytes received by the current BLE connection. */
+uint32_t ble_received_bytes(void);
+
+/** RAM-only generation of the current or most recent BLE connection. */
+uint32_t ble_session_id(void);
+
+/** Queue bytes after the current central has sent data. */
 bool ble_send(const uint8_t* data, size_t size);
+
+/** Queue bytes only if the current connection matches expected_session. */
+bool ble_send_for_session(const uint8_t* data, size_t size, uint32_t expected_session);

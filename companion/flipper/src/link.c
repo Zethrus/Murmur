@@ -24,6 +24,7 @@ typedef struct {
 typedef struct {
     char line[MURMUR_MAX_LINE];
     MurmurTransport via;
+    uint32_t ble_session;
 } PendingLine;
 
 struct MurmurLink {
@@ -32,11 +33,22 @@ struct MurmurLink {
     bool usb_configured;
     volatile bool usb_connected;
     bool ble_started;
+    FuriMutex* ble_mutex;
 
     /* One ring per transport: a line is always answered where it arrived. */
     LinkRing usb;
     LinkRing ble;
     MurmurTransport source;
+    volatile bool usb_received;
+    bool usb_has_frame;
+    uint32_t ble_session;
+    volatile uint32_t ble_rx_session;
+    volatile uint32_t ble_received_session;
+    uint32_t ble_frame_session;
+    volatile uint32_t usb_received_bytes;
+    volatile uint32_t ble_received_bytes;
+    uint32_t usb_last_frame;
+    uint32_t ble_last_frame;
 
     PendingLine pending[LINK_TX_SLOTS];
     uint8_t pending_head;
@@ -57,19 +69,40 @@ static void ring_push(LinkRing* ring, const uint8_t* data, size_t size) {
 
 static void link_usb_rx(void* context) {
     MurmurLink* link = context;
+    if(!link) return;
     uint8_t chunk[64];
     int32_t got = furi_hal_cdc_receive(0, chunk, sizeof(chunk));
-    if(got > 0) ring_push(&link->usb, chunk, (size_t)got);
+    if(got > 0) {
+        link->usb_received = true;
+        link->usb_received_bytes += (uint32_t)got;
+        ring_push(&link->usb, chunk, (size_t)got);
+    }
 }
 
 static void link_usb_state(void* context, CdcState state) {
     MurmurLink* link = context;
-    link->usb_connected = (state == CdcStateConnected);
+    if(!link) return;
+    bool connected = (state == CdcStateConnected);
+    if(connected && !link->usb_connected) {
+        link->usb_received = false;
+        link->usb_has_frame = false;
+        link->usb_received_bytes = 0;
+        link->usb_last_frame = 0;
+    } else if(!connected) {
+        link->usb_received = false;
+    }
+    link->usb_connected = connected;
 }
 
 MurmurLink* link_alloc(void) {
     MurmurLink* link = malloc(sizeof(MurmurLink));
+    if(!link) return NULL;
     memset(link, 0, sizeof(MurmurLink));
+    link->ble_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
+    if(!link->ble_mutex) {
+        free(link);
+        return NULL;
+    }
     link->callbacks.rx_ep_callback = link_usb_rx;
     link->callbacks.state_callback = link_usb_state;
     return link;
@@ -78,6 +111,7 @@ MurmurLink* link_alloc(void) {
 void link_free(MurmurLink* link) {
     if(!link) return;
     link_close(link);
+    furi_mutex_free(link->ble_mutex);
     free(link);
 }
 
@@ -93,14 +127,60 @@ bool link_open(MurmurLink* link) {
     link->pending_head = link->pending_tail = 0;
     link->usb.line_length = 0;
     link->ble.line_length = 0;
+    link->usb_received = false;
+    link->usb_has_frame = false;
+    link->ble_session = 0;
+    link->ble_rx_session = 0;
+    link->ble_received_session = 0;
+    link->ble_frame_session = 0;
+    link->usb_last_frame = 0;
+    link->ble_last_frame = 0;
     return true;
 }
 
 /* The BLE callback needs the instance, which the profile only knows through link_open_ble. */
 static MurmurLink* ble_owner;
 
+static void purge_stale_ble_pending(MurmurLink* link) {
+    uint8_t read = link->pending_tail;
+    uint8_t write = link->pending_tail;
+    while(read != link->pending_head) {
+        PendingLine* pending = &link->pending[read];
+        bool keep = link_pending_valid(pending->via, pending->ble_session, link->ble_session);
+        if(keep) {
+            if(write != read) link->pending[write] = *pending;
+            write = (write + 1) % LINK_TX_SLOTS;
+        }
+        read = (read + 1) % LINK_TX_SLOTS;
+    }
+    link->pending_head = write;
+}
+
+static void refresh_ble_session(MurmurLink* link) {
+    uint32_t session = ble_session_id();
+    if(session != link->ble_session) {
+        link->ble_session = session;
+        purge_stale_ble_pending(link);
+        if(link->source == MurmurTransportBle) link->source = MurmurTransportNone;
+    }
+}
+
 static void link_ble_incoming(const uint8_t* data, size_t size) {
-    if(ble_owner) ring_push(&ble_owner->ble, data, size);
+    MurmurLink* link = ble_owner;
+    if(!link || !data || !size) return;
+    if(furi_mutex_acquire(link->ble_mutex, FuriWaitForever) != FuriStatusOk) return;
+    uint32_t session = ble_session_id();
+    if(session != link->ble_rx_session) {
+        link->ble.head = 0;
+        link->ble.tail = 0;
+        link->ble.line_length = 0;
+        link->ble_received_bytes = 0;
+        link->ble_rx_session = session;
+    }
+    link->ble_received_bytes += (uint32_t)size;
+    ring_push(&link->ble, data, size);
+    link->ble_received_session = session;
+    furi_mutex_release(link->ble_mutex);
 }
 
 bool link_open_ble(MurmurLink* link) {
@@ -120,6 +200,11 @@ void link_close(MurmurLink* link) {
         ble_stop();
         link->ble_started = false;
         ble_owner = NULL;
+        link->ble_session = 0;
+        link->ble_rx_session = 0;
+        link->ble_received_session = 0;
+        link->ble_frame_session = 0;
+        link->ble_received_bytes = 0;
     }
     if(!link->usb_configured) return;
     furi_hal_cdc_set_callbacks(0, NULL, NULL);
@@ -130,25 +215,44 @@ void link_close(MurmurLink* link) {
 }
 
 MurmurTransport link_transport(MurmurLink* link) {
-    return link ? link->source : MurmurTransportNone;
+    if(!link) return MurmurTransportNone;
+    refresh_ble_session(link);
+    return link->source;
+}
+
+uint32_t link_received_bytes(MurmurLink* link, MurmurTransport transport) {
+    if(!link) return 0;
+    if(transport == MurmurTransportUsb) return link->usb_received_bytes;
+    if(transport == MurmurTransportBle) return link->ble_received_bytes;
+    return 0;
 }
 
 bool link_connected(MurmurLink* link) {
     if(!link) return false;
+    refresh_ble_session(link);
     return link->usb_connected || ble_connected();
 }
 
 /** Unsolicited messages use the active transport; replies retain their source. */
 static MurmurTransport outbound(MurmurLink* link) {
-    if(link->source == MurmurTransportUsb && link->usb_connected) return link->source;
-    if(link->source == MurmurTransportBle && ble_connected()) return link->source;
-    if(link->usb_connected) return MurmurTransportUsb;
-    if(ble_connected()) return MurmurTransportBle;
-    return MurmurTransportNone;
+    refresh_ble_session(link);
+    return link_choose_transport(
+        furi_get_tick(),
+        link->usb_connected,
+        link->usb_has_frame,
+        link->usb_last_frame,
+        ble_connected(),
+        link->ble_frame_session == link->ble_session,
+        link->ble_last_frame);
 }
 
 static bool queue_line(MurmurLink* link, const char* line, MurmurTransport via) {
     if(!link || !line) return false;
+    uint32_t current_ble_session = ble_session_id();
+    bool ble_received =
+        ble_connected() && current_ble_session == link->ble_session &&
+        link->ble_received_session == current_ble_session;
+    if(!link_transport_can_enqueue(via, ble_received)) return false;
     uint8_t next = (link->pending_head + 1) % LINK_TX_SLOTS;
     if(next == link->pending_tail) {
         return false; /* full: the host is not draining */
@@ -156,6 +260,7 @@ static bool queue_line(MurmurLink* link, const char* line, MurmurTransport via) 
     PendingLine* pending = &link->pending[link->pending_head];
     snprintf(pending->line, MURMUR_MAX_LINE, "%s\n", line);
     pending->via = via;
+    pending->ble_session = link->ble_session;
     link->pending_head = next;
     return true;
 }
@@ -172,24 +277,33 @@ void link_send_reply(MurmurLink* link, const char* line) {
 
 void link_service(MurmurLink* link) {
     if(!link) return;
+    refresh_ble_session(link);
     if(link->pending_tail == link->pending_head) return;
 
-    MurmurTransport via = link->pending[link->pending_tail].via;
+    PendingLine* pending = &link->pending[link->pending_tail];
+    MurmurTransport via = pending->via;
+    uint32_t current_ble_session = ble_session_id();
     if(via == MurmurTransportNone ||
        (via == MurmurTransportUsb && !link->usb_connected) ||
-       (via == MurmurTransportBle && !ble_connected())) {
+       (via == MurmurTransportBle &&
+        (!ble_connected() ||
+         !link_pending_valid(
+             via,
+             pending->ble_session,
+             current_ble_session)))) {
         link->pending_tail = (link->pending_tail + 1) % LINK_TX_SLOTS;
         return; /* a vanished peer must not block replies to the other transport */
     }
 
-    const char* line = link->pending[link->pending_tail].line;
+    const char* line = pending->line;
     size_t length = strlen(line);
     bool sent;
     if(via == MurmurTransportUsb) {
         furi_hal_cdc_send(0, (uint8_t*)line, (uint16_t)length);
         sent = true;
     } else {
-        sent = ble_send((const uint8_t*)line, length);
+        sent = ble_send_for_session(
+            (const uint8_t*)line, length, pending->ble_session);
     }
     if(!sent) return; /* keep it queued; the transport is not ready */
     link->pending_tail = (link->pending_tail + 1) % LINK_TX_SLOTS;
@@ -207,6 +321,14 @@ static bool drain_ring(MurmurLink* link, LinkRing* ring, MurmurTransport source,
             out[cap - 1] = '\0';
             ring->line_length = 0;
             link->source = source;
+            uint32_t now = furi_get_tick();
+            if(source == MurmurTransportUsb) {
+                link->usb_has_frame = true;
+                link->usb_last_frame = now;
+            } else if(source == MurmurTransportBle) {
+                link->ble_frame_session = link->ble_session;
+                link->ble_last_frame = now;
+            }
             return true;
         }
         if(ring->line_length + 1 >= sizeof(ring->line)) {
@@ -220,6 +342,16 @@ static bool drain_ring(MurmurLink* link, LinkRing* ring, MurmurTransport source,
 
 bool link_read_line(MurmurLink* link, char* out, size_t cap) {
     if(!link) return false;
+    refresh_ble_session(link);
     if(drain_ring(link, &link->usb, MurmurTransportUsb, out, cap)) return true;
-    return drain_ring(link, &link->ble, MurmurTransportBle, out, cap);
+    if(furi_mutex_acquire(link->ble_mutex, FuriWaitForever) != FuriStatusOk) return false;
+    uint32_t current_ble_session = ble_session_id();
+    bool received =
+        current_ble_session == link->ble_session &&
+        link->ble_rx_session == current_ble_session &&
+        link->ble_received_session == current_ble_session;
+    bool ready =
+        received && drain_ring(link, &link->ble, MurmurTransportBle, out, cap);
+    furi_mutex_release(link->ble_mutex);
+    return ready;
 }
