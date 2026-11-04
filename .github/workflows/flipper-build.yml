@@ -51,7 +51,10 @@ jobs:
           ls -l dist/murmur_companion.fap
         working-directory: companion/flipper
 
+      # Optional: this account's artifact quota is exhausted, and the release attach below is
+      # the real delivery path, so the upload is opt-in rather than a hard gate.
       - uses: actions/upload-artifact@v4
+        if: vars.ENABLE_ARTIFACTS == 'true'
         with:
           name: murmur-companion-fap
           path: companion/flipper/dist/murmur_companion.fap
