@@ -216,7 +216,10 @@ void link_close(MurmurLink* link) {
 
 MurmurTransport link_transport(MurmurLink* link) {
     if(!link) return MurmurTransportNone;
-    refresh_ble_session(link);
+    /* Read-only: this is called from the drawing thread. */
+    if(link->source == MurmurTransportBle && ble_session_id() != link->ble_session) {
+        return MurmurTransportNone;
+    }
     return link->source;
 }
 
@@ -236,7 +239,7 @@ bool link_connected(MurmurLink* link) {
 /** Unsolicited messages use the active transport; replies retain their source. */
 static MurmurTransport outbound(MurmurLink* link) {
     refresh_ble_session(link);
-    return link_choose_transport(
+    MurmurTransport via = link_choose_transport(
         furi_get_tick(),
         link->usb_connected,
         link->usb_has_frame,
@@ -244,6 +247,12 @@ static MurmurTransport outbound(MurmurLink* link) {
         ble_connected(),
         link->ble_frame_session == link->ble_session,
         link->ble_last_frame);
+    if(via != MurmurTransportNone) return via;
+    /* Nothing arrived recently. The device still has to be able to speak first — button
+     * presses, battery and the heartbeat all originate here — so fall back to a live link. */
+    if(link->source == MurmurTransportBle && ble_connected()) return MurmurTransportBle;
+    if(link->usb_connected) return MurmurTransportUsb;
+    return MurmurTransportNone;
 }
 
 static bool queue_line(MurmurLink* link, const char* line, MurmurTransport via) {

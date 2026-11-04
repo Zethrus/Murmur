@@ -115,7 +115,7 @@ static void ble_status_changed(BtStatus status, void* context) {
     if(!self) return;
     const bool connected = (status == BtStatusConnected);
     furi_mutex_acquire(self->state_mutex, FuriWaitForever);
-    if(connected && self->ready && self->profile) {
+    if(connected && self->profile) {
         /* GAP connect assigns the stream to firmware RPC before publishing status. */
         ble_profile_serial_set_event_callback(
             self->profile,
