@@ -22,6 +22,9 @@ jobs:
     if: vars.ENABLE_WINDOWS == 'true'
     uses: ./.github/workflows/windows-build.yml
   flipper:
+    # After linux: the release object and its SHA256SUMS are created there, and the FAP is
+    # attached to it, so starting earlier races an empty release.
+    needs: linux
     if: vars.ENABLE_FLIPPER == 'true'
     uses: ./.github/workflows/flipper-build.yml
   publish:
