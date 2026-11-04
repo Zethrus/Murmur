@@ -667,6 +667,11 @@ fn supervise(shared: Arc<Shared>) {
                                 }
                             }
                         }
+                        Err(_) if matches!(outbound, Outbound::Suggestion(_)) => {
+                            if let Ok(mut slot) = shared.outbound.lock() {
+                                slot.queued = Some(outbound);
+                            }
+                        }
                         _ => {}
                     }
                 }

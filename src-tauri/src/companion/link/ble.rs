@@ -40,37 +40,34 @@ const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
 const OUTBOUND_CAPACITY: usize = 16;
 
 struct OutboundQueue {
-    frames: Mutex<VecDeque<Vec<u8>>>,
+    control: Mutex<VecDeque<Vec<u8>>>,
+    text: Mutex<Option<Vec<u8>>>,
     ready: Notify,
 }
 
 impl OutboundQueue {
     fn push(&self, line: &str) -> std::io::Result<()> {
         let is_text = line.starts_with("T ") || line == "T";
-        let mut frames = self
-            .frames
-            .lock()
-            .map_err(|_| std::io::Error::other("BLE queue poisoned"))?;
-        if frames.len() == OUTBOUND_CAPACITY {
-            if let Some(oldest_text) = frames
-                .iter()
-                .position(|frame| frame.starts_with(b"T ") || frame == b"T\n")
-            {
-                frames.remove(oldest_text);
-            } else if is_text {
-                return Ok(()); // All queued frames are controls; the next T replaces this one.
-            } else {
-                tracing::warn!("Companion BLE outbound queue full; control frame was not queued");
+        let mut frame = line.as_bytes().to_vec();
+        frame.push(b'\n');
+        if is_text {
+            *self
+                .text
+                .lock()
+                .map_err(|_| std::io::Error::other("BLE queue poisoned"))? = Some(frame);
+        } else {
+            let mut control = self
+                .control
+                .lock()
+                .map_err(|_| std::io::Error::other("BLE queue poisoned"))?;
+            if control.len() == OUTBOUND_CAPACITY {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
                     "BLE outbound queue full",
                 ));
             }
+            control.push_back(frame);
         }
-        let mut frame = line.as_bytes().to_vec();
-        frame.push(b'\n');
-        frames.push_back(frame);
-        drop(frames);
         self.ready.notify_one();
         Ok(())
     }
@@ -78,10 +75,13 @@ impl OutboundQueue {
     async fn pop(&self) -> Vec<u8> {
         loop {
             let notified = self.ready.notified();
-            if let Some(frame) = self.frames.lock().expect("BLE queue poisoned").pop_front() {
+            if let Some(frame) = self.control.lock().expect("BLE queue poisoned").pop_front() {
                 return frame;
             }
-            notified.await;
+            if let Some(frame) = self.text.lock().expect("BLE queue poisoned").take() {
+                return frame;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(25), notified).await;
         }
     }
 }
@@ -115,7 +115,8 @@ impl BleLink {
         let rx_uuid = found.rx;
 
         let outbound = Arc::new(OutboundQueue {
-            frames: Mutex::new(VecDeque::with_capacity(OUTBOUND_CAPACITY)),
+            control: Mutex::new(VecDeque::with_capacity(OUTBOUND_CAPACITY)),
+            text: Mutex::new(None),
             ready: Notify::new(),
         });
         let task_outbound = outbound.clone();

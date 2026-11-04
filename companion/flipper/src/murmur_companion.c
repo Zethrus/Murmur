@@ -338,6 +338,10 @@ static void handle_message(MurmurApp* app, const char* line) {
         break;
     case MurmurMessageAck:
         strncpy(app->last_action, message.app, sizeof(app->last_action) - 1);
+        if(strcmp(message.app, "ACCEPT UNAVAILABLE") == 0) {
+            app->history_view = -1;
+            snprintf(app->notice, sizeof(app->notice), "Unavailable");
+        }
         break;
     case MurmurMessageText:
         if(app->discarded_turn) break;
@@ -451,13 +455,17 @@ int32_t murmur_companion_app(void* p) {
             MurmurButton button;
             if(app->discard_prompt) {
                 if(event.key == InputKeyOk && event.type == InputTypeShort) {
-                    send_line(app, "D DISCARD");
                     app->discard_prompt = false;
                     app->suppress_ok_release = true;
-                    app->discarded_turn = true;
-                    app->history_finalizing = false;
-                    app->history_has_current = false;
-                    app->live[0] = '\0';
+                    if(app->connected && link_send(app->link, "D DISCARD")) {
+                        app->discarded_turn = true;
+                        app->history_finalizing = false;
+                        app->history_has_current = false;
+                        app->live[0] = '\0';
+                        app->phase = MurmurPhaseIdle;
+                    } else {
+                        snprintf(app->notice, sizeof(app->notice), "Not sent");
+                    }
                 } else if(event.key == InputKeyBack && event.type == InputTypeShort) {
                     app->discard_prompt = false;
                 }

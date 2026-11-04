@@ -147,20 +147,23 @@ static MurmurTransport outbound(MurmurLink* link) {
     return MurmurTransportNone;
 }
 
-static void queue_line(MurmurLink* link, const char* line, MurmurTransport via) {
-    if(!link || !line) return;
+static bool queue_line(MurmurLink* link, const char* line, MurmurTransport via) {
+    if(!link || !line) return false;
     uint8_t next = (link->pending_head + 1) % LINK_TX_SLOTS;
     if(next == link->pending_tail) {
-        return; /* full: the host is not draining, drop the newest line */
+        return false; /* full: the host is not draining */
     }
     PendingLine* pending = &link->pending[link->pending_head];
     snprintf(pending->line, MURMUR_MAX_LINE, "%s\n", line);
     pending->via = via;
     link->pending_head = next;
+    return true;
 }
 
-void link_send(MurmurLink* link, const char* line) {
-    if(link) queue_line(link, line, outbound(link));
+bool link_send(MurmurLink* link, const char* line) {
+    if(!link) return false;
+    MurmurTransport via = outbound(link);
+    return via != MurmurTransportNone && queue_line(link, line, via);
 }
 
 void link_send_reply(MurmurLink* link, const char* line) {
