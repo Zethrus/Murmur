@@ -40,6 +40,11 @@ jobs:
       - name: Sync the companion version with Murmur
         run: python3 companion/flipper/scripts/sync_version.py --check
 
+      - name: Test the wire parser
+        run: |
+          cc -std=c11 -Wall -Wextra -o /tmp/protocol_test companion/tests/protocol_test.c companion/flipper/src/protocol.c
+          /tmp/protocol_test
+
       - name: Build the app
         run: ufbt
         working-directory: companion/flipper

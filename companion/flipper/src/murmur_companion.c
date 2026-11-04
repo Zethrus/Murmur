@@ -1,4 +1,5 @@
 #include "config.h"
+#include "ble.h"
 #include "link.h"
 #include "protocol.h"
 #include "version.h"
@@ -150,14 +151,31 @@ static void draw_callback(Canvas* canvas, void* context) {
     /* Header: identity on the left, the three link indicators on the right. */
     canvas_draw_str(canvas, 2, 9, "MURMUR");
     char header[24];
+    const bool ble_is_connected = ble_connected();
+    const bool ble_is_advertising = ble_advertising();
+    const MurmurTransport transport = link_transport(app->link);
+    const char* transport_marker;
+    if(ble_is_connected) {
+        transport_marker = transport == MurmurTransportUsb ? "U/B" : "B";
+    } else if(ble_is_advertising) {
+        transport_marker = app->connected ? "U/B." : "B.";
+    } else {
+        transport_marker = "U";
+    }
     if(app->connected && app->negotiated) {
-        snprintf(header, sizeof(header), "%c %u%% %ums", 
-                 link_transport(app->link) == MurmurTransportUsb ? 'U' : 'B',
+        snprintf(header, sizeof(header), "%s %u%% %ums", transport_marker,
                  app->battery, app->latency_ms);
     } else if(app->connected) {
-        snprintf(header, sizeof(header), "v%u", app->peer_protocol);
+        snprintf(header, sizeof(header), "%s v%u", transport_marker, app->peer_protocol);
+    } else if(ble_is_advertising) {
+        snprintf(header, sizeof(header), "B. offline");
     } else {
         snprintf(header, sizeof(header), "offline");
+    }
+    const size_t header_left = 2 + canvas_string_width(canvas, "MURMUR") + 4;
+    if(app->connected && app->negotiated &&
+       canvas_string_width(canvas, header) > 126 - header_left) {
+        snprintf(header, sizeof(header), "%s %u%%", transport_marker, app->battery);
     }
     canvas_draw_str_aligned(canvas, 126, 9, AlignRight, AlignBottom, header);
     canvas_draw_line(canvas, 0, 11, 127, 11);
@@ -199,6 +217,13 @@ static void draw_callback(Canvas* canvas, void* context) {
     if(app->live[0]) {
         draw_text_block(canvas, app->live, 12, LIVE_LINES, true);
     } else {
+        if(app->phase == MurmurPhaseIdle && ble_connected() &&
+           link_transport(app->link) == MurmurTransportBle) {
+            char received[16];
+            snprintf(received, sizeof(received), "rx %lu",
+                     (unsigned long)link_received_bytes(app->link, MurmurTransportBle));
+            canvas_draw_str_aligned(canvas, 126, 20, AlignRight, AlignBottom, received);
+        }
         canvas_draw_str_aligned(canvas, 64, 30, AlignCenter, AlignCenter,
                                 murmur_phase_text(app->phase));
         if(app->notice[0]) {
@@ -427,8 +452,7 @@ static void service_timers(MurmurApp* app) {
     if(!app->negotiated && now - app->last_hello >= HELLO_RETRY_MS) {
         char hello[MURMUR_MAX_LINE];
         murmur_hello(hello, sizeof(hello), MURMUR_COMPANION_VERSION);
-        link_send(app->link, hello);
-        app->last_hello = now;
+        if(link_send(app->link, hello)) app->last_hello = now;
     }
     if(now - app->last_ping >= HEARTBEAT_MS) {
         link_send(app->link, "P");
