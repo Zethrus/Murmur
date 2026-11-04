@@ -100,8 +100,14 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: '0'
           CARGO_INCREMENTAL: '0'
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml
-          cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
+          # These tests open real GTK windows. On a self-hosted runner that means a stray
+          # top-level window with its own WM_CLASS, which appears as a second app icon in the
+          # desktop dock while the build runs; a virtual display keeps them off the session.
+          headless() {
+            if command -v xvfb-run >/dev/null 2>&1; then xvfb-run -a "$@"; else "$@"; fi
+          }
+          headless cargo test --manifest-path src-tauri/Cargo.toml
+          headless cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
       - name: Test speech sidecar
         run: engine/.venv/bin/python -m pip install pytest && engine/.venv/bin/python -m pytest engine/tests -q
       - name: Build app, deb and AppImage
