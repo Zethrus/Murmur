@@ -61,13 +61,20 @@ fn preview_valid(epoch: u64, current: u64, active: bool, stopped: Option<u64>) -
 
 fn warm_engine(app: &AppHandle, config: &Config) {
     let app = app.clone();
+    let config_engine = config.engine.clone();
     let parameters = json!({"model":config.engine.model,"device":config.engine.device,
         "compute_type":config.engine.compute_type});
     if let Err(error) = thread::Builder::new()
         .name("murmur-engine-warm".into())
         .spawn(move || {
-            if let Err(error) = app.state::<AppState>().engine.request("warm", parameters) {
-                tracing::warn!(%error, "Warm speech model");
+            let state = app.state::<AppState>();
+            match state.engine.request("warm", parameters) {
+                Ok(result) => {
+                    if let Err(error) = state.cache_warm_status(&config_engine, &result) {
+                        tracing::warn!(%error, "Cache warmed speech model status");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "Warm speech model"),
             }
         })
     {
@@ -254,6 +261,9 @@ impl Controller {
                     Ok(())
                 })?;
             }
+        }
+        if text.is_empty() {
+            state.companion.publish_final_text("");
         }
         state.refresh_engine()?;
         state.transition("done")?;

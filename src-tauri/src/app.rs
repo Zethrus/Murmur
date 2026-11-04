@@ -1,5 +1,5 @@
 use crate::{
-    config::Config,
+    config::{Config, Engine as EngineConfig},
     controller::{self, Action},
     engine::Engine,
     enhance,
@@ -33,6 +33,34 @@ pub struct Status {
     pub sidecar_alive: bool,
     pub model_available: bool,
     pub error: Option<String>,
+}
+
+fn apply_warm_status(
+    current: &EngineConfig,
+    expected: &EngineConfig,
+    status: &mut Status,
+    result: &Value,
+) -> bool {
+    if current.model != expected.model
+        || current.device != expected.device
+        || current.compute_type != expected.compute_type
+        || result["loaded"].as_bool() != Some(true)
+        || result["model"].as_str() != Some(expected.model.as_str())
+    {
+        return false;
+    }
+    let (Some(device), Some(compute), Some(available)) = (
+        result["device"].as_str(),
+        result["compute"].as_str(),
+        result["model_available"].as_bool(),
+    ) else {
+        return false;
+    };
+    status.model = expected.model.clone();
+    status.model_available = available;
+    status.device = device.into();
+    status.compute = compute.into();
+    true
 }
 #[derive(Clone)]
 pub struct TrayControls {
@@ -161,6 +189,19 @@ impl AppState {
         self.app
             .emit("state", json!({"state":self.status()?.state}))?;
         Ok(result)
+    }
+    pub fn cache_warm_status(&self, expected: &EngineConfig, result: &Value) -> Result<()> {
+        let applied = {
+            let config = lock(&self.config)?;
+            let mut status = lock(&self.status)?;
+            apply_warm_status(&config.engine, expected, &mut status, result)
+        };
+        if applied {
+            self.refresh_tray()?;
+            self.app
+                .emit("state", json!({"state":self.status()?.state}))?;
+        }
+        Ok(())
     }
     pub fn send(&self, action: Action) -> Result<()> {
         if self.closing.load(Ordering::Acquire) {
@@ -373,5 +414,45 @@ impl AppState {
                 let _ = job.join();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_warm_status, Status};
+    use crate::config::Engine;
+    use serde_json::json;
+
+    #[test]
+    fn warm_status_updates_cache_only_for_current_configuration() {
+        let expected = Engine::default();
+        let mut status = Status {
+            state: "idle".into(),
+            model: expected.model.clone(),
+            device: "unloaded".into(),
+            compute: "unloaded".into(),
+            sidecar_alive: true,
+            model_available: true,
+            error: None,
+        };
+        let result = json!({"model":expected.model,"loaded":true,"device":"cpu",
+            "compute":"int8","model_available":true});
+        let mut changed = expected.clone();
+        changed.device = "cuda".into();
+        assert!(!apply_warm_status(
+            &changed,
+            &expected,
+            &mut status,
+            &result
+        ));
+        assert_eq!(status.device, "unloaded");
+        assert!(apply_warm_status(
+            &expected,
+            &expected,
+            &mut status,
+            &result
+        ));
+        assert_eq!(status.device, "cpu");
+        assert_eq!(status.compute, "int8");
     }
 }

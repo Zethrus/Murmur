@@ -43,13 +43,16 @@ feedback, under rules that keep the original promise about persistence:
 - **Memory only.** Neither end writes text to a log, a file or a database. The host builds
   `T`/`G` through `protocol::text`/`protocol::suggestion`, which never trace; the device
   holds live text in RAM and keeps only the first 40 characters of the last three finished
-  dictations in a RAM ring. The live view retains the final transcript through `S IDLE` and
-  `S READY`, and clears when a new turn enters `S LISTEN`.
+  dictations in a RAM ring. The live view retains a nonempty final transcript through `S IDLE`
+  and `S READY`, and clears when a new turn enters `S LISTEN`. A direct `S LISTEN` to `S IDLE`
+  transition aborts the turn and clears its preview.
 - **Flattened.** Control characters become spaces, runs of spaces collapse, trailing space
   is trimmed, and the payload is truncated to fit one line. A transcript cannot smuggle a
   newline into the framing.
 - **Replacement, not append.** Every `T` replaces the device's live buffer, so a dropped
-  line heals on the next update.
+  line heals on the next update. A bare `T` (or `T `) clears the live buffer and removes
+  its provisional RAM history entry when the final transcript is empty. Both forms fit
+  within the 220-byte line limit.
 - Everything else — verbs, state, counters — still comes from a closed vocabulary.
 
 ## Handshake
@@ -95,7 +98,7 @@ are ignored, never fatal.
 | `A ACCEPT UNAVAILABLE` | selected history entry cannot be accepted; no current suggestion to show (v4) |
 | `CFG <KEY>=<VERB> ...` | button map pushed from Settings |
 | `PTT <0\|1>` | push-to-talk mode announcement (v3) |
-| `T <text>` | live dictation text (v2) |
+| `T <text>` | live dictation text (v2); bare `T` or `T ` clears an empty final |
 | `G <text>` | the enhancement suggestion (v2) |
 | `L <latency_ms> <rssi>` | link quality for the device header (v2) |
 | `P` | heartbeat |

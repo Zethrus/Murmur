@@ -248,7 +248,21 @@ static void remember_text(MurmurApp* app, bool replace) {
     app->history_view = -1;
 }
 
-/* Pure phase rule; no device C test harness exists in this repository. */
+static void clear_provisional_history(MurmurApp* app) {
+    if(!app->history_has_current || !app->history_count) return;
+    app->history_next = (app->history_next + HISTORY_SLOTS - 1) % HISTORY_SLOTS;
+    app->history[app->history_next][0] = '\0';
+    app->history_count--;
+    app->history_view = -1;
+}
+
+static void clear_live_turn(MurmurApp* app) {
+    app->live[0] = '\0';
+    app->history_finalizing = false;
+    app->history_has_current = false;
+}
+
+/* Pure phase rule. */
 static bool clear_live_on_phase_change(MurmurPhase previous, MurmurPhase next) {
     return previous != MurmurPhaseListen && next == MurmurPhaseListen;
 }
@@ -317,7 +331,9 @@ static void handle_message(MurmurApp* app, const char* line) {
         break;
     case MurmurMessageState: {
         if(message.phase != MurmurPhaseListen) app->discard_prompt = false;
-        if(app->phase == MurmurPhaseListen && message.phase != MurmurPhaseListen && !app->discarded_turn) {
+        if(app->phase == MurmurPhaseListen &&
+           (message.phase == MurmurPhaseThink || message.phase == MurmurPhaseReady) &&
+           !app->discarded_turn) {
             app->history_finalizing = true;
             app->history_has_current = app->live[0] != '\0';
             remember_text(app, false);
@@ -327,14 +343,17 @@ static void handle_message(MurmurApp* app, const char* line) {
                                  message.phase == MurmurPhaseReady ? &sequence_ready_vibro : &sequence_single_vibro);
         }
         bool new_turn = clear_live_on_phase_change(app->phase, message.phase);
+        bool aborted_turn = app->phase == MurmurPhaseListen && message.phase == MurmurPhaseIdle;
         app->phase = message.phase;
         if(new_turn) {
-            app->live[0] = '\0';
+            clear_live_turn(app);
             app->discarded_turn = false;
-            app->history_finalizing = false;
-            app->history_has_current = false;
             app->suggestion[0] = '\0';
             app->history_view = -1;
+        }
+        if(aborted_turn || message.phase == MurmurPhaseError) {
+            clear_live_turn(app);
+            if(message.phase == MurmurPhaseError) app->suggestion[0] = '\0';
         }
         break;
     }
@@ -349,7 +368,12 @@ static void handle_message(MurmurApp* app, const char* line) {
         }
         break;
     case MurmurMessageText:
-        if(app->discarded_turn) break;
+        if(app->discarded_turn || app->phase == MurmurPhaseError || app->phase == MurmurPhaseOffline) break;
+        if(!message.text[0]) {
+            clear_provisional_history(app);
+            clear_live_turn(app);
+            break;
+        }
         strncpy(app->live, message.text, sizeof(app->live) - 1);
         app->live[sizeof(app->live) - 1] = '\0';
         if(app->history_finalizing && app->live[0]) {
@@ -358,6 +382,7 @@ static void handle_message(MurmurApp* app, const char* line) {
         }
         break;
     case MurmurMessageSuggestion:
+        if(app->phase == MurmurPhaseError || app->phase == MurmurPhaseOffline) break;
         strncpy(app->suggestion, message.text, sizeof(app->suggestion) - 1);
         app->suggestion[sizeof(app->suggestion) - 1] = '\0';
         app->suggestion_scroll = 0;
@@ -395,6 +420,8 @@ static void service_timers(MurmurApp* app) {
     if(!app->connected) {
         app->phase = MurmurPhaseOffline;
         app->discard_prompt = false;
+        clear_live_turn(app);
+        app->suggestion[0] = '\0';
         return;
     }
     if(!app->negotiated && now - app->last_hello >= HELLO_RETRY_MS) {
@@ -417,6 +444,8 @@ static void service_timers(MurmurApp* app) {
     if(app->last_rx != 0 && now - app->last_rx > LINK_TIMEOUT_MS) {
         app->negotiated = false;
         app->phase = MurmurPhaseOffline;
+        clear_live_turn(app);
+        app->suggestion[0] = '\0';
         snprintf(app->notice, sizeof(app->notice), "Link timed out");
     }
 }

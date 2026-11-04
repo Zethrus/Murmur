@@ -149,11 +149,9 @@ impl Companion {
     }
 
     /// The delivered text must survive a suggestion arriving before the next link tick.
+    /// An empty final clears the device's provisional preview.
     pub fn publish_final_text(&self, text: &str) {
         let text = text.trim();
-        if text.is_empty() {
-            return;
-        }
         if let Ok(mut slot) = self.shared.outbound.lock() {
             slot.queue_final(text);
         }
@@ -757,6 +755,18 @@ mod tests {
         let mut next_turn = OutboundSlot::default();
         next_turn.queue_partial("new preview");
         assert!(matches!(next_turn.queued, Some(Outbound::Text(_))));
+    }
+
+    #[test]
+    fn empty_final_replaces_pending_preview_with_clear_frame() {
+        let mut slot = OutboundSlot::default();
+        slot.queue_partial("preview");
+        slot.queue_final("");
+        assert!(slot.queued.is_none());
+        assert_eq!(
+            slot.final_text.as_deref().map(protocol::text),
+            Some("T".into())
+        );
     }
 
     #[test]
