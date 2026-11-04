@@ -93,6 +93,41 @@ section!(Enhance {
     load_timeout_ms: u64 = 30000,
     timeout_ms: u64 = 60000
 });
+// Flipper button map. Values are verb names validated by `Companion::validate`.
+section!(CompanionButtons {
+    ok: String = "dictate_toggle".into(),
+    up: String = "enhance".into(),
+    down: String = "accept".into(),
+    back: String = "dismiss".into(),
+    left: String = "none".into(),
+    right: String = "none".into(),
+    ok_long: String = "cancel".into(),
+    up_long: String = "none".into(),
+    down_long: String = "none".into()
+});
+section!(Companion {
+    enabled: bool = false,
+    transport: String = "auto".into(),
+    usb_port: String = "".into(),
+    ble_address: String = "".into(),
+    buttons: CompanionButtons = CompanionButtons::default()
+});
+impl CompanionButtons {
+    /// Every mapping as `(config key, verb)`, in a stable order.
+    pub fn pairs(&self) -> [(&'static str, &str); 9] {
+        [
+            ("ok", self.ok.as_str()),
+            ("up", self.up.as_str()),
+            ("down", self.down.as_str()),
+            ("back", self.back.as_str()),
+            ("left", self.left.as_str()),
+            ("right", self.right.as_str()),
+            ("ok_long", self.ok_long.as_str()),
+            ("up_long", self.up_long.as_str()),
+            ("down_long", self.down_long.as_str()),
+        ]
+    }
+}
 section!(Config {
     general: General = General::default(),
     overlay: Overlay = Overlay::default(),
@@ -102,7 +137,8 @@ section!(Config {
     injection: Injection = Injection::default(),
     postproc: Postproc = Postproc::default(),
     privacy: Privacy = Privacy::default(),
-    enhance: Enhance = Enhance::default()
+    enhance: Enhance = Enhance::default(),
+    companion: Companion = Companion::default()
 });
 
 fn merge(target: &mut toml::Value, patch: toml::Value) {
@@ -182,9 +218,18 @@ impl Config {
             ),
             // Phase 1 accepts only by copying; verified replacement is not implemented.
             (self.enhance.accept_mode.as_str(), &["clipboard"][..]),
+            (
+                self.companion.transport.as_str(),
+                &["auto", "usb", "ble"][..],
+            ),
         ] {
             if !choices.contains(&value) {
                 bail!("Unsupported configuration value: {value}");
+            }
+        }
+        for (key, value) in self.companion.buttons.pairs() {
+            if crate::companion::map::Verb::parse(value).is_none() {
+                bail!("Unsupported companion verb for {key}: {value}");
             }
         }
         if !(0.8..=1.6).contains(&self.overlay.scale) {

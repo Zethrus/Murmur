@@ -46,6 +46,7 @@ pub struct AppState {
     pub paths: Paths,
     pub engine: Arc<Engine>,
     pub enhance: enhance::runtime::Runtime,
+    pub companion: crate::companion::Companion,
     config: Mutex<Config>,
     transaction: Mutex<()>,
     status: Mutex<Status>,
@@ -104,10 +105,11 @@ impl AppState {
             error: None,
         };
         Ok(Self {
-            app,
+            app: app.clone(),
             paths,
             engine,
             enhance,
+            companion: crate::companion::Companion::new(app),
             config: Mutex::new(config),
             transaction: Mutex::new(()),
             status: Mutex::new(status),
@@ -258,6 +260,7 @@ impl AppState {
         }
         *lock(&self.config)? = new.clone();
         self.enhance.config_changed(self, &old, &new);
+        self.companion.config_changed();
         self.app
             .emit("config", &new)
             .context("Emit config update")?;
@@ -275,6 +278,7 @@ impl AppState {
         self.apply_runtime(&old, &new)?;
         *lock(&self.config)? = new.clone();
         self.enhance.config_changed(self, &old, &new);
+        self.companion.config_changed();
         self.app.emit("config", &new)?;
         self.send(Action::Reconfigure)?;
         self.refresh_tray()

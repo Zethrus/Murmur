@@ -1,0 +1,4 @@
+# ufbt build output and IDE scaffolding
+dist/
+.vscode/
+__pycache__/

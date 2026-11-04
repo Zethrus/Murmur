@@ -4,9 +4,9 @@ import {harness,settle} from "./ui-harness.mjs";
 const plain = value => JSON.parse(JSON.stringify(value)); // args cross a vm realm
 const button = (root,label) => root.querySelectorAll("button").find(b=>b.textContent===label||b.dataset.page===label);
 async function settings(overrides){const h=await harness(overrides);await (await h.module("settings/app.ts")).mountSettings(h.root);await settle();return h;}
-test("settings mounts five pages, status/version, and releases all listeners",async()=>{
-  const h=await settings();assert.equal(h.root.querySelectorAll(".nav-button").length,5);assert.match(h.root.textContent,/Version 0.1.0/);
-  for(const page of ["General","Engine","Audio","Behavior","Privacy"]){await button(h.root,page).dispatch("click");await settle();assert.equal(h.root.querySelector("h1").textContent,page);assert.ok(h.root.querySelectorAll(".card").length>=2);}
+test("settings mounts six pages, status/version, and releases all listeners",async()=>{
+  const h=await settings();assert.equal(h.root.querySelectorAll(".nav-button").length,6);assert.match(h.root.textContent,/Version 0.1.0/);
+  for(const page of ["General","Engine","Audio","Behavior","Privacy","Companion"]){await button(h.root,page).dispatch("click");await settle();assert.equal(h.root.querySelector("h1").textContent,page);assert.ok(h.root.querySelectorAll(".card").length>=2);}
   h.unload();assert.equal([...h.events.values()].reduce((n,s)=>n+s.size,0),0);
 });
 test("general saves coding hotkey and theme through set_config",async()=>{

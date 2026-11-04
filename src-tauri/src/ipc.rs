@@ -35,6 +35,21 @@ pub fn get_status(state: State<'_, AppState>) -> Reply<Status> {
     state.status().map_err(error)
 }
 #[tauri::command]
+pub fn companion_status(state: State<'_, AppState>) -> Reply<crate::companion::Status> {
+    Ok(state.companion.status())
+}
+/// Re-push the button map after a settings change.
+#[tauri::command]
+pub fn companion_resync(state: State<'_, AppState>) -> Reply<()> {
+    state.companion.config_changed();
+    Ok(())
+}
+/// Candidate serial devices for the Settings picker.
+#[tauri::command]
+pub fn companion_ports() -> Reply<Vec<String>> {
+    Ok(crate::companion::link::usb::candidates())
+}
+#[tauri::command]
 pub async fn list_models(app: AppHandle) -> Reply<Value> {
     blocking(move || {
         app.state::<AppState>()

@@ -6,11 +6,13 @@ import {engine} from "./pages/engine";
 import {audio} from "./pages/audio";
 import {behavior} from "./pages/behavior";
 import {privacy} from "./pages/privacy";
-const pages = {General:general, Engine:engine, Audio:audio, Behavior:behavior, Privacy:privacy};
+import {companion} from "./pages/companion";
+const pages = {General:general, Engine:engine, Audio:audio, Behavior:behavior, Privacy:privacy, Companion:companion};
 type Page = keyof typeof pages;
 const descriptions: Record<Page,string> = {
   General:"A quieter way to get your thoughts down.", Engine:"A capable voice, running entirely on your device.",
-  Audio:"Help Murmur hear you clearly.", Behavior:"Your words, delivered just the way you work.", Privacy:"Private by default. Always under your control."
+  Audio:"Help Murmur hear you clearly.", Behavior:"Your words, delivered just the way you work.", Privacy:"Private by default. Always under your control.",
+  Companion:"Your Flipper Zero, as a one-button remote for Murmur."
 };
 /** The Murmur mark: microphone capsule with a wave slit, the same glyph as the tray icon. */
 function brandMark(){

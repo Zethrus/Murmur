@@ -165,6 +165,33 @@ Settings → Behavior offers local CPU rewriting after the original dictation is
 Very short recordings are ignored. Rebind shortcuts in General; the main and
 code shortcuts must differ. Escape is reserved for cancellation, not dictation.
 
+## Companion (Flipper Zero)
+
+The Flipper Zero can act as a one-button remote: press OK to start dictation, press it
+again to stop, Up to enhance the last dictation, Down to accept the suggestion, Back to
+dismiss it. Settings → Companion (page 06) owns the button map and pushes it to the device
+over USB; the device caches it so the legend stays correct while Murmur is closed.
+
+The app is built from `companion/flipper`:
+
+```sh
+pip install ufbt            # once
+companion/flipper/build.sh  # writes companion/flipper/dist/murmur_companion.fap
+```
+
+The companion version tracks Murmur's version exactly, and the wire protocol has its own
+integer checked in three files by `scripts/check-protocol-version.mjs`. CI builds the
+`.fap` on any change under `companion/flipper/` and attaches it to tagged releases; a
+Flipper build failure never blocks a desktop release.
+
+This phase is USB only. While the app holds the USB serial port, qFlipper and the Flipper
+mobile app cannot use it; exiting the app or unplugging restores normal behaviour. The
+host-side transport is unix-only for now — Windows reports the link as unsupported instead
+of pretending. Bluetooth (the Flipper's BLE serial profile) is the next phase, and the
+Android companion is planned in `companion/android-plan.md`. See
+[`companion/README.md`](companion/README.md) and
+[`companion/protocol.md`](companion/protocol.md).
+
 ## Coding mode / vibecoding workflow
 
 1. In Engine, explicitly install **large-v3-turbo**, then choose **Use model** for
@@ -246,6 +273,10 @@ Linux user install explicitly enables autostart without changing the app default
 | `postproc.allow_newlines` | `false` | Allow spoken newline outside detected terminals |
 | `privacy.history_enabled` | `false` | Opt-in local SQLite transcript history |
 | `privacy.history_retention_days` | `7` | Retention, 1–3650 days |
+| `companion.enabled` | `false` | Listen for the Flipper companion link |
+| `companion.transport` | `"auto"` | `auto`, `usb`, `ble` (BLE is the next phase) |
+| `companion.usb_port` | `""` | Explicit serial device; empty discovers the Flipper |
+| `companion.buttons.*` | see docs | Button-to-verb map: `dictate_toggle`, `enhance`, `accept`, `dismiss`, `cancel`, `none` |
 
 Default dictionary: `Tauri`, `faster-whisper`, `CTranslate2`, `WebKitGTK`, `WebView2`,
 `serde`, `tokio`, `enigo`, `cpal`, `rodio`, `Murmur`, `zethrus`, `Python`, `TypeScript`,

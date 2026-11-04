@@ -16,10 +16,14 @@ jobs:
     uses: ./.github/workflows/linux-build.yml
   windows:
     uses: ./.github/workflows/windows-build.yml
+  flipper:
+    uses: ./.github/workflows/flipper-build.yml
   publish:
-    needs: [linux, windows]
+    needs: [linux, windows, flipper]
     # A Windows runner is optional until one exists; a failed Windows build must not block
     # publishing the Linux assets that did build.
+    # The companion app is additive: a Flipper build failure must not withhold the desktop
+    # release, and a missing .fap is only an error when its job succeeded.
     if: always() && needs.linux.result == 'success'
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     permissions:
@@ -47,6 +51,11 @@ jobs:
             compgen -G '*-setup.exe' >/dev/null || { echo 'missing *-setup.exe' >&2; exit 1; }
           else
             echo 'No Windows assets attached: no Windows runner is configured yet.'
+          fi
+          if compgen -G 'murmur-companion-*.fap' >/dev/null; then
+            test -s "murmur-companion-${GITHUB_REF_NAME}.fap"
+          else
+            echo "No Flipper companion .fap attached (companion job: ${{ needs.flipper.result }})."
           fi
       - name: Write and attach SHA256SUMS
         shell: bash

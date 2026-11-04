@@ -1,0 +1,67 @@
+name: Flipper companion
+
+# Builds only the Flipper app. Anything under companion/flipper triggers it, plus the
+# release workflow for a v* tag.
+on:
+  push:
+    paths:
+      - 'companion/flipper/**'
+      - '.github/workflows/flipper-build.yml'
+  pull_request:
+    paths:
+      - 'companion/flipper/**'
+      - '.github/workflows/flipper-build.yml'
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ufbt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ufbt
+
+      - name: Prepare the SDK
+        run: ufbt update --channel=release
+
+      - name: Sync the companion version with Murmur
+        run: python3 companion/flipper/scripts/sync_version.py --check
+
+      - name: Build the app
+        run: ufbt
+        working-directory: companion/flipper
+
+      - name: Verify the artifact
+        run: |
+          set -euo pipefail
+          test -s dist/murmur_companion.fap
+          ls -l dist/murmur_companion.fap
+        working-directory: companion/flipper
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: murmur-companion-fap
+          path: companion/flipper/dist/murmur_companion.fap
+          if-no-files-found: error
+
+      # Attach to the release on a tag, the same way the desktop workflows do, so the
+      # release never depends on Actions artifact storage.
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp companion/flipper/dist/murmur_companion.fap "murmur-companion-${GITHUB_REF_NAME}.fap"
+          gh release upload "${GITHUB_REF_NAME}" "murmur-companion-${GITHUB_REF_NAME}.fap" --clobber
