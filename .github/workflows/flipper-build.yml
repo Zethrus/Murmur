@@ -19,7 +19,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    # Same runner pool as the desktop build: the account is billing-locked for hosted
+    # runners, and the self-hosted machine already has the toolchain cached.
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     steps:
       - uses: actions/checkout@v4
 
