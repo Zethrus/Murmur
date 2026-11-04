@@ -1,7 +1,7 @@
 //! Exercise the TLS, auth, LAN and wire components with a stub controller.
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use murmur::{auth, handshake, lan, tls, wire};
+use murmur::{audio, auth, handshake, lan, tls, wire};
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::{CertificateDer, ServerName, UnixTime},
@@ -240,5 +240,124 @@ async fn pinned_websocket_pairing_reconnect_and_controls() -> Result<()> {
     let _ = stop.send(());
     server.await?;
     std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn paired_toggle_streams_one_second_in_order_without_audio_files() -> Result<()> {
+    let dir = std::env::temp_dir().join(format!(
+        "murmur-audio-test-{}-{}",
+        std::process::id(),
+        auth::now()
+    ));
+    std::fs::create_dir_all(&dir)?;
+    let identity = tls::load_or_create(&dir)?;
+    let pin: [u8; 32] = Sha256::digest(std::fs::read(dir.join("companion/tls/cert.der"))?).into();
+    let mut authenticator = auth::Auth::load(&dir)?;
+    let code = authenticator.show_code()?.code;
+    let authenticator = Arc::new(Mutex::new(authenticator));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (socket, peer) = listener.accept().await?;
+        let tls = identity.acceptor.accept(socket).await?;
+        let mut ws = tokio_tungstenite::accept_async(tls).await?;
+        handshake::authenticate(&mut ws, peer.ip(), &authenticator, 4)
+            .await?
+            .context("auth denied")?;
+        let mut gate = audio::Gate::default();
+        let mut sink = Vec::<i16>::new();
+        while let Some(message) = ws.next().await {
+            match message? {
+                Message::Text(line) if line == "B dictate_toggle" && gate.active().is_none() => {
+                    gate.start(17);
+                    ws.send(Message::Text("MIC START 17".into())).await?;
+                }
+                Message::Text(line) if line == "B dictate_toggle" => {
+                    gate.stop();
+                    ws.send(Message::Text("MIC STOP 17".into())).await?;
+                    break;
+                }
+                Message::Binary(bytes) => {
+                    let frame = audio::Frame::parse(&bytes)?;
+                    gate.accept(&frame)?;
+                    sink.extend_from_slice(&frame.samples);
+                }
+                _ => anyhow::bail!("unexpected frame"),
+            }
+        }
+        Ok::<_, anyhow::Error>(sink)
+    });
+    let mut wav = std::io::Cursor::new(Vec::new());
+    {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::new(&mut wav, spec)?;
+        for sample in -8000i16..8000i16 {
+            writer.write_sample(sample)?;
+        }
+        writer.finalize()?;
+    }
+    wav.set_position(0);
+    let mut reader = hound::WavReader::new(wav)?;
+    let mut samples = reader.samples::<i16>();
+    let mut client = connect(address, pin).await?;
+    assert!(auth_client(&mut client, &code)
+        .await?
+        .starts_with("AUTH OK "));
+    client
+        .send(Message::Text("B dictate_toggle".into()))
+        .await?;
+    assert_eq!(line(&mut client).await?, "MIC START 17");
+    for sequence in 0..50 {
+        let mut pcm = [0i16; audio::SAMPLES];
+        for sample in &mut pcm {
+            *sample = samples.next().context("short WAV")??;
+        }
+        client
+            .send(Message::Binary(
+                audio::Frame {
+                    flags: 0,
+                    stream_id: 17,
+                    sequence,
+                    samples: pcm,
+                }
+                .encode()
+                .to_vec()
+                .into(),
+            ))
+            .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(samples.next().is_none());
+    client
+        .send(Message::Text("B dictate_toggle".into()))
+        .await?;
+    assert_eq!(line(&mut client).await?, "MIC STOP 17");
+    let sink = server.await??;
+    assert_eq!(sink.len(), 16_000);
+    assert!(sink.iter().copied().eq(-8000i16..8000i16));
+    fn files(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(path)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                files(&path, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut written = Vec::new();
+    files(&dir, &mut written)?;
+    assert!(written.iter().all(|path| matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("der" | "json")
+    )));
+    std::fs::remove_dir_all(dir)?;
     Ok(())
 }

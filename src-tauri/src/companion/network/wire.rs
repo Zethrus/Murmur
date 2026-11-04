@@ -3,9 +3,12 @@ use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFr
 
 pub const MAX_LINE: usize = 220;
 pub fn valid_line(line: &str) -> bool {
-    !line.is_empty() && line.is_ascii() && line.len() + 1 <= MAX_LINE && !line.contains(['\r', '\n'])
+    !line.is_empty()
+        && line.is_ascii()
+        && line.len() + 1 <= MAX_LINE
+        && !line.contains(['\r', '\n'])
 }
-/// Binary frames are reserved for the remote microphone increment.
+/// Binary frames are invalid during the authentication handshake.
 pub fn binary_close() -> CloseFrame {
     CloseFrame {
         code: CloseCode::Unsupported,

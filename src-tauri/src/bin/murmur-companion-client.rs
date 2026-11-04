@@ -1,13 +1,14 @@
 //! Small pinned-TLS companion harness. Use the printed AUTH OK token for reconnects.
 use anyhow::{bail, Context, Result};
 use futures::{SinkExt, StreamExt};
+use murmur::audio::{Frame, SAMPLES};
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::{CertificateDer, ServerName, UnixTime},
     DigitallySignedStruct, Error, SignatureScheme,
 };
 use sha2::{Digest, Sha256};
-use std::{env, sync::Arc, time::Duration};
+use std::{env, path::PathBuf, sync::Arc, time::Duration};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{client_async, tungstenite::Message};
@@ -75,8 +76,14 @@ async fn main() -> Result<()> {
     let mut pin = None;
     let mut credential = None;
     let mut say = None;
+    let mut wav: Option<PathBuf> = None;
+    let mut stream = false;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
+        if arg == "--stream" {
+            stream = true;
+            continue;
+        }
         let value = args.next().context("Missing option value")?;
         match arg.as_str() {
             "--host" => host = Some(value),
@@ -99,8 +106,15 @@ async fn main() -> Result<()> {
                 }
                 say = Some(value);
             }
+            "--wav" => wav = Some(PathBuf::from(value)),
             _ => bail!("Unknown option {arg}"),
         }
+    }
+    if stream && wav.is_none() {
+        bail!("--stream requires --wav <path>");
+    }
+    if wav.is_some() && !stream {
+        bail!("--wav requires --stream");
     }
     let host = host.context("--host <ip:port> required")?;
     let pin = pin.context("--fingerprint <hex> required")?;
@@ -144,17 +158,77 @@ async fn main() -> Result<()> {
         };
         ws.send(Message::Text(line.into())).await?;
     }
-    while let Ok(Some(message)) = tokio::time::timeout(Duration::from_millis(750), ws.next()).await
-    {
-        match message? {
-            Message::Text(line) => println!("{line}"),
-            Message::Close(frame) => {
-                if let Some(frame) = frame {
-                    println!("CLOSE {}", frame.reason);
+    if stream {
+        let mut reader = hound::WavReader::open(wav.unwrap()).context("Open WAV")?;
+        let spec = reader.spec();
+        if spec.channels != 1
+            || spec.sample_rate != 16_000
+            || spec.bits_per_sample != 16
+            || spec.sample_format != hound::SampleFormat::Int
+        {
+            bail!("WAV must be 16 kHz mono PCM16");
+        }
+        let mut samples = reader.samples::<i16>();
+        let mut active: Option<u32> = None;
+        let mut sequence = 0u32;
+        let mut sent = 0u64;
+        let mut tick = tokio::time::interval(Duration::from_millis(20));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                inbound = ws.next() => match inbound {
+                    Some(Ok(Message::Text(line))) => {
+                        println!("{line}");
+                        if let Some(id) = line.strip_prefix("MIC START ").and_then(|s| s.parse::<u32>().ok()) {
+                            active = Some(id);
+                            sequence = 0;
+                            sent = 0;
+                            tick.reset();
+                        } else if let Some(id) = line.strip_prefix("MIC STOP ").and_then(|s| s.parse::<u32>().ok()) {
+                            if active == Some(id) {
+                                println!("frames sent: {sent}");
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(frame))) => { if let Some(frame) = frame { println!("CLOSE {}", frame.reason); } break; }
+                    Some(Err(error)) => return Err(error.into()),
+                    None => break,
+                    _ => {}
+                },
+                _ = tick.tick(), if active.is_some() => {
+                    let mut pcm = [0i16; SAMPLES];
+                    let mut count = 0;
+                    for sample in &mut pcm {
+                        match samples.next() {
+                            Some(Ok(value)) => { *sample = value; count += 1; }
+                            Some(Err(error)) => return Err(error.into()),
+                            None => break,
+                        }
+                    }
+                    if count == SAMPLES {
+                        let frame = Frame { flags: 0, stream_id: active.unwrap(), sequence, samples: pcm };
+                        ws.send(Message::Binary(frame.encode().to_vec().into())).await?;
+                        sequence = sequence.wrapping_add(1);
+                        sent += 1;
+                    }
                 }
-                break;
             }
-            _ => {}
+        }
+    } else {
+        while let Ok(Some(message)) =
+            tokio::time::timeout(Duration::from_millis(750), ws.next()).await
+        {
+            match message? {
+                Message::Text(line) => println!("{line}"),
+                Message::Close(frame) => {
+                    if let Some(frame) = frame {
+                        println!("CLOSE {}", frame.reason);
+                    }
+                    break;
+                }
+                _ => {}
+            }
         }
     }
     Ok(())

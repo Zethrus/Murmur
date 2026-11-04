@@ -84,9 +84,13 @@ export function companion(ctx: PageContext): HTMLElement {
   const pairing = el("p", "card-note", "Pairing code: hidden");
   const devices = el("div", "stack");
   const networkNote = el("p", "card-note", "Phone listener off");
+  const liveSource = el("p", "card-note", `Live dictation source: ${ctx.status.source ?? "idle"}`);
+  ctx.subscribe("state", ({source}) => {
+    if (source !== undefined) liveSource.textContent = `Live dictation source: ${source ?? "idle"}`;
+  });
   const renderNetwork = (status: CompanionNetworkStatus) => {
     fingerprint.textContent = `TLS fingerprint: ${status.fingerprint ?? "—"}`;
-    networkNote.textContent = status.error ?? (status.enabled ? `Listening on ${c.network.bind}:${c.network.port} · refused peers ${status.rejected_peers}` : "Phone listener off");
+    networkNote.textContent = status.error ?? (status.enabled ? `Listening on ${c.network.bind}:${c.network.port} · refused peers ${status.rejected_peers} · dropped audio frames ${status.dropped_audio_frames}` : "Phone listener off");
     devices.replaceChildren(...(status.devices.length ? status.devices.map(device =>
       row(device.name || "Phone", `Paired ${new Date(device.created_at * 1000).toLocaleString()} · last seen ${device.last_seen ? new Date(device.last_seen * 1000).toLocaleString() : "never"}`,
         button("Revoke", async () => { try { await call("companion_revoke_device", {id: device.id}); await refreshNetwork(); } catch (e) { ctx.report(e); } }))) : [el("p", "card-note", "No paired phones.")]));
@@ -130,6 +134,10 @@ export function companion(ctx: PageContext): HTMLElement {
         row(label, hint, select(c.buttons[key], verbs, (verb) => saveVerb(key, verb))))),
     card("Phone over WiFi",
       networkNote,
+      liveSource,
+      row("Audio source", "Choose the microphone for each dictation turn. Automatic uses a connected phone.",
+        select(c.source, [["auto", "Automatic"], ["local", "Built-in microphone"], ["phone", "Phone microphone"]],
+          (value) => save({source: value as CompanionConfig["source"]}))),
       row("Enable phone listener", "TLS only. Connections are accepted from local addresses and require pairing.",
         toggle(c.network.enabled, (enabled) => save({network: {...c.network, enabled}}))),
       row("Bind address", "Use your LAN address to connect from a phone. Loopback allows local testing.", bind),

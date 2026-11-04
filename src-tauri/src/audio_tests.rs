@@ -1,5 +1,20 @@
 use super::*;
 #[test]
+fn remote_frames_use_capture_snapshot_and_stop() -> Result<()> {
+    let (mut capture, remote) = AudioCapture::new_remote(&config::Audio::default(), |_| {});
+    capture.start()?;
+    let mut frame = [0i16; 320];
+    for (i, sample) in frame.iter_mut().enumerate() {
+        *sample = i as i16;
+    }
+    remote.push(&frame)?;
+    let preview = capture.snapshot()?;
+    assert_eq!(preview.len(), 320);
+    assert_eq!(preview, capture.stop()?);
+    assert!((preview[319] - 319.0 / 32768.0).abs() < 0.000001);
+    Ok(())
+}
+#[test]
 fn silence_requires_speech() {
     let mut s = Silence::default();
     for _ in 0..100 {

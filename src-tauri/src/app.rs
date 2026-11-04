@@ -27,6 +27,7 @@ use tauri::{
 #[derive(Clone, Serialize)]
 pub struct Status {
     pub state: String,
+    pub source: Option<String>,
     pub model: String,
     pub device: String,
     pub compute: String,
@@ -126,6 +127,7 @@ impl AppState {
         let (sender, receiver) = mpsc::channel();
         let status = Status {
             state: "idle".into(),
+            source: None,
             model: config.engine.model.clone(),
             device: "unloaded".into(),
             compute: "unloaded".into(),
@@ -260,6 +262,15 @@ impl AppState {
             s.error = Some(message.into());
         }
         let _ = self.app.emit("error", json!({"message":message}));
+    }
+    pub fn audio_source(&self, source: Option<&str>) {
+        if let Ok(mut status) = self.status.lock() {
+            status.source = source.map(str::to_owned);
+        }
+        let _ = self.app.emit(
+            "state",
+            json!({"state":self.status().ok().map(|s| s.state),"source":source}),
+        );
     }
     pub fn cue(&self, cue: Cue) {
         if let (Ok(sound), Ok(config)) = (self.sound.lock(), self.config()) {
@@ -434,6 +445,7 @@ mod tests {
         let expected = Engine::default();
         let mut status = Status {
             state: "idle".into(),
+            source: None,
             model: expected.model.clone(),
             device: "unloaded".into(),
             compute: "unloaded".into(),
