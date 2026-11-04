@@ -1,4 +1,4 @@
-//! Murmur companion protocol, version 2.
+//! Murmur companion protocol, version 3.
 //!
 //! Pure encoding and decoding. No I/O on the hot path. Version 2 adds live text (`T`),
 //! the enhancement suggestion (`G`) and device telemetry (`Q`, `L`) — see
@@ -6,7 +6,7 @@
 //! are [`text`] and [`suggestion`], and neither traces.
 
 /// Wire protocol revision. Mirrored in `companion/flipper/src/protocol.h`.
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 /// Longest accepted line, including the newline. Sized so a full ten-key button
 /// map fits on one `CFG` line.
 pub const MAX_LINE: usize = 220;
@@ -98,6 +98,8 @@ pub enum Inbound {
         button: Button,
         long: bool,
     },
+    Ptt { pressed: bool },
+    PttMode { enabled: bool },
     /// Bare heartbeat (`None`) or the echo of a timed probe (`Some(token)`).
     Ping { token: Option<String> },
     /// Device battery percentage, sent every 30 s.
@@ -144,9 +146,28 @@ pub fn parse(line: &str) -> Inbound {
             Some(percent) if percent <= 100 => Inbound::Battery { percent },
             _ => Inbound::Unknown,
         },
+        Some("PTT") => match (parts.next(), parts.next()) {
+            (Some("0"), None) => Inbound::PttMode { enabled: false },
+            (Some("1"), None) => Inbound::PttMode { enabled: true },
+            _ => Inbound::Unknown,
+        },
         Some("B") => {
             let name = parts.next().unwrap_or("");
-            let long = parts.next() == Some("LONG");
+            let suffix = parts.next();
+            if parts.next().is_some() {
+                return Inbound::Unknown;
+            }
+            if name == "OK" {
+                match suffix {
+                    Some("PRESS") => return Inbound::Ptt { pressed: true },
+                    Some("RELEASE") => return Inbound::Ptt { pressed: false },
+                    _ => {}
+                }
+            }
+            if suffix.is_some_and(|value| value != "LONG") {
+                return Inbound::Unknown;
+            }
+            let long = suffix == Some("LONG");
             match Button::parse(name) {
                 Some(button) => Inbound::Press { button, long },
                 None => Inbound::Unknown,
@@ -171,6 +192,10 @@ pub fn probe(seq: u64) -> String {
 
 pub fn ack(verb: &str, result: &str) -> String {
     format!("A {verb} {result}")
+}
+
+pub fn ptt(enabled: bool) -> String {
+    format!("PTT {}", u8::from(enabled))
 }
 
 /// `CFG` line, keys sorted so the line is stable and diffable in logs.
@@ -279,6 +304,18 @@ mod tests {
             }
         );
         assert_eq!(parse("B SIDEWAYS"), Inbound::Unknown);
+    }
+
+    #[test]
+    fn ptt_and_legacy_ok_round_trip() {
+        assert_eq!(ptt(true), "PTT 1");
+        assert_eq!(ptt(false), "PTT 0");
+        assert_eq!(parse(&ptt(true)), Inbound::PttMode { enabled: true });
+        assert_eq!(parse(&ptt(false)), Inbound::PttMode { enabled: false });
+        assert_eq!(parse("B OK PRESS"), Inbound::Ptt { pressed: true });
+        assert_eq!(parse("B OK RELEASE"), Inbound::Ptt { pressed: false });
+        assert_eq!(parse("B OK"), Inbound::Press { button: Button::Ok, long: false });
+        assert_eq!(parse("B OK PRESS EXTRA"), Inbound::Unknown);
     }
 
     #[test]

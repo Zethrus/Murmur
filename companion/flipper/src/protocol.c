@@ -200,6 +200,11 @@ bool murmur_parse(const char* line, MurmurMessage* out) {
         }
         return true;
     }
+    if(strcmp(line, "PTT 0") == 0 || strcmp(line, "PTT 1") == 0) {
+        out->type = MurmurMessagePtt;
+        out->ptt = line[4] == '1';
+        return true;
+    }
     return false;
 }
 

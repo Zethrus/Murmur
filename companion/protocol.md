@@ -1,10 +1,10 @@
-# Murmur companion protocol, version 2
+# Murmur companion protocol, version 3
 
 Line-delimited ASCII. One message per line, terminated by `\n` (a `\r\n` peer is also
 accepted). Maximum 220 bytes per line, including the terminator. No JSON, no binary frames,
 no allocation on the hot path.
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 `PROTOCOL_VERSION` is defined once here and mirrored in exactly two places:
 
@@ -15,11 +15,17 @@ PROTOCOL_VERSION = 2
 
 `node scripts/check-protocol-version.mjs` fails the build when any of the three disagree.
 
-## What version 2 adds
+## What version 3 adds
+
+`PTT <0|1>` announces push-to-talk mode, and `B OK PRESS` / `B OK RELEASE` report
+the two edges of the OK key while that mode is enabled. Version 2 added `T`, `G`, `Q`,
+`L`, and timed probes. Peers with different protocol versions report a mismatch.
+
+## What version 2 added
 
 `T` (live text), `G` (the suggestion), `Q` (device battery), `L` (link quality on the device
 header) and timed probes (`P <token>`). Everything in version 1 is unchanged, so a v2 host
-still drives a v1 device, minus the new screens.
+retains the original button and state messages.
 
 ## Text and privacy
 
@@ -28,8 +34,8 @@ feedback, under rules that keep the original promise about persistence:
 
 - **Memory only.** Neither end writes text to a log, a file or a database. The host builds
   `T`/`G` through `protocol::text`/`protocol::suggestion`, which never trace; the device
-  holds it in RAM and clears it when a turn ends, on dismiss, or when a new `S LISTEN`
-  arrives.
+  holds live text in RAM and keeps only the first 40 characters of the last three finished
+  dictations in a RAM ring. The live view clears when a turn ends or a new `S LISTEN` arrives.
 - **Flattened.** Control characters become spaces, runs of spaces collapse, trailing space
   is trimmed, and the payload is truncated to fit one line. A transcript cannot smuggle a
   newline into the framing.
@@ -46,7 +52,7 @@ renegotiate:
 HELLO <protocol> <app_version> <role>
 ```
 
-- `protocol` — integer, currently `2`
+- `protocol` — integer, currently `3`
 - `app_version` — the Murmur version, e.g. `0.3.0`
 - `role` — `flipper`, `host`, or (later) `phone`
 
@@ -59,6 +65,7 @@ are ignored, never fatal.
 | Line | Meaning |
 | --- | --- |
 | `B OK` / `B UP` / `B DOWN` / `B BACK` / `B LEFT` / `B RIGHT` | short press |
+| `B OK PRESS` / `B OK RELEASE` | OK down/up in push-to-talk mode (v3) |
 | `B OK LONG` / `B BACK LONG` | long press (>= 500 ms) |
 | `P` | heartbeat |
 | `P <token>` | echo of a timed probe, verbatim (v2) |
@@ -75,6 +82,7 @@ are ignored, never fatal.
 | `S ERROR <code>` | last action failed; code is a short token, e.g. `timeout` |
 | `A <verb> <result>` | acknowledgement, e.g. `A DICTATE ON`, `A ACCEPT OK` |
 | `CFG <KEY>=<VERB> ...` | button map pushed from Settings |
+| `PTT <0\|1>` | push-to-talk mode announcement (v3) |
 | `T <text>` | live dictation text (v2) |
 | `G <text>` | the enhancement suggestion (v2) |
 | `L <latency_ms> <rssi>` | link quality for the device header (v2) |
@@ -83,6 +91,14 @@ are ignored, never fatal.
 
 `S` lines are sent only when the state changes. `T` is throttled to 4 Hz and coalesced so a
 fast partial cannot flood a BLE link; `G` is sent once per suggestion.
+
+## Push-to-talk
+
+The host sends `PTT 0` or `PTT 1` alongside `CFG` during negotiation and again when
+the mode changes. In mode 1, OK down sends `B OK PRESS` to start dictation and OK up
+sends `B OK RELEASE` to stop it. The host handles these edges independently of the
+button map. All other buttons retain their existing lines. In mode 0, OK sends the
+original `B OK` short press and follows its configured mapping.
 
 ## Button map (`CFG`)
 
@@ -94,7 +110,9 @@ CFG BACK=DISMISS DOWN=ACCEPT OK=DICTATE_TOGGLE OK_LONG=CANCEL UP=ENHANCE
 
 Verbs: `DICTATE_TOGGLE`, `ENHANCE`, `ACCEPT`, `DISMISS`, `CANCEL`, `NONE`. The host is the
 source of truth; the Flipper caches the last `CFG` line so the map survives a reconnect
-while Murmur is not running. `BACK LONG` is reserved for exiting the app and is never sent.
+while Murmur is not running. Outside listening, `BACK LONG` exits the app and is never
+sent. During listening, `BACK LONG` opens a discard prompt; confirming sends `B OK LONG`
+for the mapped cancel action.
 
 ## Liveness and latency
 
@@ -117,5 +135,6 @@ closes the transport and retries with backoff (1 s, doubling to 5 s).
 
 ## Change policy
 
-Bump `PROTOCOL_VERSION` for any change that an older peer would misinterpret. Adding an
-optional message type or a new verb does not require a bump; removing or renaming does.
+Bump `PROTOCOL_VERSION` for any change that an older peer would misinterpret, including
+changes to a button's press semantics. Adding an optional message type or a new verb
+does not require a bump; removing or renaming does.

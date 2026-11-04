@@ -26,6 +26,9 @@ const HEARTBEAT: Duration = Duration::from_secs(5);
 const DEAD_AFTER: Duration = Duration::from_secs(15);
 /// A repeated press of the same verb inside this window is a bounce, not a second press.
 const DEBOUNCE: Duration = Duration::from_millis(250);
+/// Live text is coalesced to at most one line per interval: a 20-byte BLE write per
+/// keystroke would saturate the link, and a human cannot read faster than this anyway.
+const TEXT_INTERVAL: Duration = Duration::from_millis(250);
 /// Reconnect backoff ceiling.
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
@@ -53,9 +56,17 @@ pub struct Companion {
     shared: Arc<Shared>,
 }
 
+/// One pending thing to show on the device. Text coalesces: the newest wins, because a
+/// partial transcript is only interesting until the next one arrives.
+enum Outbound {
+    Text(String),
+    Suggestion(String),
+}
+
 struct Shared {
     app: AppHandle,
     status: Mutex<Status>,
+    outbound: Mutex<Option<Outbound>>,
     /// Bumped when the configuration changes; the supervisor reloads and resends `CFG`.
     revision: AtomicU64,
     started: AtomicBool,
@@ -68,6 +79,7 @@ impl Companion {
             shared: Arc::new(Shared {
                 app,
                 status: Mutex::new(Status::default()),
+                outbound: Mutex::new(None),
                 revision: AtomicU64::new(1),
                 started: AtomicBool::new(false),
                 stop: AtomicBool::new(false),
@@ -98,6 +110,29 @@ impl Companion {
             .lock()
             .map(|status| status.clone())
             .unwrap_or_default()
+    }
+
+    /// Show live dictation text on the device. Never logged: this path must not trace,
+    /// because the payload is a transcript.
+    pub fn publish_text(&self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        if let Ok(mut slot) = self.shared.outbound.lock() {
+            *slot = Some(Outbound::Text(text.to_string()));
+        }
+    }
+
+    /// Show the enhancement suggestion on the device once it is ready.
+    pub fn publish_suggestion(&self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        if let Ok(mut slot) = self.shared.outbound.lock() {
+            *slot = Some(Outbound::Suggestion(text.to_string()));
+        }
     }
 
     /// Ask the supervisor to stop (used on quit and by tests).
@@ -145,6 +180,10 @@ fn describe_error(error: &anyhow::Error) -> String {
     format!("{error:#}")
 }
 
+fn text_due(last: Instant, now: Instant) -> bool {
+    now.duration_since(last) >= TEXT_INTERVAL
+}
+
 /// Device-side state of one connection attempt.
 struct Session {
     key: String,
@@ -155,10 +194,12 @@ struct Session {
     last_ping: Instant,
     phase: String,
     cfg_for: String,
+    ptt_for: Option<bool>,
     battery: Option<u8>,
     latency_ms: u32,
     probe_seq: u64,
     probe_sent: Option<(String, Instant)>,
+    last_text: Instant,
 }
 
 fn supervise(shared: Arc<Shared>) {
@@ -244,10 +285,12 @@ fn supervise(shared: Arc<Shared>) {
                         last_ping: Instant::now(),
                         phase: String::new(),
                         cfg_for: String::new(),
+                        ptt_for: None,
                         battery: None,
                         latency_ms: 0,
                         probe_seq: 1,
                         probe_sent: None,
+                        last_text: Instant::now() - TEXT_INTERVAL,
                     });
                     publish(
                         &shared,
@@ -295,6 +338,11 @@ fn supervise(shared: Arc<Shared>) {
                 active.cfg_for = map_line.clone();
             }
         }
+        if active.negotiated && active.ptt_for != Some(config.companion.ptt) {
+            if active.link.write_line(&protocol::ptt(config.companion.ptt)).is_ok() {
+                active.ptt_for = Some(config.companion.ptt);
+            }
+        }
 
         let mut dropped = false;
         for _ in 0..8 {
@@ -309,6 +357,9 @@ fn supervise(shared: Arc<Shared>) {
                                 tracing::info!(%app, protocol, "Companion handshake complete");
                                 let _ = active.link.write_line(&map_line);
                                 active.cfg_for = map_line.clone();
+                                if active.link.write_line(&protocol::ptt(config.companion.ptt)).is_ok() {
+                                    active.ptt_for = Some(config.companion.ptt);
+                                }
                                 publish(
                                     &shared,
                                     Status {
@@ -347,6 +398,9 @@ fn supervise(shared: Arc<Shared>) {
                         }
                         protocol::Inbound::Press { button, long } => {
                             if !active.negotiated {
+                                continue;
+                            }
+                            if config.companion.ptt && button == protocol::Button::Ok && !long {
                                 continue;
                             }
                             let verb = map::verb_for(&config.companion.buttons, button, long);
@@ -394,6 +448,24 @@ fn supervise(shared: Arc<Shared>) {
                                 );
                             }
                         }
+                        protocol::Inbound::Ptt { pressed } => {
+                            if !active.negotiated || !config.companion.ptt {
+                                continue;
+                            }
+                            let ack = shared.app.try_state::<AppState>().and_then(|state| {
+                                state.send(if pressed {
+                                    crate::controller::Action::Start
+                                } else {
+                                    crate::controller::Action::Stop
+                                }).ok()
+                            });
+                            if ack.is_some() {
+                                let _ = active.link.write_line(&protocol::ack(
+                                    "dictate_toggle", if pressed { "ON" } else { "OFF" },
+                                ));
+                                active.phase = String::new();
+                            }
+                        }
                         // A heartbeat is presence, not a request: answering it would make
                         // both ends reply to each other's replies forever.
                         protocol::Inbound::Ping { token } => {
@@ -414,6 +486,7 @@ fn supervise(shared: Arc<Shared>) {
                             active.battery = Some(percent);
                             publish(&shared, session_status(&config, active, true));
                         }
+                        protocol::Inbound::PttMode { .. } => {}
                         protocol::Inbound::Unknown => {}
                     }
                 }
@@ -468,17 +541,51 @@ fn supervise(shared: Arc<Shared>) {
             continue;
         }
 
-        // Mirror Murmur's state to the device, only on change.
+        let phase = shared
+            .app
+            .try_state::<AppState>()
+            .map(|state| state::phase(&state).line().to_string())
+            .unwrap_or_default();
+        // A new turn clears the device's live buffer, so announce it before the first T.
+        if active.negotiated && phase == protocol::Phase::Listen.line() && phase != active.phase {
+            if active.link.write_line(&phase).is_ok() {
+                active.phase = phase.clone();
+            }
+        }
+
+        // Live text and suggestions. Text is coalesced and rate-limited so a fast partial
+        // cannot flood a BLE link; a suggestion goes out once, immediately.
         if active.negotiated {
-            let phase = shared
-                .app
-                .try_state::<AppState>()
-                .map(|state| state::phase(&state).line().to_string())
-                .unwrap_or_default();
-            if !phase.is_empty() && phase != active.phase {
-                if active.link.write_line(&phase).is_ok() {
-                    active.phase = phase;
+            let next = shared
+                .outbound
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            if let Some(outbound) = next {
+                let (line, is_text) = match &outbound {
+                    Outbound::Text(body) => (protocol::text(body), true),
+                    Outbound::Suggestion(body) => (protocol::suggestion(body), false),
+                };
+                if is_text && !text_due(active.last_text, Instant::now()) {
+                    // Too soon: keep the newest text and try again on the next tick.
+                    if let Ok(mut slot) = shared.outbound.lock() {
+                        if slot.is_none() {
+                            *slot = Some(outbound);
+                        }
+                    }
+                } else {
+                    if active.link.write_line(&line).is_ok() && is_text {
+                        active.last_text = Instant::now();
+                    }
                 }
+            }
+        }
+
+        // At the end of a turn, send any pending T before the state change so the
+        // device can remember the newest text in its RAM history.
+        if active.negotiated && !phase.is_empty() && phase != active.phase {
+            if active.link.write_line(&phase).is_ok() {
+                active.phase = phase;
             }
         }
 
@@ -518,6 +625,15 @@ pub fn cfg_line(buttons: &crate::config::CompanionButtons) -> String {
 mod tests {
     use super::*;
     use crate::config::CompanionButtons;
+
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn text_is_due_only_after_the_coalescing_window() {
+        let start = Instant::now();
+        assert!(!text_due(start, start + Duration::from_millis(249)));
+        assert!(text_due(start, start + TEXT_INTERVAL));
+    }
 
     #[test]
     fn cfg_line_covers_every_default_button() {

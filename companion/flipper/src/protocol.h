@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 /** Wire protocol revision. Mirrored in src-tauri/src/companion/protocol.rs. */
-#define MURMUR_PROTOCOL_VERSION 2
+#define MURMUR_PROTOCOL_VERSION 3
 /** Longest line, including the terminator. */
 #define MURMUR_MAX_LINE 220
 /** Longest live-text field carried in one T or G line. */
@@ -56,6 +56,7 @@ typedef enum {
     MurmurMessageState,
     MurmurMessageAck,
     MurmurMessageConfig,
+    MurmurMessagePtt,
     MurmurMessagePing,
     MurmurMessageText,
     MurmurMessageSuggestion,
@@ -68,6 +69,7 @@ typedef struct {
     char app[24];
     MurmurPhase phase;
     MurmurMap map;
+    bool ptt;
     /** Payload of a T (live text) or G (suggestion) line. */
     char text[MURMUR_TEXT_MAX];
     /** Latency in ms and host-side RSSI from an L line. */

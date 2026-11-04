@@ -178,6 +178,7 @@ impl Runtime {
 
     pub fn set_partial(&self, state: &AppState, text: &str) {
         *lock(&self.partial) = text.to_owned();
+        state.companion.publish_text(text);
         let _ = state.app.emit("partial", json!({ "text": text }));
         self.publish(state);
     }
@@ -349,9 +350,10 @@ impl Runtime {
     }
 
     pub fn on_worker(&self, state: &AppState, event: WorkerEvent) {
-        let visible = {
+        let (visible, suggestion) = {
             let mut session = lock(&self.session);
-            match event {
+            let finished = matches!(event, WorkerEvent::Finished { .. });
+            let visible = match event {
                 WorkerEvent::Loading { request_id } => session.progress(request_id, Phase::Loading),
                 WorkerEvent::Rewriting { request_id } => {
                     session.progress(request_id, Phase::Rewriting)
@@ -373,8 +375,17 @@ impl Runtime {
                     )
                 }
                 WorkerEvent::Unloaded => false,
-            }
+            };
+            let suggestion = if finished && visible && session.phase() == Phase::Ready {
+                session.suggestion.as_ref().map(|s| s.proposed.clone())
+            } else {
+                None
+            };
+            (visible, suggestion)
         };
+        if let Some(text) = suggestion {
+            state.companion.publish_suggestion(&text);
+        }
         if visible {
             self.changed(state);
         }
