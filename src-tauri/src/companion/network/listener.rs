@@ -1,4 +1,4 @@
-use super::{lan, tls, wire, Settings, Shared};
+use super::{audio, lan, tls, wire, MicCommand, Session, Settings, Shared};
 use crate::{
     app::AppState,
     companion::{map, protocol},
@@ -10,7 +10,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tauri::Manager;
 use tokio::{
     net::TcpListener,
-    sync::{watch, Semaphore},
+    sync::{mpsc, watch, Semaphore},
     task::JoinSet,
 };
 use tokio_tungstenite::tungstenite::{
@@ -93,26 +93,29 @@ async fn session(
         return Ok(());
     };
     let (stop, mut stopped) = watch::channel(false);
-    if let Some(previous) = shared
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(id.clone(), stop.clone())
-    {
-        let _ = previous.send(true);
+    let (mic, mut mic_commands) = mpsc::channel(4);
+    if let Some(previous) = shared.sessions.lock().unwrap().insert(
+        id.clone(),
+        Session {
+            stop: stop.clone(),
+            mic,
+        },
+    ) {
+        let _ = previous.stop.send(true);
         tracing::info!("Companion device session replaced");
     }
     if !auth.lock().unwrap().has_device(&id) {
         let mut sessions = shared.sessions.lock().unwrap();
         if sessions
             .get(&id)
-            .is_some_and(|active| active.same_channel(&stop))
+            .is_some_and(|active| active.stop.same_channel(&stop))
         {
             sessions.remove(&id);
         }
         return Ok(());
     }
     let mut last_phase = String::new();
+    let mut gate = audio::Gate::default();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let result: Result<()> = async { loop {
         tokio::select! {
@@ -120,6 +123,22 @@ async fn session(
             _ = stopped.changed() => {
                 let _ = ws.close(Some(CloseFrame { code: CloseCode::Policy, reason: "session ended".into() })).await;
                 break Ok(());
+            }
+            Some(command) = mic_commands.recv() => {
+                match command {
+                    MicCommand::Start(next) => {
+                        gate.start(next);
+                        tokio::time::timeout(Duration::from_secs(5), send_line(&mut ws, &format!("MIC START {next}"))).await??;
+                        let mut remote = shared.remote.lock().unwrap();
+                        if remote.selected.as_deref() == Some(id.as_str()) && remote.stream == Some(next) {
+                            remote.started_at = Some(std::time::Instant::now());
+                        }
+                    }
+                    MicCommand::Stop(old) => {
+                        gate.stop();
+                        tokio::time::timeout(Duration::from_secs(5), send_line(&mut ws, &format!("MIC STOP {old}"))).await??;
+                    }
+                }
             }
             _ = tick.tick() => {
                 if let Some(state) = shared.app.try_state::<AppState>() {
@@ -141,7 +160,29 @@ async fn session(
                             }
                         }
                     }
-                    Some(Ok(Message::Binary(_))) => { ws.close(Some(wire::binary_close())).await?; break Ok(()); }
+                    Some(Ok(Message::Binary(bytes))) => {
+                        let accepted = (|| {
+                            if gate.active().is_none() { return Err(audio::Error::OutsideTurn); }
+                            let frame = audio::Frame::parse(&bytes)?;
+                            gate.accept(&frame)?;
+                            match shared.remote.try_lock() {
+                                Ok(mut remote) => {
+                                    if remote.selected.as_deref() != Some(id.as_str()) || remote.stream != Some(frame.stream_id) {
+                                        return Err(audio::Error::OutsideTurn);
+                                    }
+                                    remote.ring.push(frame);
+                                    remote.received += 1;
+                                }
+                                Err(_) => { shared.congested_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                            }
+                            Ok::<(), audio::Error>(())
+                        })();
+                        if let Err(error) = accepted {
+                            let reason = error.to_string();
+                            ws.close(Some(CloseFrame { code: CloseCode::Protocol, reason: reason.into() })).await?;
+                            break Ok(());
+                        }
+                    }
                     Some(Ok(Message::Text(_))) => { ws.close(Some(CloseFrame { code: CloseCode::Size, reason: "line limit exceeded".into() })).await?; break Ok(()); }
                     Some(Ok(Message::Close(_))) | None => break Ok(()),
                     Some(Ok(_)) => {},
@@ -153,7 +194,7 @@ async fn session(
     let mut sessions = shared.sessions.lock().unwrap();
     if sessions
         .get(&id)
-        .is_some_and(|active| active.same_channel(&stop))
+        .is_some_and(|active| active.stop.same_channel(&stop))
     {
         sessions.remove(&id);
     }

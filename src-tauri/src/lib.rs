@@ -1,4 +1,6 @@
 //! App-independent companion network components, also used by the CLI harness tests.
+#[path = "companion/network/audio.rs"]
+pub mod audio;
 #[path = "companion/network/auth.rs"]
 pub mod auth;
 #[path = "companion/network/handshake.rs"]

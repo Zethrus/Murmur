@@ -1,6 +1,7 @@
 use crate::{
     app::AppState,
-    audio::{AudioCapture, AudioEvent},
+    audio::{AudioCapture, AudioEvent, RemoteAudioSource},
+    companion::network::{Policy, Source},
     config::Config,
     hotkey, inject, overlay, platform, postproc,
     sound::Cue,
@@ -83,6 +84,9 @@ fn warm_engine(app: &AppHandle, config: &Config) {
 }
 struct Controller {
     audio: Option<AudioCapture>,
+    remote_source: Option<RemoteAudioSource>,
+    source: Source,
+    remote_turn: bool,
     injector: inject::Injector,
     active: bool,
     force_code: bool,
@@ -101,6 +105,9 @@ impl Controller {
     fn new(config: Config) -> Self {
         Self {
             audio: None,
+            remote_source: None,
+            source: Source::Local,
+            remote_turn: false,
             injector: inject::Injector::default(),
             active: false,
             force_code: false,
@@ -133,6 +140,18 @@ impl Controller {
         })?);
         Ok(())
     }
+    fn drain_remote(&self, state: &AppState) -> Result<()> {
+        if let Some(remote) = &self.remote_source {
+            let mut result = Ok(());
+            state.companion_network.drain(|frame| {
+                if result.is_ok() {
+                    result = remote.push(&frame.samples);
+                }
+            });
+            result?;
+        }
+        Ok(())
+    }
     fn start(&mut self, state: &AppState, code: bool) -> Result<()> {
         if self.active || state.status()?.state == "transcribing" {
             return Ok(());
@@ -145,7 +164,50 @@ impl Controller {
         if !state.status()?.model_available {
             anyhow::bail!("Choose a speech model to start dictating");
         }
-        self.prepare_audio(state)?;
+        let policy = match self.config.companion.source.as_str() {
+            "local" => Policy::Local,
+            "phone" => Policy::Phone,
+            _ => Policy::Auto,
+        };
+        let source = state
+            .companion_network
+            .begin_turn(policy, self.epoch.wrapping_add(1) as u32)?;
+        if source == Source::Phone {
+            let tx = state.sender();
+            let (capture, remote) = AudioCapture::new_remote(&self.config.audio, move |event| {
+                let action = match event {
+                    AudioEvent::Level(value) => Action::Level(value),
+                    AudioEvent::Endpoint => Action::Endpoint,
+                    AudioEvent::MaxDuration => Action::MaxDuration,
+                    AudioEvent::Error(error) => Action::Fault(error),
+                };
+                let _ = tx.send(action);
+            });
+            self.audio = Some(capture);
+            self.remote_source = Some(remote);
+            self.remote_turn = true;
+        } else {
+            self.remote_source = None;
+            if self.source != Source::Local {
+                self.audio = None;
+            }
+            self.prepare_audio(state)?;
+            self.remote_turn = false;
+        }
+        self.source = source;
+        tracing::info!(
+            source = if source == Source::Phone {
+                "phone"
+            } else {
+                "local"
+            },
+            "Dictation source selected"
+        );
+        state.audio_source(Some(if source == Source::Phone {
+            "phone"
+        } else {
+            "local"
+        }));
         hotkey::escape(&state.app, true)?;
         self.audio
             .as_mut()
@@ -166,6 +228,8 @@ impl Controller {
         Ok(())
     }
     fn idle(&mut self, state: &AppState) -> Result<()> {
+        state.companion_network.end_turn();
+        state.audio_source(None);
         self.active = false;
         self.epoch += 1;
         self.stopped_preview_epoch = None;
@@ -190,6 +254,8 @@ impl Controller {
         if !self.active {
             return Ok(());
         }
+        self.drain_remote(state)?;
+        state.companion_network.end_turn();
         hotkey::escape(&state.app, false)?;
         let duration = self.started.elapsed().as_millis() as u64;
         let pcm = self
@@ -267,6 +333,7 @@ impl Controller {
         }
         state.refresh_engine()?;
         state.transition("done")?;
+        state.audio_source(None);
         self.active = false;
         self.stopped_preview_epoch = self.preview.as_ref().map(|_| self.epoch);
         self.epoch += 1;
@@ -280,6 +347,8 @@ impl Controller {
         Ok(())
     }
     fn fail(&mut self, state: &AppState, error: &str) {
+        state.companion_network.end_turn();
+        state.audio_source(None);
         if let Some(audio) = &mut self.audio {
             audio.cancel();
         }
@@ -294,6 +363,36 @@ impl Controller {
     }
     fn tick(&mut self, state: &AppState) -> Result<()> {
         let now = Instant::now();
+        if self.active && self.remote_turn {
+            self.drain_remote(state)?;
+            let policy = if self.config.companion.source == "phone" {
+                Policy::Phone
+            } else {
+                Policy::Auto
+            };
+            let fallback = if !state.companion_network.phone_connected() {
+                if policy == Policy::Phone {
+                    anyhow::bail!("Phone microphone disconnected during dictation");
+                }
+                true
+            } else if let Some(elapsed) = state.companion_network.silence_elapsed() {
+                policy.silence_after(elapsed, state.companion_network.received())?
+            } else {
+                false
+            };
+            if fallback {
+                state.companion_network.end_turn();
+                self.remote_source = None;
+                self.audio = None;
+                self.prepare_audio(state)?;
+                self.audio.as_mut().unwrap().start()?;
+                self.source = Source::Local;
+                self.remote_turn = false;
+                self.started = Instant::now();
+                tracing::info!(source = "local", "Dictation source selected");
+                state.audio_source(Some("local"));
+            }
+        }
         if self.reset_at.is_some_and(|at| now >= at) {
             self.idle(state)?;
             if state.config()?.overlay.idle_hide && !state.overlay_held() {
@@ -475,8 +574,10 @@ pub fn run(app: AppHandle, receiver: mpsc::Receiver<Action>) {
         Err(error) => state.error(&error.to_string()),
         _ => {}
     }
-    if let Err(error) = controller.prepare_audio(&state) {
-        state.error(&error.to_string());
+    if controller.config.companion.source != "phone" {
+        if let Err(error) = controller.prepare_audio(&state) {
+            state.error(&error.to_string());
+        }
     }
     loop {
         match receiver.recv_timeout(Duration::from_millis(50)) {

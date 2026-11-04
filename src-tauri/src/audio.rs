@@ -114,7 +114,11 @@ impl Default for Buffer {
 }
 impl Buffer {
     fn push(&mut self, samples: &[f32], rate: u32, cfg: &config::Audio, callback: &Callback) {
-        for sample in self.resampler.feed(samples, rate) {
+        let resampled = self.resampler.feed(samples, rate);
+        self.push_16k(&resampled, cfg, callback);
+    }
+    fn push_16k(&mut self, samples: &[f32], cfg: &config::Audio, callback: &Callback) {
+        for &sample in samples {
             if self.ring.len() == CAPACITY {
                 self.ring.pop_front();
             }
@@ -173,7 +177,47 @@ pub struct AudioCapture {
     _stream: Option<cpal::Stream>,
     qa: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
 }
+/// Feeds phone PCM into the same bounded capture buffer used by local input.
+pub struct RemoteAudioSource {
+    buffer: Arc<Mutex<Buffer>>,
+    cfg: config::Audio,
+    callback: Callback,
+}
+impl RemoteAudioSource {
+    pub fn push(&self, samples: &[i16; 320]) -> Result<()> {
+        let mut decoded = [0.0; 320];
+        for (out, &sample) in decoded.iter_mut().zip(samples) {
+            *out = sample as f32 / 32768.0;
+        }
+        self.buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?
+            .push_16k(&decoded, &self.cfg, &self.callback);
+        Ok(())
+    }
+}
 impl AudioCapture {
+    pub fn new_remote(
+        cfg: &config::Audio,
+        callback: impl Fn(AudioEvent) + Send + Sync + 'static,
+    ) -> (Self, RemoteAudioSource) {
+        let buffer = Arc::new(Mutex::new(Buffer::default()));
+        let remote = RemoteAudioSource {
+            buffer: buffer.clone(),
+            cfg: cfg.clone(),
+            callback: Arc::new(callback),
+        };
+        (
+            Self {
+                buffer,
+                healthy: Arc::new(AtomicBool::new(true)),
+                cfg: cfg.clone(),
+                _stream: None,
+                qa: None,
+            },
+            remote,
+        )
+    }
     pub fn new(
         cfg: &config::Audio,
         callback: impl Fn(AudioEvent) + Send + Sync + 'static,

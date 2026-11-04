@@ -10,6 +10,7 @@ export const startOverlayDrag = (): Promise<void> => getCurrentWindow().startDra
 export type DictationState = "idle" | "listening" | "transcribing" | "done" | "error";
 export interface Status {
   state: DictationState; model: string; device: string; compute: string;
+  source?: "local" | "phone" | null;
   sidecar_alive: boolean; model_available: boolean; error: string | null;
 }
 export type OverlayPosition = "top-center" | "bottom-center" | "custom";
@@ -31,7 +32,7 @@ export interface CompanionConfig {
   buttons: CompanionButtons;
 }
 export interface CompanionNetworkStatus {
-  enabled: boolean; fingerprint: string | null; error: string | null; rejected_peers: number;
+  enabled: boolean; fingerprint: string | null; error: string | null; rejected_peers: number; dropped_audio_frames: number;
   devices: { id: string; name: string; created_at: number; last_seen: number | null }[];
 }
 export interface CompanionPairing { code: string; expires_at: number }
@@ -109,7 +110,7 @@ export interface RewriteReply { status: RewriteStatus; message?: string | null }
 export interface AcceptReply { outcome: "copied" | "stale" | "failed"; message?: string | null }
 
 export interface Events {
-  state: { state: DictationState }; level: { rms: number }; partial: { text: string };
+  state: { state: DictationState; source?: "local" | "phone" | null }; level: { rms: number }; partial: { text: string };
   latency: { latency_ms: number; text?: string }; error: { message: string; persistent?: boolean };
   download: Download; config: Config;
   "enhance-status": EnhanceStatus; "enhance-download": EnhanceDownload; "overlay-update": OverlaySnapshot;

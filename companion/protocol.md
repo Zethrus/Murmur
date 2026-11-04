@@ -168,9 +168,21 @@ the configured button map. A successful action returns `ACK <verb> <result>`.
 The host sends `STATE listening|transcribing|enhancing|suggestion|idle` when that phase
 changes. A `STATE` frame never contains transcript or suggestion text.
 
-Binary WebSocket frames are reserved for the remote microphone in increment 2. This
-increment closes a session that sends one with an explicit `unsupported audio binary
-frame` reason. It neither accepts nor streams audio.
+## Phone audio (host increment 2)
+
+For any dictation turn that selects a connected phone as its source, the host sends
+`MIC START <stream-id>` and, when the turn ends, `MIC STOP <stream-id>`. The decimal
+stream ID is a 32-bit unsigned integer. The host sends these lines for turns started
+by the Flipper, phone button, or local UI alike. They are sent only to the selected
+authenticated `CAP mic` phone. Binary frames outside the active start/stop interval,
+or with the wrong stream ID or sequence, close the session with a protocol error.
+
+Each binary WebSocket message holds exactly one 20 ms frame: 320 PCM16 mono samples
+at 16 kHz. The 17-byte little-endian header contains `MRMA` (4 bytes), version `1`
+(u8), flags (u8, currently 0), stream ID (u32), sequence (u32, starting at 0),
+sample rate `16000` (u16), and channels `1` (u8). The payload is exactly 640 bytes.
+Payloads over 1500 bytes are rejected before decoding. The host queues at most 50
+frames and drops the oldest on overflow; it never writes audio to disk.
 
 ## Change policy
 
