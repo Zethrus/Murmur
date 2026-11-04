@@ -23,6 +23,10 @@ class Server:
         if method == "status":
             self.speech.configure(params)
             return self.speech.status()
+        if method == "warm":
+            self.speech.configure(params)
+            self.speech._load()
+            return self.speech.status()
         if method in ("transcribe", "partial"):
             return self.speech.transcribe(params)
         if method == "models.list":

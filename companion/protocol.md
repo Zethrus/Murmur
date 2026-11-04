@@ -43,7 +43,8 @@ feedback, under rules that keep the original promise about persistence:
 - **Memory only.** Neither end writes text to a log, a file or a database. The host builds
   `T`/`G` through `protocol::text`/`protocol::suggestion`, which never trace; the device
   holds live text in RAM and keeps only the first 40 characters of the last three finished
-  dictations in a RAM ring. The live view clears when a turn ends or a new `S LISTEN` arrives.
+  dictations in a RAM ring. The live view retains the final transcript through `S IDLE` and
+  `S READY`, and clears when a new turn enters `S LISTEN`.
 - **Flattened.** Control characters become spaces, runs of spaces collapse, trailing space
   is trimmed, and the payload is truncated to fit one line. A transcript cannot smuggle a
   newline into the framing.

@@ -68,6 +68,23 @@ enum Outbound {
 struct OutboundSlot {
     queued: Option<Outbound>,
     final_text: Option<String>,
+    final_published: bool,
+}
+
+impl OutboundSlot {
+    fn queue_partial(&mut self, text: &str) {
+        if !self.final_published {
+            self.queued = Some(Outbound::Text(text.to_string()));
+        }
+    }
+
+    fn queue_final(&mut self, text: &str) {
+        self.final_published = true;
+        self.final_text = Some(text.to_string());
+        if matches!(self.queued, Some(Outbound::Text(_))) {
+            self.queued = None;
+        }
+    }
 }
 
 struct Shared {
@@ -127,7 +144,7 @@ impl Companion {
             return;
         }
         if let Ok(mut slot) = self.shared.outbound.lock() {
-            slot.queued = Some(Outbound::Text(text.to_string()));
+            slot.queue_partial(text);
         }
     }
 
@@ -138,10 +155,7 @@ impl Companion {
             return;
         }
         if let Ok(mut slot) = self.shared.outbound.lock() {
-            slot.final_text = Some(text.to_string());
-            if matches!(slot.queued, Some(Outbound::Text(_))) {
-                slot.queued = None;
-            }
+            slot.queue_final(text);
         }
     }
 
@@ -730,6 +744,19 @@ mod tests {
         let start = Instant::now();
         assert!(!text_due(start, start + Duration::from_millis(249)));
         assert!(text_due(start, start + TEXT_INTERVAL));
+    }
+
+    #[test]
+    fn late_preview_cannot_replace_final_text() {
+        let mut slot = OutboundSlot::default();
+        slot.queue_partial("preview");
+        slot.queue_final("finished");
+        slot.queue_partial("late preview");
+        assert!(slot.queued.is_none());
+        assert!(matches!(slot.final_text.as_deref(), Some("finished")));
+        let mut next_turn = OutboundSlot::default();
+        next_turn.queue_partial("new preview");
+        assert!(matches!(next_turn.queued, Some(Outbound::Text(_))));
     }
 
     #[test]
