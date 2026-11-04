@@ -41,6 +41,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     app.manage(runtime);
     let state = app.state::<app::AppState>();
     state.companion.start();
+    state.companion_network.start();
     // Recoverable desktop limitations/conflicts must not prevent opening Settings.
     for result in [
         hotkey::rebind(&handle, &state.config()?, &state.config()?),
@@ -174,6 +175,9 @@ fn main() {
             ipc::companion_status,
             ipc::companion_resync,
             ipc::companion_ports,
+            ipc::companion_network_status,
+            ipc::companion_pairing_code,
+            ipc::companion_revoke_device,
             ipc::list_models,
             ipc::install_model,
             ipc::remove_model,

@@ -5,6 +5,7 @@
 
 pub mod link;
 pub mod map;
+pub mod network;
 pub mod protocol;
 pub mod state;
 

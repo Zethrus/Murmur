@@ -107,6 +107,8 @@ needed.** `protocol.md` gains a section documenting the network extensions and t
 
 1. **Host network layer, no audio** — config block, TLS listener with the LAN guard, pairing and
    tokens, the four verbs, state pushes. Verified with a CLI client before any Android code.
+   mDNS discovery is deliberately deferred to increment 3 so the first increment has no new
+   discovery surface; the manual `host:port` path exists from the start.
 2. **Audio ingest and coordination** — framing, backpressure, `RemoteAudioSource`,
    `MIC START/STOP`, source policy. Verified by pressing OK on the Flipper with a CLI client
    streaming a WAV as the phone's stand-in.

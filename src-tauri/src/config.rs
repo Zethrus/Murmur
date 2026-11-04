@@ -105,12 +105,20 @@ section!(CompanionButtons {
     up_long: String = "none".into(),
     down_long: String = "none".into()
 });
+section!(CompanionNetwork {
+    enabled: bool = false,
+    bind: String = "127.0.0.1".into(),
+    port: u16 = 8787,
+    mdns: bool = false
+});
 section!(Companion {
     enabled: bool = false,
     ptt: bool = false,
     transport: String = "auto".into(),
     usb_port: String = "".into(),
     ble_address: String = "".into(),
+    source: String = "auto".into(),
+    network: CompanionNetwork = CompanionNetwork::default(),
     buttons: CompanionButtons = CompanionButtons::default()
 });
 impl CompanionButtons {
@@ -223,10 +231,26 @@ impl Config {
                 self.companion.transport.as_str(),
                 &["auto", "usb", "ble"][..],
             ),
+            (
+                self.companion.source.as_str(),
+                &["auto", "local", "phone"][..],
+            ),
         ] {
             if !choices.contains(&value) {
                 bail!("Unsupported configuration value: {value}");
             }
+        }
+        if self
+            .companion
+            .network
+            .bind
+            .parse::<std::net::IpAddr>()
+            .is_err()
+        {
+            bail!("Companion network bind must be an IP address");
+        }
+        if self.companion.network.port == 0 {
+            bail!("Companion network port must be nonzero");
         }
         for (key, value) in self.companion.buttons.pairs() {
             if crate::companion::map::Verb::parse(value).is_none() {
@@ -401,10 +425,13 @@ mod tests {
         }
         fs::remove_file(&path)?;
         assert_eq!(Config::load(&path)?.enhance.timeout_ms, 60000);
-        let patched = Config::default().patched(serde_json::json!({"enhance":{"timeout_ms":15000}}))?;
+        let patched =
+            Config::default().patched(serde_json::json!({"enhance":{"timeout_ms":15000}}))?;
         assert_eq!(patched.enhance.timeout_ms, 15000);
         for timeout in [1000, 60000, 120000] {
-            assert!(Config::default().patched(serde_json::json!({"enhance":{"timeout_ms":timeout}})).is_ok());
+            assert!(Config::default()
+                .patched(serde_json::json!({"enhance":{"timeout_ms":timeout}}))
+                .is_ok());
         }
         Ok(())
     }
@@ -445,5 +472,22 @@ mod tests {
         c.save(&path)?;
         fs::remove_file(path)?;
         Ok(())
+    }
+    #[test]
+    fn companion_network_defaults_and_validation() {
+        let config = Config::default();
+        assert!(!config.companion.network.enabled);
+        assert_eq!(config.companion.network.bind, "127.0.0.1");
+        assert_eq!(config.companion.network.port, 8787);
+        assert!(!config.companion.network.mdns);
+        assert_eq!(config.companion.source, "auto");
+        for patch in [
+            serde_json::json!({"companion":{"source":"remote"}}),
+            serde_json::json!({"companion":{"network":{"bind":"example.com"}}}),
+            serde_json::json!({"companion":{"network":{"port":0}}}),
+        ] {
+            assert!(config.patched(patch).is_err());
+        }
+        assert!(config.patched(serde_json::json!({"companion":{"source":"phone","network":{"enabled":true,"bind":"::1","port":9999}}})).is_ok());
     }
 }

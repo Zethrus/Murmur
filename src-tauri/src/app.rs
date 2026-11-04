@@ -75,6 +75,7 @@ pub struct AppState {
     pub engine: Arc<Engine>,
     pub enhance: enhance::runtime::Runtime,
     pub companion: crate::companion::Companion,
+    pub companion_network: crate::companion::network::Network,
     config: Mutex<Config>,
     transaction: Mutex<()>,
     status: Mutex<Status>,
@@ -132,12 +133,14 @@ impl AppState {
             model_available: false,
             error: None,
         };
+        let companion_network = crate::companion::network::Network::new(app.clone(), &paths.data)?;
         Ok(Self {
             app: app.clone(),
             paths,
             engine,
             enhance,
             companion: crate::companion::Companion::new(app),
+            companion_network,
             config: Mutex::new(config),
             transaction: Mutex::new(()),
             status: Mutex::new(status),
@@ -302,6 +305,7 @@ impl AppState {
         *lock(&self.config)? = new.clone();
         self.enhance.config_changed(self, &old, &new);
         self.companion.config_changed();
+        self.companion_network.config_changed();
         self.app
             .emit("config", &new)
             .context("Emit config update")?;
@@ -320,6 +324,7 @@ impl AppState {
         *lock(&self.config)? = new.clone();
         self.enhance.config_changed(self, &old, &new);
         self.companion.config_changed();
+        self.companion_network.config_changed();
         self.app.emit("config", &new)?;
         self.send(Action::Reconfigure)?;
         self.refresh_tray()
@@ -392,6 +397,7 @@ impl AppState {
         Ok(())
     }
     pub fn shutdown(&self) {
+        self.companion_network.shutdown();
         if let Ok(mut watcher) = self.watcher.lock() {
             watcher.take();
         }
