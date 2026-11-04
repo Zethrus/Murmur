@@ -9,6 +9,7 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt;
+use tracing_subscriber::{filter::filter_fn, prelude::*};
 #[derive(Clone)]
 pub struct Paths {
     pub config: PathBuf,
@@ -286,14 +287,73 @@ pub fn init_logging(data: &Path) -> Result<()> {
         .context("Open diagnostic log")?;
     let size = file.metadata().context("Read log size")?.len();
     let writer = LogWriter(Arc::new(Mutex::new(Rolling { path, file, size })));
-    tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("MURMUR_LOG")
-                .unwrap_or_else(|_| "info".into()),
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .with_filter(
+                    tracing_subscriber::EnvFilter::try_from_env("MURMUR_LOG")
+                        .unwrap_or_else(|_| "info".into()),
+                )
+                .with_filter(filter_fn(payload_safe_for_metadata)),
         )
-        .with_writer(move || writer.clone())
         .try_init()
         .map_err(|e| anyhow::anyhow!("Initialize logs: {e}"))?;
     Ok(())
+}
+fn payload_safe_for_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    let target = metadata.target();
+    if target == "tungstenite"
+        || target.starts_with("tungstenite::")
+        || target == "tokio_tungstenite"
+        || target.starts_with("tokio_tungstenite::")
+    {
+        *metadata.level() <= tracing::Level::WARN
+    } else {
+        true
+    }
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn auth_token_is_not_formatted_by_websocket_targets() {
+        let output = Capture(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer({
+                    let output = output.clone();
+                    move || output.clone()
+                })
+                .with_filter(tracing_subscriber::EnvFilter::new(
+                    "trace,tungstenite::protocol=trace,tokio_tungstenite::protocol=trace",
+                ))
+                .with_filter(filter_fn(payload_safe_for_metadata)),
+        );
+        let token = "AUTH OK secret-token-probe";
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: "tungstenite::protocol", "{token}");
+            tracing::trace!(target: "tokio_tungstenite::protocol", "{token}");
+            tracing::info!(target: "murmur", "application log probe");
+        });
+        let formatted = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert!(formatted.contains("application log probe"));
+        assert!(!formatted.contains(token));
+    }
 }

@@ -149,6 +149,29 @@ closes the transport and retries with backoff (1 s, doubling to 5 s).
 - Both may run at once. A reply is queued for the transport on which its request arrived;
   unsolicited lines use the active transport.
 
+## Phone network extension (host increment 1)
+
+The opt-in phone listener uses WebSocket **over TLS 1.3** (`wss://`) on a local address.
+Each WebSocket text frame contains one protocol line without a newline byte; its text plus
+the implied newline must fit the same 220-byte limit. This extension keeps protocol 4.
+The Flipper link and its messages are unchanged.
+
+The host first sends `HELLO 4 <app-version> host`. The phone replies
+`HELLO 4 <app-version> phone CAP mic`, then `AUTH <six-digit-code>` for pairing or
+`AUTH <token>` on reconnect. Pairing returns `AUTH OK <token>`; reconnect returns
+`AUTH OK`. A failed attempt returns `AUTH DENY <reason>`. Codes expire after five
+minutes and can be used once. The host stores only a hash of each token.
+
+After authentication, `B dictate_toggle`, `S enhance`, and `A accept|dismiss|cancel`
+invoke the existing host companion verbs. Flipper-style `B <button>` messages also use
+the configured button map. A successful action returns `ACK <verb> <result>`.
+The host sends `STATE listening|transcribing|enhancing|suggestion|idle` when that phase
+changes. A `STATE` frame never contains transcript or suggestion text.
+
+Binary WebSocket frames are reserved for the remote microphone in increment 2. This
+increment closes a session that sends one with an explicit `unsupported audio binary
+frame` reason. It neither accepts nor streams audio.
+
 ## Change policy
 
 Bump `PROTOCOL_VERSION` for any change that an older peer would misinterpret, including

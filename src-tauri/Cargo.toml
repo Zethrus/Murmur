@@ -41,8 +41,14 @@ regex = "1"
 hound = "3.5"
 # Enhance: explicit model download (HTTPS only, rustls) and streaming integrity checks.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
-tokio = { version = "1", features = ["rt", "time", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "net", "io-util", "sync"] }
 sha2 = "0.10"
+tokio-tungstenite = "0.26"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rcgen = "0.13"
+subtle = "2"
+getrandom = "0.3"
 # Enhance: exact pins; wrapper defaults (openmp, GPU backends) disabled. The sys crate's own
 # "common" default is pulled in by the wrapper; no GPU backend feature is enabled anywhere.
 llama-cpp-2 = { version = "=0.1.160", default-features = false, optional = true }

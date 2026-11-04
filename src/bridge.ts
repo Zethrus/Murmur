@@ -26,8 +26,15 @@ export interface CompanionButtons {
 }
 export interface CompanionConfig {
   enabled: boolean; ptt: boolean; transport: CompanionTransport; usb_port: string; ble_address: string;
+  source: "auto" | "local" | "phone";
+  network: { enabled: boolean; bind: string; port: number; mdns: boolean };
   buttons: CompanionButtons;
 }
+export interface CompanionNetworkStatus {
+  enabled: boolean; fingerprint: string | null; error: string | null; rejected_peers: number;
+  devices: { id: string; name: string; created_at: number; last_seen: number | null }[];
+}
+export interface CompanionPairing { code: string; expires_at: number }
 /** Live link state, mirroring `companion::Status` in Rust. */
 export interface CompanionStatus {
   enabled: boolean; connected: boolean; transport: string; port: string;
@@ -133,6 +140,9 @@ interface Commands {
   // Flipper companion (see companion/protocol.md).
   companion_status: [undefined, CompanionStatus]; companion_resync: [undefined, void];
   companion_ports: [undefined, string[]];
+  companion_network_status: [undefined, CompanionNetworkStatus];
+  companion_pairing_code: [undefined, CompanionPairing];
+  companion_revoke_device: [{id: string}, boolean];
 }
 export function call<K extends keyof Commands>(command: K,
   ...args: Commands[K][0] extends undefined ? [] : [Commands[K][0]]): Promise<Commands[K][1]> {

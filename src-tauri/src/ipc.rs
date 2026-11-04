@@ -50,6 +50,25 @@ pub fn companion_ports() -> Reply<Vec<String>> {
     Ok(crate::companion::link::usb::candidates())
 }
 #[tauri::command]
+pub fn companion_network_status(
+    state: State<'_, AppState>,
+) -> Reply<crate::companion::network::Status> {
+    Ok(state.companion_network.status())
+}
+#[tauri::command]
+pub fn companion_pairing_code(
+    state: State<'_, AppState>,
+) -> Reply<crate::companion::network::auth::Pairing> {
+    if !state.config().map_err(error)?.companion.network.enabled {
+        return Err("Enable the phone listener first".into());
+    }
+    state.companion_network.pairing().map_err(error)
+}
+#[tauri::command]
+pub fn companion_revoke_device(state: State<'_, AppState>, id: String) -> Reply<bool> {
+    state.companion_network.revoke(&id).map_err(error)
+}
+#[tauri::command]
 pub async fn list_models(app: AppHandle) -> Reply<Value> {
     blocking(move || {
         app.state::<AppState>()
