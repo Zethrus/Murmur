@@ -1,0 +1,496 @@
+//! Flipper companion link: one supervisor thread, polled transports, no daemon.
+//!
+//! The thread owns the device and reconnects with backoff. Configuration is re-read
+//! whenever the settings change, so the button map and the transport are live.
+
+pub mod link;
+pub mod map;
+pub mod protocol;
+pub mod state;
+
+use crate::{app::AppState, config::Config};
+use serde::Serialize;
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+use tauri::{AppHandle, Emitter, Manager};
+
+/// Outbound heartbeat interval.
+const HEARTBEAT: Duration = Duration::from_secs(5);
+/// Silence after which the link is considered dead.
+const DEAD_AFTER: Duration = Duration::from_secs(15);
+/// A repeated press of the same verb inside this window is a bounce, not a second press.
+const DEBOUNCE: Duration = Duration::from_millis(250);
+/// Reconnect backoff ceiling.
+const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Snapshot for the Settings card. Serialized straight to the webview.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Status {
+    pub enabled: bool,
+    pub connected: bool,
+    pub transport: String,
+    pub port: String,
+    /// Peer identity, e.g. `flipper 0.2.2`.
+    pub device: String,
+    pub protocol: u8,
+    pub last_button: String,
+    pub error: Option<String>,
+}
+
+pub struct Companion {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    app: AppHandle,
+    status: Mutex<Status>,
+    /// Bumped when the configuration changes; the supervisor reloads and resends `CFG`.
+    revision: AtomicU64,
+    started: AtomicBool,
+    stop: AtomicBool,
+}
+
+impl Companion {
+    pub fn new(app: AppHandle) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                app,
+                status: Mutex::new(Status::default()),
+                revision: AtomicU64::new(1),
+                started: AtomicBool::new(false),
+                stop: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Start the supervisor once. Safe to call on every launch.
+    pub fn start(&self) {
+        if self.shared.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let shared = Arc::clone(&self.shared);
+        thread::Builder::new()
+            .name("murmur-companion".into())
+            .spawn(move || supervise(shared))
+            .ok();
+    }
+
+    /// Configuration changed: reload and push a fresh `CFG` line.
+    pub fn config_changed(&self) {
+        self.shared.revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn status(&self) -> Status {
+        self.shared
+            .status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default()
+    }
+
+    /// Ask the supervisor to stop (used on quit and by tests).
+    pub fn stop(&self) {
+        self.shared.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+fn publish(shared: &Shared, next: Status) {
+    let changed = match shared.status.lock() {
+        Ok(mut current) => {
+            if *current == next {
+                false
+            } else {
+                *current = next.clone();
+                true
+            }
+        }
+        Err(_) => false,
+    };
+    if changed {
+        let _ = shared.app.emit("companion", &next);
+    }
+}
+
+fn describe_error(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+}
+
+/// Device-side state of one connection attempt.
+struct Session {
+    key: String,
+    link: Box<dyn link::Link>,
+    device: String,
+    negotiated: bool,
+    last_rx: Instant,
+    last_ping: Instant,
+    phase: String,
+    cfg_for: String,
+}
+
+fn supervise(shared: Arc<Shared>) {
+    let mut cached: Option<Config> = None;
+    let mut revision = u64::MAX;
+    let mut session: Option<Session> = None;
+    let mut retry_at = Instant::now();
+    let mut backoff = Duration::from_secs(1);
+    let mut last_press: Option<(Instant, map::Verb)> = None;
+    // Log a failure streak once, not every retry.
+    let mut failing = false;
+
+    while !shared.stop.load(Ordering::Relaxed) {
+        let current = shared.revision.load(Ordering::Relaxed);
+        if current != revision {
+            revision = current;
+            cached = shared
+                .app
+                .try_state::<AppState>()
+                .and_then(|state| state.config().ok());
+        }
+        let Some(config) = cached.as_ref() else {
+            publish(&shared, Status::default());
+            thread::sleep(link::POLL);
+            continue;
+        };
+        if !config.companion.enabled {
+            session = None;
+            publish(
+                &shared,
+                Status {
+                    enabled: false,
+                    transport: config.companion.transport.clone(),
+                    ..Status::default()
+                },
+            );
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+
+        let key = format!(
+            "{}|{}|{}",
+            config.companion.transport, config.companion.usb_port, config.companion.ble_address
+        );
+        if session.as_ref().is_some_and(|s| s.key != key) {
+            session = None;
+            retry_at = Instant::now();
+        }
+
+        if session.is_none() && Instant::now() >= retry_at {
+            match link::open(&config.companion.transport, &config.companion.usb_port) {
+                Ok(mut opened) => {
+                    let port = opened.describe();
+                    let hello = protocol::hello("host", env!("CARGO_PKG_VERSION"));
+                    if let Err(error) = opened.write_line(&hello) {
+                        backoff = retry_at_after(&mut retry_at, backoff);
+                        publish(
+                            &shared,
+                            Status {
+                                enabled: true,
+                                transport: config.companion.transport.clone(),
+                                port,
+                                error: Some(format!("Handshake failed: {error}")),
+                                ..Status::default()
+                            },
+                        );
+                        thread::sleep(link::POLL);
+                        continue;
+                    }
+                    backoff = Duration::from_secs(1);
+                    failing = false;
+                    tracing::info!(port = %port, transport = %config.companion.transport, "Companion link opened");
+                    session = Some(Session {
+                        key: key.clone(),
+                        link: opened,
+                        device: String::new(),
+                        negotiated: false,
+                        last_rx: Instant::now(),
+                        last_ping: Instant::now(),
+                        phase: String::new(),
+                        cfg_for: String::new(),
+                    });
+                    publish(
+                        &shared,
+                        Status {
+                            enabled: true,
+                            transport: config.companion.transport.clone(),
+                            port,
+                            protocol: protocol::PROTOCOL_VERSION,
+                            error: None,
+                            ..Status::default()
+                        },
+                    );
+                }
+                Err(error) => {
+                    if !failing {
+                        failing = true;
+                        tracing::warn!(%error, "Companion device unavailable");
+                    }
+                    backoff = retry_at_after(&mut retry_at, backoff);
+                    publish(
+                        &shared,
+                        Status {
+                            enabled: true,
+                            transport: config.companion.transport.clone(),
+                            port: config.companion.usb_port.clone(),
+                            error: Some(describe_error(&error)),
+                            ..Status::default()
+                        },
+                    );
+                }
+            }
+            thread::sleep(link::POLL);
+            continue;
+        }
+
+        let Some(active) = session.as_mut() else {
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+
+        // Push the button map once the peer has identified itself and whenever it changes.
+        let map_line = cfg_line(&config.companion.buttons);
+        if active.negotiated && active.cfg_for != map_line {
+            if active.link.write_line(&map_line).is_ok() {
+                active.cfg_for = map_line.clone();
+            }
+        }
+
+        let mut dropped = false;
+        for _ in 0..8 {
+            match active.link.poll_line() {
+                Ok(Some(line)) => {
+                    active.last_rx = Instant::now();
+                    match protocol::parse(&line) {
+                        protocol::Inbound::Hello { protocol, app, .. } => {
+                            active.device = format!("flipper {app}");
+                            if protocol == protocol::PROTOCOL_VERSION {
+                                active.negotiated = true;
+                                tracing::info!(%app, protocol, "Companion handshake complete");
+                                let _ = active.link.write_line(&map_line);
+                                active.cfg_for = map_line.clone();
+                                publish(
+                                    &shared,
+                                    Status {
+                                        enabled: true,
+                                        connected: true,
+                                        transport: config.companion.transport.clone(),
+                                        port: active.link.describe(),
+                                        device: active.device.clone(),
+                                        protocol,
+                                        last_button: String::new(),
+                                        error: None,
+                                    },
+                                );
+                            } else {
+                                active.negotiated = false;
+                                tracing::warn!(%app, protocol, expected = protocol::PROTOCOL_VERSION, "Companion protocol mismatch");
+                                publish(
+                                    &shared,
+                                    Status {
+                                        enabled: true,
+                                        connected: true,
+                                        transport: config.companion.transport.clone(),
+                                        port: active.link.describe(),
+                                        device: active.device.clone(),
+                                        protocol,
+                                        last_button: String::new(),
+                                        error: Some(format!(
+                                            "Companion speaks protocol {protocol}, Murmur expects {}. Update the app on the Flipper.",
+                                            protocol::PROTOCOL_VERSION
+                                        )),
+                                    },
+                                );
+                            }
+                        }
+                        protocol::Inbound::Press { button, long } => {
+                            if !active.negotiated {
+                                continue;
+                            }
+                            let verb = map::verb_for(&config.companion.buttons, button, long);
+                            if verb == map::Verb::None {
+                                continue;
+                            }
+                            let now = Instant::now();
+                            let repeated = last_press.is_some_and(|(at, last)| {
+                                last == verb && now.duration_since(at) < DEBOUNCE
+                            });
+                            last_press = Some((now, verb));
+                            if repeated {
+                                continue;
+                            }
+                            let ack = shared
+                                .app
+                                .try_state::<AppState>()
+                                .and_then(|state| map::dispatch(&state, verb));
+                            let label = format!(
+                                "{}{} · {}",
+                                button.wire(),
+                                if long { " long" } else { "" },
+                                verb.as_str()
+                            );
+                            tracing::info!(button = %button.wire(), long, verb = verb.as_str(), ack = ?ack, "Companion press");
+                            if let Some(result) = ack {
+                                let _ = active
+                                    .link
+                                    .write_line(&protocol::ack(verb.as_str(), result));
+                                // Force the next tick to re-send the state line.
+                                active.phase = String::new();
+                                publish(
+                                    &shared,
+                                    Status {
+                                        enabled: true,
+                                        connected: true,
+                                        transport: config.companion.transport.clone(),
+                                        port: active.link.describe(),
+                                        device: active.device.clone(),
+                                        protocol: protocol::PROTOCOL_VERSION,
+                                        last_button: label,
+                                        error: None,
+                                    },
+                                );
+                            }
+                        }
+                        // A heartbeat is presence, not a request: answering it would make
+                        // both ends reply to each other's replies forever.
+                        protocol::Inbound::Ping => {}
+                        protocol::Inbound::Unknown => {}
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "Companion link lost");
+                    publish(
+                        &shared,
+                        Status {
+                            enabled: true,
+                            connected: false,
+                            transport: config.companion.transport.clone(),
+                            port: active.link.describe(),
+                            device: active.device.clone(),
+                            protocol: protocol::PROTOCOL_VERSION,
+                            last_button: String::new(),
+                            error: Some(format!("Link lost: {error}")),
+                        },
+                    );
+                    dropped = true;
+                    break;
+                }
+            }
+        }
+        if dropped {
+            session = None;
+            retry_at = Instant::now() + backoff;
+            thread::sleep(link::POLL);
+            continue;
+        }
+
+        // Heartbeat, and a hard timeout when the peer goes silent.
+        if active.last_ping.elapsed() >= HEARTBEAT {
+            if let Err(error) = active.link.write_line(&protocol::ping()) {
+                tracing::warn!(%error, "Companion link dropped: heartbeat write failed");
+                failing = true;
+                session = None;
+                retry_at = Instant::now();
+                continue;
+            }
+            active.last_ping = Instant::now();
+        }
+        if active.last_rx.elapsed() > DEAD_AFTER {
+            tracing::warn!(port = %active.link.describe(), "Companion link timed out");
+            failing = true;
+            session = None;
+            retry_at = Instant::now();
+            continue;
+        }
+
+        // Mirror Murmur's state to the device, only on change.
+        if active.negotiated {
+            let phase = shared
+                .app
+                .try_state::<AppState>()
+                .map(|state| state::phase(&state).line().to_string())
+                .unwrap_or_default();
+            if !phase.is_empty() && phase != active.phase {
+                if active.link.write_line(&phase).is_ok() {
+                    active.phase = phase;
+                }
+            }
+        }
+
+        thread::sleep(link::POLL);
+    }
+    publish(&shared, Status::default());
+}
+
+fn retry_at_after(retry_at: &mut Instant, backoff: Duration) -> Duration {
+    *retry_at = Instant::now() + backoff;
+    std::cmp::min(backoff * 2, MAX_BACKOFF)
+}
+
+/// `CFG` line for the current map, keys sorted by `protocol::cfg`.
+pub fn cfg_line(buttons: &crate::config::CompanionButtons) -> String {
+    let mut pairs: Vec<(String, &'static str)> = Vec::new();
+    for (key, value) in [
+        ("OK", buttons.ok.as_str()),
+        ("UP", buttons.up.as_str()),
+        ("DOWN", buttons.down.as_str()),
+        ("BACK", buttons.back.as_str()),
+        ("LEFT", buttons.left.as_str()),
+        ("RIGHT", buttons.right.as_str()),
+        ("OK_LONG", buttons.ok_long.as_str()),
+        ("UP_LONG", buttons.up_long.as_str()),
+        ("DOWN_LONG", buttons.down_long.as_str()),
+    ] {
+        if let Some(verb) = map::Verb::parse(value) {
+            pairs.push((key.to_string(), verb.wire()));
+        }
+    }
+    let pairs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    protocol::cfg(&pairs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CompanionButtons;
+
+    #[test]
+    fn cfg_line_covers_every_default_button() {
+        let line = cfg_line(&CompanionButtons::default());
+        for key in ["OK=", "UP=", "DOWN=", "BACK="] {
+            assert!(line.contains(key), "{line} missing {key}");
+        }
+        assert!(line.starts_with("CFG "));
+        assert!(
+            line.len() < protocol::MAX_LINE,
+            "{line} is {} bytes",
+            line.len()
+        );
+    }
+
+    #[test]
+    fn cfg_line_skips_unknown_verbs_instead_of_forwarding_them() {
+        let mut buttons = CompanionButtons::default();
+        buttons.left = "not_a_verb".into();
+        let line = cfg_line(&buttons);
+        assert!(!line.contains("LEFT="), "{line}");
+    }
+
+    #[test]
+    fn cfg_line_is_sorted_so_it_is_stable() {
+        let line = cfg_line(&CompanionButtons::default());
+        let keys: Vec<&str> = line
+            .trim_start_matches("CFG ")
+            .split(' ')
+            .map(|pair| pair.split('=').next().unwrap_or(""))
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted);
+    }
+}

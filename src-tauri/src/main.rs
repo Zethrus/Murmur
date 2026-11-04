@@ -3,6 +3,7 @@ mod app;
 mod audio;
 #[cfg(test)]
 mod coding_tests;
+mod companion;
 mod config;
 mod controller;
 mod engine;
@@ -39,6 +40,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let runtime = app::AppState::new(handle.clone())?;
     app.manage(runtime);
     let state = app.state::<app::AppState>();
+    state.companion.start();
     // Recoverable desktop limitations/conflicts must not prevent opening Settings.
     for result in [
         hotkey::rebind(&handle, &state.config()?, &state.config()?),
@@ -169,6 +171,9 @@ fn main() {
             ipc::get_config,
             ipc::set_config,
             ipc::get_status,
+            ipc::companion_status,
+            ipc::companion_resync,
+            ipc::companion_ports,
             ipc::list_models,
             ipc::install_model,
             ipc::remove_model,

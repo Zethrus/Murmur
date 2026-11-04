@@ -17,6 +17,22 @@ export interface OverlayPlacement {
   monitor_name: string; monitor_x: number; monitor_y: number; monitor_width: number; monitor_height: number;
   x_fraction: number; y_fraction: number;
 }
+export type CompanionVerb = "dictate_toggle" | "enhance" | "accept" | "dismiss" | "cancel" | "none";
+export type CompanionTransport = "auto" | "usb" | "ble";
+export interface CompanionButtons {
+  ok: CompanionVerb; up: CompanionVerb; down: CompanionVerb; back: CompanionVerb;
+  left: CompanionVerb; right: CompanionVerb;
+  ok_long: CompanionVerb; up_long: CompanionVerb; down_long: CompanionVerb;
+}
+export interface CompanionConfig {
+  enabled: boolean; transport: CompanionTransport; usb_port: string; ble_address: string;
+  buttons: CompanionButtons;
+}
+/** Live link state, mirroring `companion::Status` in Rust. */
+export interface CompanionStatus {
+  enabled: boolean; connected: boolean; transport: string; port: string;
+  device: string; protocol: number; last_button: string; error: string | null;
+}
 export type EnhanceStyle = "concise" | "thorough" | "structured";
 export interface EnhanceConfig {
   auto_rewrite: boolean; rewrite_hotkey: string; accept_hotkey: string; style: EnhanceStyle; model: string;
@@ -38,6 +54,8 @@ export interface Config {
   privacy: { history_enabled: boolean; history_retention_days: number };
   /** The Settings card tolerates a backend that omits this section (see cards/enhance.ts). */
   enhance: EnhanceConfig;
+  /** Flipper Zero companion link. Defaults are applied by the backend. */
+  companion: CompanionConfig;
 }
 export type ConfigPatch = { [K in keyof Config]?: Partial<Config[K]> };
 export interface Model { name: string; repo: string; size_mb: number; accuracy: string; installed: boolean }
@@ -87,6 +105,7 @@ export interface Events {
   latency: { latency_ms: number; text?: string }; error: { message: string; persistent?: boolean };
   download: Download; config: Config;
   "enhance-status": EnhanceStatus; "enhance-download": EnhanceDownload; "overlay-update": OverlaySnapshot;
+  companion: CompanionStatus;
 }
 interface Commands {
   get_config: [undefined, Config]; set_config: [{ patch: ConfigPatch }, Config]; get_status: [undefined, Status];
@@ -110,6 +129,9 @@ interface Commands {
   get_overlay_snapshot: [undefined, OverlaySnapshot];
   reset_overlay_position: [undefined, void];
   set_overlay_size: [{ width: number; height: number; layoutRevision: number; layoutInstance: string }, void];
+  // Flipper companion (see companion/protocol.md).
+  companion_status: [undefined, CompanionStatus]; companion_resync: [undefined, void];
+  companion_ports: [undefined, string[]];
 }
 export function call<K extends keyof Commands>(command: K,
   ...args: Commands[K][0] extends undefined ? [] : [Commands[K][0]]): Promise<Commands[K][1]> {
