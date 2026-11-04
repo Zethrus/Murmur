@@ -176,6 +176,8 @@ stream ID is a 32-bit unsigned integer. The host sends these lines for turns sta
 by the Flipper, phone button, or local UI alike. They are sent only to the selected
 authenticated `CAP mic` phone. Binary frames outside the active start/stop interval,
 or with the wrong stream ID or sequence, close the session with a protocol error.
+Frames already in flight for the most recently stopped stream are discarded after
+`MIC STOP`, including while the next stream is starting; they do not close the link.
 
 Each binary WebSocket message holds exactly one 20 ms frame: 320 PCM16 mono samples
 at 16 kHz. The 17-byte little-endian header contains `MRMA` (4 bytes), version `1`

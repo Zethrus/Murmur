@@ -137,18 +137,25 @@ impl Ring {
 #[derive(Default)]
 pub struct Gate {
     active: Option<(u32, u32)>,
+    last_stopped: Option<u32>,
 }
 impl Gate {
     pub fn start(&mut self, id: u32) {
         self.active = Some((id, 0));
     }
     pub fn stop(&mut self) {
-        self.active = None;
+        self.last_stopped = self.active.take().map(|(id, _)| id);
     }
     pub fn active(&self) -> Option<u32> {
         self.active.map(|(id, _)| id)
     }
-    pub fn accept(&mut self, frame: &Frame) -> Result<(), Error> {
+    /// False means an in-flight frame from the last stopped stream.
+    pub fn accept(&mut self, frame: &Frame) -> Result<bool, Error> {
+        if self.last_stopped == Some(frame.stream_id)
+            && self.active.is_none_or(|(id, _)| id != frame.stream_id)
+        {
+            return Ok(false);
+        }
         let (id, next) = self.active.as_mut().ok_or(Error::OutsideTurn)?;
         if frame.stream_id != *id {
             return Err(Error::Stream);
@@ -157,7 +164,7 @@ impl Gate {
             return Err(Error::Sequence);
         }
         *next = next.wrapping_add(1);
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -216,9 +223,13 @@ mod tests {
         let mut wrong = frame(0);
         wrong.stream_id = 8;
         assert_eq!(gate.accept(&wrong), Err(Error::Stream));
-        assert_eq!(gate.accept(&frame(0)), Ok(()));
+        assert_eq!(gate.accept(&frame(0)), Ok(true));
         assert_eq!(gate.accept(&frame(0)), Err(Error::Sequence));
         gate.stop();
-        assert_eq!(gate.accept(&frame(1)), Err(Error::OutsideTurn));
+        assert_eq!(gate.accept(&frame(1)), Ok(false));
+        assert_eq!(gate.accept(&wrong), Err(Error::OutsideTurn));
+        gate.start(8);
+        assert_eq!(gate.accept(&frame(2)), Ok(false));
+        assert_eq!(gate.accept(&wrong), Ok(true));
     }
 }

@@ -49,12 +49,20 @@ struct Shared {
     fingerprint: Mutex<Option<String>>,
     error: Mutex<Option<String>>,
     rejected_peers: AtomicU64,
-    congested_frames: AtomicU64,
     remote: Mutex<RemoteTurn>,
 }
 struct Session {
     stop: watch::Sender<bool>,
     mic: mpsc::Sender<MicCommand>,
+}
+fn request_mic_start(session: Option<&Session>, policy: Policy, stream: u32) -> Result<Source> {
+    if session.is_some_and(|session| session.mic.try_send(MicCommand::Start(stream)).is_ok()) {
+        return Ok(Source::Phone);
+    }
+    if policy == Policy::Auto {
+        return Ok(Source::Local);
+    }
+    anyhow::bail!("Phone microphone command queue unavailable")
 }
 #[derive(Clone, Copy)]
 enum MicCommand {
@@ -68,6 +76,12 @@ struct RemoteTurn {
     ring: audio::Ring,
     received: u64,
     started_at: Option<Instant>,
+    last_at: Option<Instant>,
+}
+impl RemoteTurn {
+    fn silence_elapsed(&self) -> Option<Duration> {
+        self.last_at.or(self.started_at).map(|at| at.elapsed())
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -88,18 +102,6 @@ impl Policy {
             Self::Phone => anyhow::bail!("Phone microphone unavailable: no paired phone connected"),
             Self::Auto if connected => Ok(Source::Phone),
             Self::Auto => Ok(Source::Local),
-        }
-    }
-    pub fn silence_after(self, elapsed: Duration, received: u64) -> Result<bool> {
-        if elapsed < Duration::from_millis(500) || received > 0 {
-            return Ok(false);
-        }
-        match self {
-            Self::Phone => {
-                anyhow::bail!("Phone microphone sent no audio within 500 ms of MIC START")
-            }
-            Self::Auto => Ok(true),
-            Self::Local => Ok(false),
         }
     }
 }
@@ -142,7 +144,6 @@ impl Network {
                 fingerprint: Mutex::new(None),
                 error: Mutex::new(error),
                 rejected_peers: AtomicU64::new(0),
-                congested_frames: AtomicU64::new(0),
                 remote: Mutex::new(RemoteTurn::default()),
             }),
             changes,
@@ -272,6 +273,7 @@ impl Network {
         remote.ring.clear();
         remote.received = 0;
         remote.started_at = None;
+        remote.last_at = None;
         remote.selected = if source == Source::Phone {
             selected
         } else {
@@ -279,13 +281,11 @@ impl Network {
         };
         remote.stream = remote.selected.as_ref().map(|_| stream);
         if let Some(id) = &remote.selected {
-            if sessions
-                .get(id)
-                .is_none_or(|session| session.mic.try_send(MicCommand::Start(stream)).is_err())
-            {
+            let request = request_mic_start(sessions.get(id), policy, stream);
+            if !matches!(request, Ok(Source::Phone)) {
                 remote.stream = None;
                 remote.selected = None;
-                anyhow::bail!("Phone microphone command queue unavailable");
+                return request;
             }
         }
         Ok(source)
@@ -295,6 +295,7 @@ impl Network {
             let mut remote = self.shared.remote.lock().unwrap();
             let ending = remote.selected.take().zip(remote.stream.take());
             remote.started_at = None;
+            remote.last_at = None;
             remote.ring.clear();
             ending
         };
@@ -310,12 +311,7 @@ impl Network {
         self.shared.remote.lock().unwrap().received
     }
     pub fn silence_elapsed(&self) -> Option<Duration> {
-        self.shared
-            .remote
-            .lock()
-            .unwrap()
-            .started_at
-            .map(|at| at.elapsed())
+        self.shared.remote.lock().unwrap().silence_elapsed()
     }
     pub fn phone_connected(&self) -> bool {
         let sessions = self.shared.sessions.lock().unwrap();
@@ -338,7 +334,6 @@ impl Network {
     }
     pub fn dropped(&self) -> u64 {
         self.shared.remote.lock().unwrap().ring.dropped()
-            + self.shared.congested_frames.load(Ordering::Relaxed)
     }
 }
 
@@ -353,20 +348,29 @@ mod audio_policy_tests {
         assert!(Policy::Phone.select(false).is_err());
         assert_eq!(Policy::Auto.select(true).unwrap(), Source::Phone);
         assert_eq!(Policy::Auto.select(false).unwrap(), Source::Local);
-        assert!(!Policy::Auto
-            .silence_after(Duration::from_millis(499), 0)
-            .unwrap());
-        assert!(Policy::Auto
-            .silence_after(Duration::from_millis(500), 0)
-            .unwrap());
-        assert!(!Policy::Auto
-            .silence_after(Duration::from_secs(1), 1)
-            .unwrap());
-        assert!(Policy::Phone
-            .silence_after(Duration::from_millis(500), 0)
-            .is_err());
-        assert!(!Policy::Local
-            .silence_after(Duration::from_secs(1), 0)
-            .unwrap());
+    }
+    #[test]
+    fn silence_timer_uses_last_frame() {
+        let mut turn = RemoteTurn::default();
+        turn.started_at = Some(Instant::now() - Duration::from_secs(2));
+        assert!(turn.silence_elapsed().unwrap() >= Duration::from_secs(2));
+        turn.last_at = Some(Instant::now());
+        assert!(turn.silence_elapsed().unwrap() < Duration::from_millis(500));
+    }
+    #[test]
+    fn full_mic_command_queue_falls_back_only_in_auto() {
+        let (mic, mut receiver) = mpsc::channel(1);
+        let (stop, _) = watch::channel(false);
+        let session = Session { stop, mic };
+        assert_eq!(
+            request_mic_start(Some(&session), Policy::Auto, 1).unwrap(),
+            Source::Phone
+        );
+        assert_eq!(
+            request_mic_start(Some(&session), Policy::Auto, 2).unwrap(),
+            Source::Local
+        );
+        assert!(request_mic_start(Some(&session), Policy::Phone, 2).is_err());
+        assert!(matches!(receiver.try_recv(), Ok(MicCommand::Start(1))));
     }
 }

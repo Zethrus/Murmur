@@ -10,7 +10,10 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 use std::{
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -60,6 +63,37 @@ fn preview_valid(epoch: u64, current: u64, active: bool, stopped: Option<u64>) -
     (active && epoch == current) || stopped == Some(epoch)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteAction {
+    Continue,
+    Fallback,
+    Stop,
+    Fail(&'static str),
+}
+fn remote_action(
+    policy: Policy,
+    connected: bool,
+    silence: Option<Duration>,
+    received: u64,
+    wall_limit: bool,
+) -> RemoteAction {
+    if wall_limit {
+        return RemoteAction::Stop;
+    }
+    if !connected || silence.is_some_and(|elapsed| elapsed >= Duration::from_millis(500)) {
+        return match policy {
+            Policy::Phone if !connected => {
+                RemoteAction::Fail("Phone microphone disconnected during dictation")
+            }
+            Policy::Phone => RemoteAction::Fail("Phone microphone stalled for 500 ms"),
+            Policy::Auto if received == 0 => RemoteAction::Fallback,
+            Policy::Auto => RemoteAction::Stop,
+            Policy::Local => RemoteAction::Continue,
+        };
+    }
+    RemoteAction::Continue
+}
+
 fn warm_engine(app: &AppHandle, config: &Config) {
     let app = app.clone();
     let config_engine = config.engine.clone();
@@ -84,6 +118,8 @@ fn warm_engine(app: &AppHandle, config: &Config) {
 }
 struct Controller {
     audio: Option<AudioCapture>,
+    local_audio: Option<AudioCapture>,
+    local_events_enabled: Arc<AtomicBool>,
     remote_source: Option<RemoteAudioSource>,
     source: Source,
     remote_turn: bool,
@@ -105,6 +141,8 @@ impl Controller {
     fn new(config: Config) -> Self {
         Self {
             audio: None,
+            local_audio: None,
+            local_events_enabled: Arc::new(AtomicBool::new(true)),
             remote_source: None,
             source: Source::Local,
             remote_turn: false,
@@ -123,13 +161,13 @@ impl Controller {
             config,
         }
     }
-    fn prepare_audio(&mut self, state: &AppState) -> Result<()> {
-        if self.audio.as_ref().is_some_and(AudioCapture::healthy) {
-            return Ok(());
-        }
-        self.audio = None;
+    fn new_local_audio(&self, state: &AppState) -> Result<AudioCapture> {
         let tx = state.sender();
-        self.audio = Some(AudioCapture::new(&self.config.audio, move |event| {
+        let enabled = self.local_events_enabled.clone();
+        AudioCapture::new(&self.config.audio, move |event| {
+            if !enabled.load(Ordering::Relaxed) {
+                return;
+            }
             let action = match event {
                 AudioEvent::Level(value) => Action::Level(value),
                 AudioEvent::Endpoint => Action::Endpoint,
@@ -137,8 +175,18 @@ impl Controller {
                 AudioEvent::Error(error) => Action::Fault(error),
             };
             let _ = tx.send(action);
-        })?);
+        })
+    }
+    fn prepare_audio(&mut self, state: &AppState) -> Result<()> {
+        if self.audio.as_ref().is_some_and(AudioCapture::healthy) {
+            return Ok(());
+        }
+        self.audio = Some(self.new_local_audio(state)?);
         Ok(())
+    }
+    fn restore_local_audio(&mut self) {
+        self.audio = self.local_audio.take();
+        self.local_events_enabled.store(true, Ordering::Relaxed);
     }
     fn drain_remote(&self, state: &AppState) -> Result<()> {
         if let Some(remote) = &self.remote_source {
@@ -173,6 +221,26 @@ impl Controller {
             .companion_network
             .begin_turn(policy, self.epoch.wrapping_add(1) as u32)?;
         if source == Source::Phone {
+            self.local_events_enabled.store(false, Ordering::Relaxed);
+            if self.source == Source::Local {
+                self.local_audio = self.audio.take();
+            } else {
+                self.audio = None;
+            }
+            if policy == Policy::Auto {
+                if self.local_audio.as_ref().is_none_or(AudioCapture::healthy) {
+                    self.local_audio = match self.new_local_audio(state) {
+                        Ok(local) => Some(local),
+                        Err(error) => {
+                            tracing::warn!(%error, "Prepare fallback microphone");
+                            None
+                        }
+                    };
+                }
+                if let Some(local) = &mut self.local_audio {
+                    local.start()?;
+                }
+            }
             let tx = state.sender();
             let (capture, remote) = AudioCapture::new_remote(&self.config.audio, move |event| {
                 let action = match event {
@@ -189,8 +257,9 @@ impl Controller {
         } else {
             self.remote_source = None;
             if self.source != Source::Local {
-                self.audio = None;
+                self.restore_local_audio();
             }
+            self.local_events_enabled.store(true, Ordering::Relaxed);
             self.prepare_audio(state)?;
             self.remote_turn = false;
         }
@@ -229,6 +298,10 @@ impl Controller {
     }
     fn idle(&mut self, state: &AppState) -> Result<()> {
         state.companion_network.end_turn();
+        if let Some(local) = &mut self.local_audio {
+            local.cancel();
+        }
+        self.local_events_enabled.store(true, Ordering::Relaxed);
         state.audio_source(None);
         self.active = false;
         self.epoch += 1;
@@ -256,6 +329,10 @@ impl Controller {
         }
         self.drain_remote(state)?;
         state.companion_network.end_turn();
+        if let Some(local) = &mut self.local_audio {
+            local.cancel();
+        }
+        self.local_events_enabled.store(true, Ordering::Relaxed);
         hotkey::escape(&state.app, false)?;
         let duration = self.started.elapsed().as_millis() as u64;
         let pcm = self
@@ -348,6 +425,10 @@ impl Controller {
     }
     fn fail(&mut self, state: &AppState, error: &str) {
         state.companion_network.end_turn();
+        if let Some(local) = &mut self.local_audio {
+            local.cancel();
+        }
+        self.local_events_enabled.store(true, Ordering::Relaxed);
         state.audio_source(None);
         if let Some(audio) = &mut self.audio {
             audio.cancel();
@@ -370,27 +451,33 @@ impl Controller {
             } else {
                 Policy::Auto
             };
-            let fallback = if !state.companion_network.phone_connected() {
-                if policy == Policy::Phone {
-                    anyhow::bail!("Phone microphone disconnected during dictation");
+            match remote_action(
+                policy,
+                state.companion_network.phone_connected(),
+                state.companion_network.silence_elapsed(),
+                state.companion_network.received(),
+                self.started.elapsed() >= Duration::from_secs(self.config.audio.max_utterance_s),
+            ) {
+                RemoteAction::Stop => {
+                    self.stop(state)?;
+                    return Ok(());
                 }
-                true
-            } else if let Some(elapsed) = state.companion_network.silence_elapsed() {
-                policy.silence_after(elapsed, state.companion_network.received())?
-            } else {
-                false
-            };
-            if fallback {
-                state.companion_network.end_turn();
-                self.remote_source = None;
-                self.audio = None;
-                self.prepare_audio(state)?;
-                self.audio.as_mut().unwrap().start()?;
-                self.source = Source::Local;
-                self.remote_turn = false;
-                self.started = Instant::now();
-                tracing::info!(source = "local", "Dictation source selected");
-                state.audio_source(Some("local"));
+                RemoteAction::Fail(message) => anyhow::bail!("{message}"),
+                RemoteAction::Continue => {}
+                RemoteAction::Fallback => {
+                    state.companion_network.end_turn();
+                    self.remote_source = None;
+                    self.restore_local_audio();
+                    if self.audio.as_ref().is_none_or(AudioCapture::healthy) {
+                        self.audio = None;
+                        self.prepare_audio(state)?;
+                        self.audio.as_mut().unwrap().start()?;
+                    }
+                    self.source = Source::Local;
+                    self.remote_turn = false;
+                    tracing::info!(source = "local", "Dictation source selected");
+                    state.audio_source(Some("local"));
+                }
             }
         }
         if self.reset_at.is_some_and(|at| now >= at) {
@@ -539,6 +626,7 @@ impl Controller {
                 }
                 if audio_changed {
                     self.audio = None;
+                    self.local_audio = None;
                     self.prepare_audio(state)?;
                 }
                 if engine_changed {
@@ -601,7 +689,8 @@ pub fn run(app: AppHandle, receiver: mpsc::Receiver<Action>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{preview_due, preview_valid};
+    use super::{preview_due, preview_valid, remote_action, Controller, Policy, RemoteAction};
+    use crate::{audio::AudioCapture, config::Config};
     use std::time::Duration;
 
     #[test]
@@ -620,5 +709,66 @@ mod tests {
         assert!(!preview_valid(7, 8, false, None));
         assert!(preview_valid(8, 8, true, None));
         assert!(!preview_valid(7, 9, true, None));
+    }
+    #[test]
+    fn phone_stalls_and_auto_preserves_received_audio() {
+        let gap = Some(Duration::from_millis(500));
+        assert_eq!(
+            remote_action(Policy::Phone, true, gap, 1, false),
+            RemoteAction::Fail("Phone microphone stalled for 500 ms")
+        );
+        assert_eq!(
+            remote_action(Policy::Auto, true, gap, 0, false),
+            RemoteAction::Fallback
+        );
+        assert_eq!(
+            remote_action(Policy::Auto, true, gap, 1, false),
+            RemoteAction::Stop
+        );
+        assert_eq!(
+            remote_action(Policy::Auto, false, None, 1, false),
+            RemoteAction::Stop
+        );
+        assert_eq!(
+            remote_action(Policy::Auto, false, None, 0, false),
+            RemoteAction::Fallback
+        );
+        assert_eq!(
+            remote_action(Policy::Phone, true, None, 1, true),
+            RemoteAction::Stop
+        );
+        assert_eq!(
+            remote_action(
+                Policy::Auto,
+                true,
+                Some(Duration::from_millis(499)),
+                0,
+                false
+            ),
+            RemoteAction::Continue
+        );
+    }
+    #[test]
+    fn local_capture_survives_phone_turn_and_keeps_preroll() {
+        let config = Config::default();
+        let mut controller = Controller::new(config.clone());
+        let (local, feed) = AudioCapture::new_remote(&config.audio, |_| {});
+        controller.local_audio = Some(local);
+        feed.push(&[1; 320]).unwrap();
+        controller.restore_local_audio();
+        controller.audio.as_mut().unwrap().start().unwrap();
+        assert_eq!(
+            controller.audio.as_ref().unwrap().snapshot().unwrap().len(),
+            320
+        );
+
+        controller.local_audio = controller.audio.take();
+        controller.local_audio.as_mut().unwrap().start().unwrap();
+        feed.push(&[2; 320]).unwrap();
+        controller.restore_local_audio();
+        assert_eq!(
+            controller.audio.as_ref().unwrap().snapshot().unwrap().len(),
+            640
+        );
     }
 }
