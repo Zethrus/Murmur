@@ -41,6 +41,12 @@ pub struct Status {
     pub protocol: u8,
     pub last_button: String,
     pub error: Option<String>,
+    /// Signal strength, when the transport reports one (BLE).
+    pub rssi: Option<i32>,
+    /// Device battery percentage, from its periodic `Q` line.
+    pub battery: Option<u8>,
+    /// Round-trip latency in ms, measured with a timed probe.
+    pub latency_ms: u32,
 }
 
 pub struct Companion {
@@ -117,6 +123,24 @@ fn publish(shared: &Shared, next: Status) {
     }
 }
 
+/// Full status for a live session, including the telemetry the device and the transport
+/// report. Callers only differ in `connected` and in the error text they add afterwards.
+fn session_status(config: &Config, active: &Session, connected: bool) -> Status {
+    Status {
+        enabled: true,
+        connected,
+        transport: config.companion.transport.clone(),
+        port: active.link.describe(),
+        device: active.device.clone(),
+        protocol: protocol::PROTOCOL_VERSION,
+        last_button: String::new(),
+        error: None,
+        rssi: active.link.rssi(),
+        battery: active.battery,
+        latency_ms: active.latency_ms,
+    }
+}
+
 fn describe_error(error: &anyhow::Error) -> String {
     format!("{error:#}")
 }
@@ -131,6 +155,10 @@ struct Session {
     last_ping: Instant,
     phase: String,
     cfg_for: String,
+    battery: Option<u8>,
+    latency_ms: u32,
+    probe_seq: u64,
+    probe_sent: Option<(String, Instant)>,
 }
 
 fn supervise(shared: Arc<Shared>) {
@@ -181,7 +209,11 @@ fn supervise(shared: Arc<Shared>) {
         }
 
         if session.is_none() && Instant::now() >= retry_at {
-            match link::open(&config.companion.transport, &config.companion.usb_port) {
+            match link::open(
+                &config.companion.transport,
+                &config.companion.usb_port,
+                &config.companion.ble_address,
+            ) {
                 Ok(mut opened) => {
                     let port = opened.describe();
                     let hello = protocol::hello("host", env!("CARGO_PKG_VERSION"));
@@ -212,6 +244,10 @@ fn supervise(shared: Arc<Shared>) {
                         last_ping: Instant::now(),
                         phase: String::new(),
                         cfg_for: String::new(),
+                        battery: None,
+                        latency_ms: 0,
+                        probe_seq: 1,
+                        probe_sent: None,
                     });
                     publish(
                         &shared,
@@ -284,6 +320,7 @@ fn supervise(shared: Arc<Shared>) {
                                         protocol,
                                         last_button: String::new(),
                                         error: None,
+                                        ..Status::default()
                                     },
                                 );
                             } else {
@@ -303,6 +340,7 @@ fn supervise(shared: Arc<Shared>) {
                                             "Companion speaks protocol {protocol}, Murmur expects {}. Update the app on the Flipper.",
                                             protocol::PROTOCOL_VERSION
                                         )),
+                                        ..Status::default()
                                     },
                                 );
                             }
@@ -351,13 +389,31 @@ fn supervise(shared: Arc<Shared>) {
                                         protocol: protocol::PROTOCOL_VERSION,
                                         last_button: label,
                                         error: None,
+                                        ..Status::default()
                                     },
                                 );
                             }
                         }
                         // A heartbeat is presence, not a request: answering it would make
                         // both ends reply to each other's replies forever.
-                        protocol::Inbound::Ping => {}
+                        protocol::Inbound::Ping { token } => {
+                            // Only the echo of our own timed probe is a measurement. A bare
+                            // heartbeat is presence and is never answered.
+                            if let (Some(token), Some((pending, sent))) =
+                                (token, active.probe_sent.as_ref())
+                            {
+                                if &token == pending {
+                                    active.latency_ms =
+                                        sent.elapsed().as_millis().min(9_999) as u32;
+                                    active.probe_sent = None;
+                                    publish(&shared, session_status(&config, active, true));
+                                }
+                            }
+                        }
+                        protocol::Inbound::Battery { percent } => {
+                            active.battery = Some(percent);
+                            publish(&shared, session_status(&config, active, true));
+                        }
                         protocol::Inbound::Unknown => {}
                     }
                 }
@@ -375,6 +431,7 @@ fn supervise(shared: Arc<Shared>) {
                             protocol: protocol::PROTOCOL_VERSION,
                             last_button: String::new(),
                             error: Some(format!("Link lost: {error}")),
+                            ..Status::default()
                         },
                     );
                     dropped = true;
@@ -391,13 +448,16 @@ fn supervise(shared: Arc<Shared>) {
 
         // Heartbeat, and a hard timeout when the peer goes silent.
         if active.last_ping.elapsed() >= HEARTBEAT {
-            if let Err(error) = active.link.write_line(&protocol::ping()) {
+            let seq = active.probe_seq;
+            if let Err(error) = active.link.write_line(&protocol::probe(seq)) {
                 tracing::warn!(%error, "Companion link dropped: heartbeat write failed");
                 failing = true;
                 session = None;
                 retry_at = Instant::now();
                 continue;
             }
+            active.probe_seq += 1;
+            active.probe_sent = Some((seq.to_string(), Instant::now()));
             active.last_ping = Instant::now();
         }
         if active.last_rx.elapsed() > DEAD_AFTER {

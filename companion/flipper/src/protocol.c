@@ -42,6 +42,22 @@ const char* murmur_phase_text(MurmurPhase phase) {
     }
 }
 
+const char* murmur_transport_name(MurmurTransport transport) {
+    switch(transport) {
+    case MurmurTransportUsb:
+        return "USB";
+    case MurmurTransportBle:
+        return "BLE";
+    case MurmurTransportNone:
+    default:
+        return "-";
+    }
+}
+
+bool murmur_phase_is_quiet(MurmurPhase phase) {
+    return phase == MurmurPhaseIdle || phase == MurmurPhaseOffline;
+}
+
 const char* murmur_verb_wire(MurmurVerb verb) {
     static const char* const wire[] = {
         "NONE", "DICTATE_TOGGLE", "ENHANCE", "ACCEPT", "DISMISS", "CANCEL"};
@@ -120,6 +136,12 @@ bool murmur_parse(const char* line, MurmurMessage* out) {
         out->type = MurmurMessagePing;
         return true;
     }
+    if(strncmp(line, "P ", 2) == 0) {
+        /* Probe: echo the token so the host can time the round trip. */
+        out->type = MurmurMessagePing;
+        strncpy(out->text, line + 2, sizeof(out->text) - 1);
+        return true;
+    }
     if(strncmp(line, "HELLO ", 6) == 0) {
         unsigned protocol = 0;
         char app[sizeof(out->app)] = {0};
@@ -142,6 +164,25 @@ bool murmur_parse(const char* line, MurmurMessage* out) {
     if(strncmp(line, "A ", 2) == 0) {
         out->type = MurmurMessageAck;
         strncpy(out->app, line + 2, sizeof(out->app) - 1);
+        return true;
+    }
+    if(strncmp(line, "T ", 2) == 0) {
+        out->type = MurmurMessageText;
+        strncpy(out->text, line + 2, sizeof(out->text) - 1);
+        return true;
+    }
+    if(strncmp(line, "G ", 2) == 0) {
+        out->type = MurmurMessageSuggestion;
+        strncpy(out->text, line + 2, sizeof(out->text) - 1);
+        return true;
+    }
+    if(strncmp(line, "L ", 2) == 0) {
+        unsigned latency = 0;
+        int rssi = 0;
+        if(sscanf(line + 2, "%u %d", &latency, &rssi) < 1) return false;
+        out->type = MurmurMessageLink;
+        out->latency_ms = (uint16_t)(latency > 9999u ? 9999u : latency);
+        out->rssi = (int8_t)(rssi < -127 ? -127 : (rssi > 0 ? 0 : rssi));
         return true;
     }
     if(strncmp(line, "CFG ", 4) == 0) {

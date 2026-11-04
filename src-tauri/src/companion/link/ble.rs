@@ -1,0 +1,308 @@
+//! Bluetooth transport.
+//!
+//! The Flipper exposes its serial service over BLE as a GATT profile, not as a serial
+//! port, so this link is a BLE central built on `btleplug`. The trait is synchronous and
+//! polled, so the async work runs on a small runtime of its own and talks through
+//! channels: one way for lines out, one queue for lines in.
+//!
+//! Bonding belongs to the firmware and the OS agent: the Flipper shows a PIN, the host
+//! enters it once, and the key is kept. This module only reports that a connection was
+//! refused, never tries to pair itself.
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use btleplug::api::{
+    Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+};
+use btleplug::platform::Manager;
+use futures::StreamExt;
+use tokio::sync::mpsc;
+
+use super::Link;
+
+/// Flipper's serial service. Matched by string so this module does not depend on `uuid`.
+const SERIAL_SERVICE: &str = "8fe5b3d5-2e7f-4a98-2a48-7acc60fe0505";
+/// Write characteristic: central → Flipper.
+const SERIAL_RX: &str = "8fe5b3d6-2e7f-4a98-2a48-7acc60fe0505";
+/// Notify characteristic: Flipper → central.
+const SERIAL_TX: &str = "8fe5b3d7-2e7f-4a98-2a48-7acc60fe0505";
+
+/// A single BLE write is limited by the negotiated MTU; 20 bytes is always safe and the
+/// line protocol reassembles on the far side.
+const CHUNK: usize = 20;
+const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
+
+pub struct BleLink {
+    outbound: mpsc::UnboundedSender<Vec<u8>>,
+    inbound: Arc<Mutex<VecDeque<String>>>,
+    connected: Arc<AtomicBool>,
+    rssi: Arc<AtomicI32>,
+    name: String,
+    address: String,
+    /// Kept alive for the lifetime of the link; dropping it stops the tasks.
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl BleLink {
+    /// Find the Flipper and connect. `preferred` may hold an address or a name fragment.
+    pub fn open(preferred: &str) -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("murmur-ble")
+            .build()
+            .context("starting the BLE runtime")?;
+
+        let found = runtime.block_on(discover(preferred))?;
+        let peripheral = found.peripheral;
+        let name = found.name;
+        let address = found.address;
+        let tx_uuid = found.tx;
+        let rx_uuid = found.rx;
+
+        let (outbound, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let inbound = Arc::new(Mutex::new(VecDeque::<String>::new()));
+        let connected = Arc::new(AtomicBool::new(true));
+        let rssi = Arc::new(AtomicI32::new(found.rssi));
+
+        let task_inbound = inbound.clone();
+        let task_connected = connected.clone();
+        let task_rssi = rssi.clone();
+
+        runtime.spawn(async move {
+            let mut notifications = match peripheral.notifications().await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::warn!(%error, "Companion BLE notifications unavailable");
+                    task_connected.store(false, Ordering::SeqCst);
+                    return;
+                }
+            };
+            let mut partial: Vec<u8> = Vec::new();
+            let mut ticker = tokio::time::interval(Duration::from_secs(10));
+
+            loop {
+                tokio::select! {
+                    incoming = notifications.next() => {
+                        let Some(note) = incoming else { break };
+                        if note.uuid != tx_uuid.uuid {
+                            continue;
+                        }
+                        for byte in note.value {
+                            if byte == b'\n' {
+                                if let Ok(line) = String::from_utf8(partial.clone()) {
+                                    let trimmed = line.trim_end_matches('\r').to_string();
+                                    if !trimmed.is_empty() {
+                                        if let Ok(mut queue) = task_inbound.lock() {
+                                            if queue.len() < 64 {
+                                                queue.push_back(trimmed);
+                                            }
+                                        }
+                                    }
+                                }
+                                partial.clear();
+                            } else if partial.len() < 4096 {
+                                partial.push(byte);
+                            }
+                        }
+                    }
+                    outgoing = outbound_rx.recv() => {
+                        let Some(bytes) = outgoing else { break };
+                        for chunk in bytes.chunks(CHUNK) {
+                            if peripheral
+                                .write(&rx_uuid, chunk, WriteType::WithoutResponse)
+                                .await
+                                .is_err()
+                            {
+                                task_connected.store(false, Ordering::SeqCst);
+                                return;
+                            }
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        if !peripheral.is_connected().await.unwrap_or(false) {
+                            task_connected.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                        if let Ok(Some(properties)) = peripheral.properties().await {
+                            if let Some(rssi) = properties.rssi {
+                                task_rssi.store(rssi as i32, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                }
+            }
+            task_connected.store(false, Ordering::SeqCst);
+        });
+
+        Ok(Self {
+            outbound,
+            inbound,
+            connected,
+            rssi,
+            name,
+            address,
+            runtime: Some(runtime),
+        })
+    }
+
+    /// Signal strength of the last refresh, in dBm.
+    pub fn rssi(&self) -> i32 {
+        self.rssi.load(Ordering::Relaxed)
+    }
+}
+
+struct Found {
+    peripheral: btleplug::platform::Peripheral,
+    name: String,
+    address: String,
+    rssi: i32,
+    rx: Characteristic,
+    tx: Characteristic,
+}
+
+async fn discover(preferred: &str) -> Result<Found> {
+    let manager = Manager::new().await.context("asking the OS for a BLE adapter")?;
+    let adapters = manager.adapters().await.context("listing BLE adapters")?;
+    let adapter = adapters
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("No Bluetooth adapter found. Plug in a dongle or enable Bluetooth."))?;
+
+    adapter
+        .start_scan(ScanFilter::default())
+        .await
+        .context("starting a BLE scan")?;
+
+    let deadline = tokio::time::Instant::now() + SCAN_TIMEOUT;
+    let mut chosen = None;
+    while tokio::time::Instant::now() < deadline {
+        for peripheral in adapter.peripherals().await.unwrap_or_default() {
+            let Ok(Some(properties)) = peripheral.properties().await else {
+                continue;
+            };
+            let name = properties.local_name.clone().unwrap_or_default();
+            let address = properties.address.to_string();
+            let matches_name = name.to_lowercase().contains("flipper");
+            let matches_preferred = !preferred.is_empty()
+                && (address.eq_ignore_ascii_case(preferred)
+                    || name.to_lowercase().contains(&preferred.to_lowercase()));
+            if matches_preferred || (preferred.is_empty() && matches_name) {
+                chosen = Some((peripheral, name, address, properties.rssi.unwrap_or(0) as i32));
+                break;
+            }
+        }
+        if chosen.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    let (peripheral, name, address, rssi) =
+        chosen.ok_or_else(|| {
+            anyhow!(
+                "No Flipper found over Bluetooth. Start Murmur Companion on the device and keep it nearby."
+            )
+        })?;
+
+    adapter.stop_scan().await.ok();
+
+    peripheral.connect().await.map_err(|error| {
+        anyhow!(
+            "Bluetooth connection refused: {error}. Pair with the Flipper and enter the PIN it shows, then reconnect."
+        )
+    })?;
+    peripheral
+        .discover_services()
+        .await
+        .context("reading the device's GATT services")?;
+
+    let characteristics = peripheral.characteristics();
+    let in_serial = |c: &Characteristic| c.service_uuid.to_string().eq_ignore_ascii_case(SERIAL_SERVICE);
+    let writable = |c: &Characteristic| {
+        c.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE)
+            || c.properties.contains(CharPropFlags::WRITE)
+    };
+    let notifying = |c: &Characteristic| c.properties.contains(CharPropFlags::NOTIFY);
+
+    // Prefer the serial service by UUID, then fall back to the first service of the right
+    // shape so a firmware that renumbers its GATT still works.
+    let mut rx = characteristics
+        .iter()
+        .find(|c| in_serial(c) && writable(c))
+        .cloned();
+    let mut tx = characteristics
+        .iter()
+        .find(|c| in_serial(c) && notifying(c))
+        .cloned();
+    if rx.is_none() {
+        rx = characteristics.iter().find(|c| writable(c)).cloned();
+    }
+    if tx.is_none() {
+        tx = characteristics.iter().find(|c| notifying(c)).cloned();
+    }
+
+    let rx = rx.ok_or_else(|| anyhow!("The Flipper has no writable serial characteristic"))?;
+    let tx = tx.ok_or_else(|| anyhow!("The Flipper has no notifying serial characteristic"))?;
+    peripheral
+        .subscribe(&tx)
+        .await
+        .context("subscribing to the Flipper's serial notifications")?;
+
+    Ok(Found {
+        peripheral,
+        name: if name.is_empty() { "Flipper".into() } else { name },
+        address,
+        rssi,
+        rx,
+        tx,
+    })
+}
+
+impl Link for BleLink {
+    fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        if !self.connected.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "Bluetooth link is down",
+            ));
+        }
+        let mut bytes = line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        self.outbound
+            .send(bytes)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "BLE writer stopped"))
+    }
+
+    fn poll_line(&mut self) -> std::io::Result<Option<String>> {
+        let Ok(mut queue) = self.inbound.lock() else {
+            return Ok(None);
+        };
+        Ok(queue.pop_front())
+    }
+
+    fn describe(&self) -> String {
+        format!("BLE {} ({})", self.name, self.address)
+    }
+
+    fn is_live(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
+
+    fn rssi(&self) -> Option<i32> {
+        Some(BleLink::rssi(self))
+    }
+}
+
+impl Drop for BleLink {
+    fn drop(&mut self) {
+        self.connected.store(false, Ordering::SeqCst);
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}

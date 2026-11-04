@@ -4,7 +4,7 @@ App(
     apptype=FlipperAppType.EXTERNAL,
     entry_point="murmur_companion_app",
     stack_size=4 * 1024,
-    requires=["gui", "storage", "notification"],
+    requires=["gui", "storage", "notification", "bt"],
     fap_category="Tools",
     fap_version="0.2.3",
     fap_description="One-button remote for Murmur dictation over USB",
