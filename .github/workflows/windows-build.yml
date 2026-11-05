@@ -21,6 +21,7 @@ jobs:
     # Fork PRs never run here. Tag builds wait for a real Windows runner instead of failing
     # against a billing-locked hosted runner.
     if: >-
+      vars.ENABLE_WINDOWS == 'true' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository ||
        vars.WINDOWS_RUNNER == '') &&
@@ -71,7 +72,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           python -m venv engine/.venv
-          $Python = 'engine/.venv/Scripts/python.exe'
+          $Python = (Resolve-Path 'engine/.venv/Scripts/python.exe').Path
           & $Python -m pip install --upgrade pip
           & $Python -m pip install -r engine/requirements.txt pyinstaller
           if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }

@@ -45,6 +45,16 @@ class UserFiles(unittest.TestCase):
     def install(self):
         INSTALLER.install(self.binary, self.sidecar)
 
+    def test_engine_path_rejects_symlink_before_venv_writes(self):
+        engine = self.home / ".local/share/murmur/engine"
+        engine.parent.mkdir(parents=True)
+        elsewhere = self.base / "unrelated"
+        elsewhere.mkdir()
+        engine.symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            INSTALLER.engine_path()
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
     def test_install_verify_repeat_launcher_and_desktop(self):
         self.install()
         prefix = self.home / ".local"

@@ -4,9 +4,9 @@ The mark is a microphone capsule with a wave slit cut through it: the capsule sa
 push-to-talk dictation, the slit is the voice running through it. A muted cradle and
 stem anchor it so the silhouette still reads as a microphone at 32 px.
 
-- `murmur-icon.svg` — the app tile, `viewBox 0 0 1024 1024`, rounded-square background,
+- `murmur-icon.svg`; the app tile, `viewBox 0 0 1024 1024`, rounded-square background,
   used to generate every packaged size.
-- `murmur-tray.svg` — the same mark as a single-colour glyph on transparency
+- `murmur-tray.svg`; the same mark as a single-colour glyph on transparency
   (`currentColor`) for panels that want a monochrome tray icon.
 
 ## Palette
@@ -38,3 +38,15 @@ copies used by the desktop entry are refreshed.
 The microphone silhouette survives 16 px and 32 px; the wave slit softens into a
 single dark band below 32 px. That is deliberate: at tray sizes the shape carries the
 identity, and the slit becomes detail rather than the point.
+
+## Repository banner
+
+`readme-banner.svg` is the README header artwork. It uses the app palette and an
+illustrated voice-to-text panel, not a screenshot. Text remains editable in the
+SVG. Keep the alt text in the README when replacing it.
+
+Export a PNG for an announcement with:
+
+```sh
+inkscape docs/branding/readme-banner.svg --export-filename=murmur-banner.png --export-width=1440
+```

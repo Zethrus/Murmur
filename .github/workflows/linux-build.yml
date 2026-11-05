@@ -41,6 +41,8 @@ jobs:
       GGML_CPU_ALL_VARIANTS: 'OFF'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Prepare temporary directory
         run: mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
       - name: Provision runner dependencies
@@ -93,6 +95,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:ui
+      - name: Test installers and release validation
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Test Rust including unavailable Enhance backend
         env:
           # Debug symbols from the test build are what fill a self-hosted runner's disk
@@ -134,18 +138,11 @@ jobs:
           cp "$release"/bundle/appimage/*.AppImage .cache/artifacts/linux/
           tar -C .cache/artifacts/linux -czf .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
             murmur murmur-engine
-      - name: Publish Linux assets to the release (tags only)
+      - name: Attach Linux assets to the draft (tags only)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-          body: |
-            Unsigned builds. Windows runtime and GPU behavior remain unverified on real Windows hardware.
-            Portable archives include the required adjacent engine sidecar; keep the pair together.
-            Models are not bundled: install a model explicitly in Settings → Engine.
-          files: .cache/artifacts/linux/*
-          fail_on_unmatched_files: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" .cache/artifacts/linux/* --clobber
       - name: Upload build artifacts (best effort)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         continue-on-error: true

@@ -130,128 +130,227 @@ fn wait_for_modifiers_released() {
 ///
 /// Spawning `xdotool` per utterance from the GTK process loses the opening token of the transcript
 /// (verified with `xev`: the keystrokes never reach the focused window). A helper started once at
-/// app launch, in its own session, types on request — same context as typing by hand from a shell,
-/// which works. The app hands over a payload file and signals a FIFO.
+/// app launch, in its own session, types on request in the same context as typing by hand from a shell,
+/// which works. The app uses a private payload file and signals its owned child.
 #[cfg(target_os = "linux")]
 mod helper {
     use super::*;
     use std::fs;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-    use std::process::Stdio;
+    use std::os::unix::{fs::DirBuilderExt, process::CommandExt};
+    use std::path::PathBuf;
+    use std::process::{Child, Stdio};
+    use std::sync::Mutex;
 
-    struct Paths {
-        fifo: PathBuf,
-        payload: PathBuf,
-        pid: PathBuf,
-        done: PathBuf,
+    static HELPER: Mutex<Option<Helper>> = Mutex::new(None);
+
+    struct Helper {
+        child: Child,
+        directory: PathBuf,
     }
-    fn paths() -> Result<Paths> {
-        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+    impl Drop for Helper {
+        fn drop(&mut self) {
+            // Kill the session's process group while its leader is still our unreaped
+            // child. This also stops an in-flight xdotool. Never signal a reaped PID.
+            if matches!(self.child.try_wait(), Ok(None)) {
+                unsafe {
+                    libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
+                }
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+    fn running(child: &mut Child) -> Result<bool> {
+        Ok(child
+            .try_wait()
+            .context("Check injection helper")?
+            .is_none())
+    }
+    fn signal(child: &mut Child) -> Result<()> {
+        if !running(child)? {
+            bail!("Injection helper exited");
+        }
+        // HELPER stays locked through delivery. No other thread can reap this child
+        // between the status check and signal, so PID reuse cannot target a stranger.
+        if unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGUSR1) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("Signal injection helper");
+        }
+        Ok(())
+    }
+    fn start() -> Result<Helper> {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .context("XDG_RUNTIME_DIR is unset; cannot reach the injection helper")?;
-        Ok(Paths {
-            fifo: dir.join("murmur-inject.fifo"),
-            payload: dir.join("murmur-inject.txt"),
-            pid: dir.join("murmur-inject.pid"),
-            done: dir.join("murmur-inject.done"),
-        })
-    }
-    fn alive(pid: &Path) -> bool {
-        fs::read_to_string(pid)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u32>().ok())
-            .map(|pid| Path::new(&format!("/proc/{pid}")).exists())
-            .unwrap_or(false)
-    }
-    fn ensure_running(paths: &Paths) -> Result<()> {
-        if alive(&paths.pid) {
-            return Ok(());
-        }
-        if !paths.fifo.exists() {
-            let status = Command::new("mkfifo")
-                .arg(&paths.fifo)
-                .status()
-                .context("Create injection FIFO")?;
-            if !status.success() {
-                bail!("mkfifo exited with status {status}");
-            }
-        }
-        // SIGUSR1 is the trigger: the trap types whatever the payload file holds.
-        let script = format!(
-            "echo $$ > {pid}; trap 'sleep 0.25; xdotool type --delay 6 \"$(cat {payload})\"; : > {done}' USR1; \
-             while kill -0 {owner} 2>/dev/null; do sleep 0.25; done",
-            owner = std::process::id(),
-            pid = paths.pid.display(),
-            payload = paths.payload.display(),
-            done = paths.done.display()
-        );
-        Command::new("setsid")
-            .arg("sh")
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).map_err(|error| anyhow::anyhow!("Helper nonce: {error}"))?;
+        let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+        let directory = runtime.join(format!("murmur-inject-{suffix}"));
+        fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let script = "trap 'sleep 0.25; if xdotool type --delay 6 -- \"$(cat payload)\"; then : > done; else : > failed; fi' USR1; : > ready; while :; do sleep 0.25; done";
+        let owner = std::process::id();
+        let mut command = Command::new("sh");
+        command
             .arg("-c")
             .arg(script)
+            .current_dir(&directory)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("Start injection helper")?;
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() == -1 || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != owner as libc::pid_t {
+                    return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+                }
+                Ok(())
+            });
+        }
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&directory);
+                return Err(error).context("Start injection helper");
+            }
+        };
+        let mut helper = Helper { child, directory };
         for _ in 0..75 {
-            if alive(&paths.pid) {
-                return Ok(());
+            if helper.directory.join("ready").exists() && running(&mut helper.child)? {
+                return Ok(helper);
             }
             thread::sleep(Duration::from_millis(20));
         }
-        bail!("injection helper did not come up")
+        bail!("Injection helper did not become ready")
     }
-    /// Hand the transcript to the helper and wait for it to finish typing.
     pub fn submit(text: &str) -> Result<()> {
-        let paths = paths()?;
-        ensure_running(&paths)?;
-        let _ = fs::remove_file(&paths.done);
-        let staged = paths.payload.with_extension("staged");
-        fs::write(&staged, text).context("Stage transcript for the helper")?;
-        fs::rename(&staged, &paths.payload).context("Publish transcript for the helper")?;
-        tracing::info!("helper: payload staged");
-        let pid = fs::read_to_string(&paths.pid)
-            .context("Read injection helper pid")?
-            .trim()
-            .to_owned();
-        tracing::info!(%pid, "helper: signalling");
-        let status = Command::new("kill")
-            .arg("-USR1")
-            .arg(&pid)
-            .status()
-            .context("Signal injection helper")?;
-        tracing::info!(ok = status.success(), "helper: signalled");
-        if !status.success() {
-            bail!("kill -USR1 {pid} failed");
-        }
-        // Typing runs at ~6 ms per character; give the helper room to drain the payload.
-        // Wait for the helper's completion marker instead of guessing how long typing takes.
-        let budget = 300 + text.chars().count() as u64 * 20;
-        for _ in 0..(budget / 10) {
-            if paths.done.exists() {
-                return Ok(());
+        let mut slot = HELPER
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Helper lock poisoned"))?;
+        if let Some(helper) = slot.as_mut() {
+            if !running(&mut helper.child)? {
+                *slot = None;
             }
-            thread::sleep(Duration::from_millis(10));
         }
-        bail!("injection helper timed out after {budget} ms")
+        if slot.is_none() {
+            *slot = Some(start()?);
+        }
+        let helper = slot.as_mut().context("Injection helper unavailable")?;
+        let payload = helper.directory.join("payload");
+        let done = helper.directory.join("done");
+        let failed = helper.directory.join("failed");
+        let _ = fs::remove_file(&done);
+        let _ = fs::remove_file(&failed);
+        fs::write(&payload, text).context("Stage transcript for the helper")?;
+        let result = (|| {
+            signal(&mut helper.child)?;
+            let budget = 1000 + text.chars().count() as u64 * 20;
+            for _ in 0..(budget / 10) {
+                if done.exists() {
+                    return Ok(());
+                }
+                if failed.exists() || !running(&mut helper.child)? {
+                    bail!("Injection helper failed");
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            bail!("Injection helper timed out after {budget} ms")
+        })();
+        let _ = fs::remove_file(payload);
+        if result.is_err() {
+            *slot = None;
+        }
+        result
+    }
+    pub fn stop() {
+        if let Ok(mut helper) = HELPER.lock() {
+            *helper = None;
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn exited_child_is_not_signalled() {
+            let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+            child.wait().unwrap();
+            assert!(signal(&mut child).is_err());
+        }
+        #[test]
+        fn dropping_helper_stops_descendants() {
+            let directory =
+                std::env::temp_dir().join(format!("murmur-descendant-test-{}", std::process::id()));
+            fs::create_dir_all(&directory).unwrap();
+            let mut command = Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    "sleep 30 & echo $! > descendant; while :; do sleep 1; done",
+                ])
+                .current_dir(&directory);
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let child = command.spawn().unwrap();
+            let helper = Helper {
+                child,
+                directory: directory.clone(),
+            };
+            let pid = (0..100)
+                .find_map(|_| {
+                    let pid = fs::read_to_string(directory.join("descendant"))
+                        .ok()
+                        .and_then(|value| value.trim().parse::<u32>().ok());
+                    if pid.is_none() {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    pid
+                })
+                .expect("Helper descendant did not start");
+            drop(helper);
+            for _ in 0..100 {
+                match fs::read_to_string(format!("/proc/{pid}/stat")) {
+                    Err(_) => return,
+                    Ok(stat) if stat.rsplit_once(") ").unwrap().1.starts_with('Z') => return,
+                    _ => thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            panic!("Helper descendant survived shutdown");
+        }
+        #[test]
+        fn dropping_owned_helper_does_not_kill_unrelated_process() {
+            let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
+            let directory =
+                std::env::temp_dir().join(format!("murmur-helper-test-{}", unrelated.id()));
+            fs::create_dir(&directory).unwrap();
+            fs::write(
+                directory.join("murmur-inject.pid"),
+                unrelated.id().to_string(),
+            )
+            .unwrap();
+            let child = Command::new("sleep").arg("30").spawn().unwrap();
+            drop(Helper {
+                child,
+                directory: directory.clone(),
+            });
+            assert!(running(&mut unrelated).unwrap());
+            unrelated.kill().unwrap();
+            unrelated.wait().unwrap();
+            assert!(!directory.exists());
+        }
     }
 }
-/// Stop the injection helper on exit so no orphaned process can type into the session.
+/// Stop only the helper owned by this application process.
 #[cfg(target_os = "linux")]
 pub fn stop_helper() {
-    let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
-        return;
-    };
-    let runtime = std::path::PathBuf::from(dir);
-    if let Ok(raw) = std::fs::read_to_string(runtime.join("murmur-inject.pid")) {
-        let pid = raw.trim().to_owned();
-        if !pid.is_empty() {
-            let _ = Command::new("kill").arg(&pid).status();
-        }
-    }
-    let _ = std::fs::remove_file(runtime.join("murmur-inject.pid"));
+    helper::stop();
 }
 #[cfg(not(target_os = "linux"))]
 pub fn stop_helper() {}
@@ -266,12 +365,12 @@ fn xdotool_type(text: &str, _class: &str) -> Result<()> {
         Ok(()) => return Ok(()),
         Err(error) => tracing::warn!(%error, "Injection helper unavailable; typing directly"),
     }
-    let quoted = format!("'{}'", text.replace('\'', "'\\''"));
     let status = Command::new("xdotool")
         .arg("type")
         .arg("--delay")
         .arg("6")
-        .arg(&quoted[1..quoted.len() - 1])
+        .arg("--")
+        .arg(text)
         .status()
         .context("Run xdotool for typing")?;
     if status.success() {
@@ -344,22 +443,6 @@ impl Injector {
         clipboard.set_text(text).context("Copy transcript")?;
         if path == InjectionPath::ClipboardOnly {
             return Ok(path);
-        }
-        // Short transcripts are typed even when the policy chose paste: the chord is the least
-        // reliable step in the pipeline, so it stays reserved for text too long to type quickly.
-        #[cfg(target_os = "linux")]
-        if text.chars().count() <= 0 {
-            match xdotool_type(text, focused) {
-                Ok(()) => {
-                    tracing::info!(
-                        chars = text.chars().count(),
-                        "Typed transcript instead of pasting"
-                    );
-                    Self::restore(clipboard, previous, text);
-                    return Ok(path);
-                }
-                Err(error) => tracing::warn!(%error, "Typing failed; falling back to paste"),
-            }
         }
         #[cfg(target_os = "linux")]
         let sent = xdotool_chord(is_terminal(focused));
