@@ -1,6 +1,7 @@
 # Public release audit
 
-November 5, 2026. Release candidate: 0.4.1. Scope: Linux x86_64 and Flipper Zero.
+November 5, 2026. Published release: [0.4.1](https://github.com/Zethrus/Murmur/releases/tag/v0.4.1).
+Scope: Linux x86_64 and Flipper Zero.
 Android and Windows are deferred as described in [the roadmap](roadmap.md).
 
 ## Fixed in this candidate
@@ -36,8 +37,24 @@ Android and Windows are deferred as described in [the roadmap](roadmap.md).
   against all six published SHA-256 hashes. The frozen engine started, and the
   portable executable pair matched the standalone asset hashes.
 
-These checks do not establish that 0.4.1 is published. The release workflow still
-has to build and publish the candidate from its final source tag.
+## Publication verified
+
+[The release workflow](https://github.com/Zethrus/Murmur/actions/runs/42097981200)
+completed successfully. Version 0.4.1 was published on November 5 at 20:17 UTC.
+The latest-release link resolves to 0.4.1 without authentication.
+
+All six artifacts were downloaded and checked against the published `SHA256SUMS`.
+The archive contains the same executable pair as the standalone downloads, with
+execute permissions preserved. All seven public download links, including the
+checksum file, returned successfully without authentication.
+
+The packaged app remained running for 12 seconds in an isolated D-Bus/Xvfb session.
+The downloaded frozen engine passed ping, model listing, and shutdown checks with
+an empty model directory and no download. This is a startup check, not a speech
+recognition or physical-device test.
+
+The Linux binary requires glibc 2.39. The README and release notes state the
+Ubuntu 24.04 build baseline and direct older distributions to build from source.
 
 ## Remaining validation limits
 
