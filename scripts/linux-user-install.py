@@ -34,6 +34,14 @@ def locations():
     return home, config, data, prefix
 
 
+def engine_path():
+    _, _, data, _ = locations()
+    engine = safe(data / "murmur/engine")
+    safe(engine / ".venv")
+    safe(engine / "murmur_engine")
+    return engine
+
+
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").digest() if hasattr(hashlib, "file_digest") else hash_stream(stream)
@@ -175,13 +183,16 @@ def main():
     install_args = commands.add_parser("install")
     install_args.add_argument("--binary", type=Path, required=True)
     install_args.add_argument("--sidecar", type=Path, required=True)
+    commands.add_parser("engine-path")
     remove_args = commands.add_parser("uninstall")
     remove_args.add_argument("--purge", action="store_true")
     args = parser.parse_args()
     if sys.platform != "linux" or os.geteuid() == 0:
         parser.error("Use a regular Linux user, not root")
     try:
-        if args.command == "install":
+        if args.command == "engine-path":
+            print(engine_path())
+        elif args.command == "install":
             install(args.binary, args.sidecar)
         else:
             uninstall(args.purge)

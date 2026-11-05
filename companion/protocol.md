@@ -53,7 +53,7 @@ feedback, under rules that keep the original promise about persistence:
   line heals on the next update. A bare `T` (or `T `) clears the live buffer and removes
   its provisional RAM history entry when the final transcript is empty. Both forms fit
   within the 220-byte line limit.
-- Everything else — verbs, state, counters — still comes from a closed vocabulary.
+- Everything else; verbs, state, counters; still comes from a closed vocabulary.
 
 ## Handshake
 
@@ -64,9 +64,9 @@ renegotiate:
 HELLO <protocol> <app_version> <role>
 ```
 
-- `protocol` — integer, currently `4`
-- `app_version` — the Murmur version, e.g. `0.3.0`
-- `role` — `flipper`, `host`, or (later) `phone`
+- `protocol`; integer, currently `4`
+- `app_version`; the Murmur version, e.g. `0.3.0`
+- `role`; `flipper`, `host`, or (later) `phone`
 
 A receiver that sees a `protocol` it does not implement keeps the link open, refuses the
 message types it does not know, and reports the mismatch to the user. Unknown message types
@@ -132,7 +132,7 @@ to cancel regardless of the mapped OK-long action. A real `B OK LONG` still foll
 ## Liveness and latency
 
 Both ends send a bare `P` every 5 s. A bare heartbeat is presence only and is **never**
-answered with another `P` — replying would make both ends ping-pong forever.
+answered with another `P`; replying would make both ends ping-pong forever.
 
 A host that wants a round-trip time sends `P <digits>`. The device echoes that token once,
 verbatim, and the host publishes the measured difference to the device as `L`. No traffic
@@ -141,8 +141,8 @@ closes the transport and retries with backoff (1 s, doubling to 5 s).
 
 ## Transports
 
-- **USB** — the Flipper app claims `usb_cdc_single`; the host opens the CDC device.
-- **BLE** — the Flipper app runs the BLE serial profile (`8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000`
+- **USB**; the Flipper app claims `usb_cdc_single`; the host opens the CDC device.
+- **BLE**; the Flipper app runs the BLE serial profile (`8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000`
   service, write `19ed82ae-ed21-4c9d-4145-228e62fe0000`, indicate
   `19ed82ae-ed21-4c9d-4145-228e61fe0000`); the host connects as a GATT central over `btleplug`. Bonding is the
   firmware's: the Flipper shows a PIN, the host enters it once and keeps the key.

@@ -1,8 +1,8 @@
 # Linux / Windows design parity
 
-Status: Linux application behavior was verified end-to-end before this packaging
-phase. Matched cross-platform screenshots and Windows hardware validation are
-pending. Do not mark a checklist item complete solely because a build or DOM test
+Status, November 5, 2026: today's release covers Linux and Flipper. Earlier Linux
+checks do not establish that a newly changed binary has passed hardware testing.
+Matched cross-platform screenshots and Windows hardware validation are pending. Do not mark a checklist item complete solely because a build or DOM test
 passes. Windows remains **unverified on real Windows hardware**.
 
 ## Must match
@@ -11,7 +11,7 @@ Use the same commit, model, language, theme, settings and test transcript on bot
 systems. Compare at equal logical window size and overlay scale, not merely equal
 physical screenshot size.
 
-- [ ] Settings: sidebar width/order, five page labels, content gutters, row heights,
+- [ ] Settings: sidebar width/order, six page labels, content gutters, row heights,
   cards, radii, spacing, text hierarchy, label alignment and wrapping.
 - [ ] General: shortcut chips/capture/conflict errors, hold/toggle, language,
   translation, overlay controls, cue controls, theme and autostart setting.
@@ -38,7 +38,7 @@ physical screenshot size.
   transcribing dots, done check and amber error; hiding/transition behavior agrees.
 - [ ] Keyboard accessibility: tab order, visible focus, capture/reset behavior and
   usable controls. Reduced-motion preference is respected.
-- [ ] Resizing: default 900 × 660 settings window and 700 × 500 minimum remain
+- [ ] Resizing: default 1000 × 780 settings window and 760 × 560 minimum remain
   usable; long model/device names, dictionary entries and translations fit.
 - [ ] Runtime: hold/release and toggle/silence stop, distinct code shortcut, Esc
   cancel, cue order/mute, tray actions, single-instance focus and login startup.
@@ -104,8 +104,8 @@ this checklist is not a request to redesign the app or add platform-specific UI.
    Optional image diffs are triage aids, not automatic parity verdicts.
 9. Keep small, privacy-reviewed PNGs with the documentation. Large captures and
    video under `captures/` are gitignored; link external evidence only after
-   reviewing it for personal information. Replace the root README placeholder
-   only when representative real screenshots exist.
+   reviewing it for personal information. Add real screenshots to the README only after reviewing them for personal data.
+   The current banner is an illustration, not a screenshot.
 
 ## Evidence record template
 

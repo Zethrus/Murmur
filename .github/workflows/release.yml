@@ -5,76 +5,59 @@ on:
     tags: ['v*']
 
 permissions:
-  # The called build workflows attach release assets, so they need contents: write here too;
-  # a reusable workflow may never request more permission than its caller grants.
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # Both build workflows attach their own assets when the ref is a v* tag, so the release does not
-  # depend on Actions artifact storage (the account quota is small and fills after one build).
-  linux:
-    uses: ./.github/workflows/linux-build.yml
-  # Both jobs are gated behind repository variables because the account is currently locked on
-  # billing: GitHub-hosted runners refuse to start, so they would fail without doing any work.
-  # Set ENABLE_WINDOWS / ENABLE_FLIPPER to "true" in Settings -> Secrets and variables -> Actions
-  # -> Variables once that is resolved. Unset means skipped, and publish only needs Linux.
-  windows:
-    if: vars.ENABLE_WINDOWS == 'true'
-    uses: ./.github/workflows/windows-build.yml
-  flipper:
-    # After linux: the release object and its SHA256SUMS are created there, and the FAP is
-    # attached to it, so starting earlier races an empty release.
-    needs: linux
-    if: vars.ENABLE_FLIPPER == 'true'
-    uses: ./.github/workflows/flipper-build.yml
-  publish:
-    needs: [linux, windows, flipper]
-    # A Windows runner is optional until one exists; a failed Windows build must not block
-    # publishing the Linux assets that did build.
-    # The companion app is additive: a Flipper build failure must not withhold the desktop
-    # release, and a missing .fap is only an error when its job succeeded.
-    if: always() && needs.linux.result == 'success'
+  prepare:
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    permissions:
-      contents: write
     steps:
-      - name: Verify the published asset set
-        shell: bash
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Create or resume a draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p release-assets && cd release-assets
-          gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --pattern '*' --clobber
-          ls -l
-          test -s murmur
-          test -s murmur-engine
-          test -s murmur-linux-x86_64.tar.gz
-          for pattern in '*.deb' '*.AppImage'; do
-            compgen -G "$pattern" >/dev/null || { echo "missing $pattern" >&2; exit 1; }
-          done
-          if compgen -G '*.exe' >/dev/null || compgen -G '*.zip' >/dev/null; then
-            test -s murmur.exe
-            test -s murmur-engine.exe
-            test -s murmur-windows-x86_64.zip
-            compgen -G '*-setup.exe' >/dev/null || { echo 'missing *-setup.exe' >&2; exit 1; }
+          python3 scripts/check-release.py version "$GITHUB_REF_NAME"
+          if gh release view "$GITHUB_REF_NAME" --json isDraft > release-state.json; then
+            python3 -c 'import json; assert json.load(open("release-state.json"))["isDraft"], "Published releases are immutable; use a new version"'
           else
-            echo 'No Windows assets attached: no Windows runner is configured yet.'
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
+              --title "Murmur $GITHUB_REF_NAME" --notes-file docs/release-notes.md
           fi
-          if compgen -G 'murmur-companion-*.fap' >/dev/null; then
-            test -s "murmur-companion-${GITHUB_REF_NAME}.fap"
-          else
-            echo "No Flipper companion .fap attached (companion job: ${{ needs.flipper.result }})."
-          fi
-      - name: Write and attach SHA256SUMS
-        shell: bash
+  linux:
+    needs: prepare
+    uses: ./.github/workflows/linux-build.yml
+  flipper:
+    needs: prepare
+    uses: ./.github/workflows/flipper-build.yml
+  # Windows and Android are deferred. See docs/roadmap.md.
+  publish:
+    needs: [linux, flipper]
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify all assets and publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          cd release-assets
-          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort \
-            | xargs -d '\n' sha256sum > "$RUNNER_TEMP/SHA256SUMS"
-          cp "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
-          cat SHA256SUMS
-          gh release upload "${GITHUB_REF_NAME}" SHA256SUMS --clobber --repo "${GITHUB_REPOSITORY}"
+          mkdir -p release-assets
+          gh release download "$GITHUB_REF_NAME" --dir release-assets
+          python3 scripts/check-release.py assets "$GITHUB_REF_NAME" release-assets
+          (cd release-assets && sha256sum --check SHA256SUMS)
+          gh release upload "$GITHUB_REF_NAME" release-assets/SHA256SUMS --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest

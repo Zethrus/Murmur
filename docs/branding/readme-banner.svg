@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="640" viewBox="0 0 1440 640" role="img" aria-labelledby="title desc">
+  <title id="title">Murmur. Your voice, on your machine.</title>
+  <desc id="desc">Local dictation for Linux. A blue waveform flows from a microphone into text. Linux and Flipper Zero.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#10131a"/><stop offset="1" stop-color="#171f31"/></linearGradient>
+    <linearGradient id="wave"><stop stop-color="#7aa2f7"/><stop offset="1" stop-color="#8bd5ca"/></linearGradient>
+    <radialGradient id="glow"><stop stop-color="#7aa2f7" stop-opacity=".13"/><stop offset="1" stop-color="#7aa2f7" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1440" height="640" rx="24" fill="url(#bg)"/>
+  <circle cx="1120" cy="280" r="380" fill="url(#glow)"/>
+  <g fill="none" stroke="#7186ae" stroke-opacity=".09">
+    <path d="M840 0v640M960 0v640M1080 0v640M1200 0v640M1320 0v640M760 80h680M760 200h680M760 320h680M760 440h680M760 560h680"/>
+  </g>
+  <g transform="translate(72 62)">
+    <rect width="46" height="46" rx="14" fill="#7aa2f7" fill-opacity=".12"/>
+    <rect x="18" y="9" width="10" height="20" rx="5" fill="#7aa2f7"/>
+    <path d="M13 22v2a10 10 0 0 0 20 0v-2M23 34v5m-6 0h12" stroke="#a9b1d6" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+    <text x="62" y="32" fill="#e2e8f4" font-family="DejaVu Sans, sans-serif" font-size="30" font-weight="700" letter-spacing="-1">murmur</text>
+  </g>
+  <text x="72" y="242" fill="#f1f4fa" font-family="DejaVu Sans, sans-serif" font-size="64" font-weight="700" letter-spacing="-3">Your voice.</text>
+  <text x="72" y="323" fill="#7aa2f7" font-family="DejaVu Sans, sans-serif" font-size="64" font-weight="700" letter-spacing="-3">Your machine.</text>
+  <text x="76" y="382" fill="#a9b1c4" font-family="DejaVu Sans, sans-serif" font-size="23">Dictation that stays with you.</text>
+  <g transform="translate(76 458)" font-family="DejaVu Sans, sans-serif" font-size="15">
+    <rect width="131" height="38" rx="19" fill="#7aa2f7" fill-opacity=".12" stroke="#7aa2f7" stroke-opacity=".3"/>
+    <text x="25" y="25" fill="#bad0ff">LINUX / X11</text>
+    <rect x="145" width="159" height="38" rx="19" fill="#8bd5ca" fill-opacity=".08" stroke="#8bd5ca" stroke-opacity=".25"/>
+    <text x="169" y="25" fill="#a7dfd6">FLIPPER ZERO</text>
+  </g>
+  <g transform="translate(820 150)">
+    <rect width="538" height="300" rx="24" fill="#101622" stroke="#35435c"/>
+    <circle cx="28" cy="28" r="4" fill="#8bd5ca"/>
+    <text x="42" y="34" fill="#a9b1c4" font-family="DejaVu Sans, sans-serif" font-size="14" letter-spacing="1">VOICE TO TEXT</text>
+    <g stroke="url(#wave)" stroke-width="7" stroke-linecap="round">
+      <path d="M35 113v12m18-24v36m18-49v62m18-82v102m18-65v28m18-60v92m18-112v132m18-100v68m18-48v28m18-57v86m18-116v146m18-125v104m18-78v52m18-37v22m18-61v100m18-122v144m18-108v72m18-48v24m18-38v52m18-42v30m18-20v12m18-28v42m18-30v18m18-14v10m18-10v8m18-16v24"/>
+    </g>
+    <path d="M28 210h482" stroke="#2a354a"/>
+    <text x="28" y="250" fill="#e2e8f4" font-family="DejaVu Sans, sans-serif" font-size="20">A thought, ready to send.</text>
+    <path d="M306 231v23" stroke="#7aa2f7" stroke-width="2"/>
+  </g>
+  <path d="M76 554h1282" stroke="#33405a" stroke-opacity=".6"/>
+  <text x="76" y="589" fill="#7d8ba5" font-family="DejaVu Sans, sans-serif" font-size="15">LOCAL RECOGNITION</text>
+  <text x="330" y="589" fill="#7d8ba5" font-family="DejaVu Sans, sans-serif" font-size="15">NO ACCOUNT</text>
+  <text x="530" y="589" fill="#7d8ba5" font-family="DejaVu Sans, sans-serif" font-size="15">OPEN SOURCE</text>
+  <text x="1358" y="589" text-anchor="end" fill="#7d8ba5" font-family="DejaVu Sans, sans-serif" font-size="15">github.com/Zethrus/Murmur</text>
+</svg>

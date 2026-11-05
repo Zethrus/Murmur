@@ -19,7 +19,7 @@ esac
 cd "$ROOT"
 # Share the native CPU contract with local release builds and CI.
 . "$ROOT/scripts/cpu-baseline.sh"
-for cmd in python3 node npm npx rustc cargo pkg-config cc; do
+for cmd in python3 node npm npx rustc cargo pkg-config cc cmake g++ xdotool xprop; do
   command -v "$cmd" >/dev/null || { printf 'Missing prerequisite: %s\n' "$cmd" >&2; exit 1; }
 done
 node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
@@ -33,7 +33,7 @@ export TMPDIR="$ROOT/.cache/tmp" PIP_CACHE_DIR="$ROOT/.cache/pip"
 export CARGO_TARGET_DIR="$ROOT/src-tauri/target"
 mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
 printf '[1/5] Installing the local engine runtime (venv + model inference)...\n'
-ENGINE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/murmur/engine"
+ENGINE_DIR="$(python3 scripts/linux-user-install.py engine-path)"
 mkdir -p "$ENGINE_DIR"
 if [[ ! -x "$ENGINE_DIR/.venv/bin/python" ]]; then
   python3 -m venv --system-site-packages "$ENGINE_DIR/.venv"

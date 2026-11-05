@@ -31,3 +31,5 @@ Thumbs.db
 
 # Machine-local cargo tuning (e.g. build jobs for thermal headroom); never shared.
 /.cargo/config.toml
+
+.venv-flipper/

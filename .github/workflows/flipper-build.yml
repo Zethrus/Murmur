@@ -4,6 +4,7 @@ name: Flipper companion
 # release workflow for a v* tag.
 on:
   push:
+    branches: ['**']
     paths:
       - 'companion/flipper/**'
       - '.github/workflows/flipper-build.yml'
@@ -21,9 +22,13 @@ jobs:
   build:
     # Same runner pool as the desktop build: the account is billing-locked for hosted
     # runners, and the self-hosted machine already has the toolchain cached.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || vars.LINUX_RUNNER == ''
+    timeout-minutes: 20
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:

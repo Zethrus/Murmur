@@ -1,7 +1,9 @@
-# Murmur — local, private, low-latency dictation (Linux + Windows)
+# Murmur: local, private, low-latency dictation (Linux + Windows)
 
-Implementation spec, v2 (cross-platform). Read this file completely before writing code.
-Build exactly this. Small single-purpose modules over large files. One codebase, two OSes.
+Historical implementation specification, v2. Some details describe earlier milestones.
+For current behavior, use the [README](README.md), [configuration reference](docs/configuration.md),
+and [companion protocol](companion/protocol.md). The November 5 release is Linux and
+Flipper only; Windows and Android are deferred in [the roadmap](docs/roadmap.md).
 
 ## Enhance (optional, phase 1)
 
@@ -16,7 +18,7 @@ including model download and selection. Start/stop cues are audible.
 
 Non-goals: cloud STT, accounts, telemetry, storing audio, Wayland-specific work.
 
-## Stack (decided — do not substitute)
+## Stack (decided: do not substitute)
 
 - **Shell/UI: Tauri v2 + vanilla TypeScript + Vite** (no React/Svelte; smallest, fastest).
   System webview: WebKitGTK 4.1 on Linux, WebView2 on Windows. One web UI, two windows:
@@ -155,18 +157,18 @@ State machine: `idle → listening → transcribing → done → idle`; `listeni
 listening/capturing; `partial` for live preview; `latency` after injection; `error` with a
 human-readable message.
 
-1. **Capture (audio.rs)** — open one cpal input stream at the device's default config, convert
+1. **Capture (audio.rs)**: open one cpal input stream at the device's default config, convert
    to mono f32, resample (linear) to 16 kHz, push into a 60 s ring buffer. Compute RMS per 20 ms
    frame → `level` events (throttled 20 Hz) and silence endpoint detection. On hotkey press record
    the start cursor minus 250 ms pre-roll; on stop assemble PCM, apply `gain`, clamp.
    If the stream errors (device unplugged), emit `error`, rebuild the stream on next press.
-2. **Hotkeys (hotkey.rs)** — global shortcut registration with the configured accelerator.
+2. **Hotkeys (hotkey.rs)**: global shortcut registration with the configured accelerator.
    `hold`: activation → start, deactivation → stop. `toggle`: activation → start/stop
    alternating; auto-stop after `silence_timeout_ms` of silence following ≥300 ms of speech;
    `Escape` (registered only while listening) cancels with no sound. Re-registering a hotkey at
    runtime must succeed within 100 ms and report failure to the UI (conflict message).
    Parse "Ctrl+Alt+D" style strings into Tauri accelerator syntax; reject modifier-only combos.
-3. **Engine (engine.rs + engine/)** — spawn `murmur-engine` sidecar with `--models-dir <path>`;
+3. **Engine (engine.rs + engine/)**: spawn `murmur-engine` sidecar with `--models-dir <path>`;
    stdin/stdout JSON-RPC, one JSON object per line; `{"id":n,"method":"transcribe","params":
    {"pcm_b64":..., "sample_rate":16000, "language":"en", "translate":false, "beam_size":1,
    "vad":true, "initial_prompt":"..."}}` → `{"id":n,"ok":true,"result":{"text":...,"language":
@@ -175,35 +177,35 @@ human-readable message.
    `shutdown`. Auto-restart the sidecar once on crash; surface a persistent error if it fails
    twice. Model loads lazily in the sidecar at first use and stays warm; `device=auto` tries CUDA
    then permanently falls back to CPU, reporting the resolved device in `status`.
-4. **Post-process (postproc.rs)** — trim/collapse whitespace, optional filler removal
-   (um, uh, er, hmm — configurable list, whole words only), replacement map (case-insensitive,
+4. **Post-process (postproc.rs)**: trim/collapse whitespace, optional filler removal
+   (um, uh, er, hmm: configurable list, whole words only), replacement map (case-insensitive,
    longest phrase first), capitalise sentence starts, single trailing space. Never touch numbers,
    mixed-case tokens, URLs or code-like strings.
-5. **Inject (inject.rs)** — `auto`: ASCII ≤1500 chars → enigo text typing; else clipboard paste
-   (save current clipboard text, set ours, send Ctrl+V, wait 300 ms, restore) — with a
+5. **Inject (inject.rs)**: `auto`: ASCII ≤1500 chars → enigo text typing; else clipboard paste
+   (save current clipboard text, set ours, send Ctrl+V, wait 300 ms, restore): with a
    clipboard-restore fallback that leaves the text in the clipboard if restore fails.
    `clipboard_only` or focused-app match in `exclude_apps` → clipboard only.
    Never inject into Murmur's own windows. On Windows use enigo unicode typing for the fast path.
-6. **Sounds (sound.rs)** — synthesise at runtime (no audio files in the repo): start = two
+6. **Sounds (sound.rs)**: synthesise at runtime (no audio files in the repo): start = two
    rising sine tones (660→880 Hz, 45 ms each, 8 ms envelope), stop = falling (880→660), error =
    two 180 Hz buzzes. Scale amplitude by `volume`, play fire-and-forget on a dedicated thread
    (rodio Sink), never block the pipeline, skip when muted/disabled.
-7. **Overlay (overlay.rs + src/overlay)** — separate transparent, undecorated, always-on-top,
+7. **Overlay (overlay.rs + src/overlay)**: separate transparent, undecorated, always-on-top,
    skip-taskbar window, `ignore_cursor_events(true)`, positioned per config on the primary
    monitor's work area (bottom-centre 48 px up, or top-centre). Content: idle = muted dot + "mur";
    listening = 5 animated level bars + optional 2-line partial preview (pill grows to 560 px wide);
    transcribing = pulsing dots; done = check, hide after 900 ms; error = amber dot, hide after
    1.6 s. With `idle_hide` the window hides 1.5 s after going idle. Repaint only on events.
-8. **Tray (main.rs)** — icon, tooltip `Murmur — <state>`, menu: state label (disabled), "Dictate"
+8. **Tray (main.rs)**: icon, tooltip `Murmur: <state>`, menu: state label (disabled), "Dictate"
    (toggle mode only), Sounds mute check, Overlay enabled check, "Settings…", "Reload config",
-   "Quit". Left-click opens Settings. Missing model → tooltip `Murmur — no model`.
-9. **History (history.rs)** — opt-in SQLite (`rusqlite` with `bundled`): `entries(id, ts, text,
+   "Quit". Left-click opens Settings. Missing model → tooltip `Murmur: no model`.
+9. **History (history.rs)**: opt-in SQLite (`rusqlite` with `bundled`): `entries(id, ts, text,
    app, duration_ms, latency_ms, model)`; prune on startup + daily; UI list/search + delete-all.
-10. **First run** — no model: UI shows a banner "Choose a speech model to start dictating" with a
+10. **First run**: no model: UI shows a banner "Choose a speech model to start dictating" with a
    jump to Engine; hotkey press plays the error cue and sets error state with a clear message.
-11. **Single instance** — `tauri-plugin-single-instance`: second launch focuses Settings and exits.
+11. **Single instance**: `tauri-plugin-single-instance`: second launch focuses Settings and exits.
 
-## Coding mode — primary use case: dictating prompts and code (vibecoding)
+## Coding mode: primary use case: dictating prompts and code (vibecoding)
 
 Most dictation output goes into a chat box / editor prompt (Hermes, Cursor, Claude Code, VS Code,
 terminals). Speech-to-text mangles technical tokens unless explicitly handled, so coding mode is a
@@ -251,7 +253,7 @@ Rules:
   Murmur, zethrus, Python, TypeScript, npm, cargo, git, stdin, stdout, JSON-RPC, hotkey, overlay,
   systemd, Wayland, X11, pip, venv, regex, null, boolean` (trim to what is plausible; it only
   biases the decoder via `initial_prompt`).
-- `[audio] max_utterance_s` default 90 — long prompts are normal for vibecoding. Toggle mode is
+- `[audio] max_utterance_s` default 90: long prompts are normal for vibecoding. Toggle mode is
   the recommended mode here (documented in README), silence auto-stop still applies.
 - README gains a "Vibecoding workflow" section: recommend `large-v3-turbo`, toggle mode, code style
   auto-detect, overlay preview to catch misheard identifiers before they land, and the Esc cancel.
@@ -270,7 +272,7 @@ Events to the webview: `state`, `level`, `partial`, `latency`, `error`, `downloa
 
 ## Design tokens (single source of truth, cross-platform parity)
 
-The UI is one codebase, so parity is mostly structural — but WebKitGTK and WebView2 differ in
+The UI is one codebase, so parity is mostly structural: but WebKitGTK and WebView2 differ in
 fonts, default control chrome, scrollbars and sub-pixel rendering. Fix that with tokens, not
 per-platform CSS forks.
 
@@ -283,12 +285,12 @@ per-platform CSS forks.
      `--text-muted`, `--accent`, `--accent-contrast`, `--danger`, `--ok`, `--warn`, `--shadow-1/2`,
      `--overlay-bg`, `--meter-track`, `--meter-fill`) mapped from primitives once, per theme.
   3. **Component** tokens (`--row-height`, `--sidebar-w`, `--card-radius`, `--switch-track`,
-     `--slider-thumb`, `--pill-h`) — no component CSS reads primitives directly.
+     `--slider-thumb`, `--pill-h`): no component CSS reads primitives directly.
 - Themes: `:root` (light), `:root[data-theme="dark"]`, plus `@media (prefers-color-scheme: dark)`
   when `data-theme="auto"`. Every semantic token has a value in both themes; the settings app can
   switch Light / Dark / Auto, and the overlay follows the same tokens.
 - **Platform parity tokens**: `--font-ui` = `"Inter", "Ubuntu", "Segoe UI", system-ui, sans-serif`
-  (WebKitGTK resolves Ubuntu, WebView2 resolves Segoe UI — same metrics bucket, no layout shift);
+  (WebKitGTK resolves Ubuntu, WebView2 resolves Segoe UI: same metrics bucket, no layout shift);
   `--font-mono` = `"JetBrains Mono", "Cascadia Mono", "Ubuntu Mono", monospace`;
   `--scrollbar-w: 10px`; `--hairline: 1px` (accepts 1 device px on both). Both OSes use the same
   sizes, radii, spacing and motion; only font resolution and the scrollbar engine differ, and both
@@ -302,7 +304,7 @@ per-platform CSS forks.
   `font-synthesis: none`, and a `:focus-visible` ring from `--accent` at 2 px/2 px offset.
 - Parity check (manual, in README + DoD): open Settings and the overlay on Linux; on Windows open
   the same build and confirm identical spacing/typography/colour roles, only font family differing.
-  Record both screenshots under `docs/parity/` (gitignored if large — keep small PNGs).
+  Record both screenshots under `docs/parity/` (gitignored if large: keep small PNGs).
 
 ## Settings UI (must look deliberate, not default-browser)
 
