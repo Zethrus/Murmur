@@ -15,7 +15,9 @@ Download the `.deb`, AppImage, or portable `.tar.gz` for Linux. The portable arc
 contains both required executables. The matching `.fap` goes in `apps/Tools` on
 the Flipper's SD card. Check downloads against `SHA256SUMS` from this release.
 
-Use an X11 desktop with tray support, `xdotool`, and `xprop`. Open Settings from
+Linux downloads are built on Ubuntu 24.04 and require glibc 2.39 or newer.
+Build from source on older distributions. Use an X11 desktop with tray support,
+`xdotool`, and `xprop`. Open Settings from
 the tray, install a model in Engine, then select Use model. Hold Ctrl+Alt+D to
 dictate. Models and NVIDIA CUDA libraries are not bundled; CPU inference is the
 default path for these downloads. Packages are unsigned.

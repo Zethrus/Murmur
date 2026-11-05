@@ -1,5 +1,8 @@
 # Build and install from source
 
+Prebuilt downloads use an Ubuntu 24.04 / glibc 2.39 baseline. Building locally
+links against your distribution's libraries instead.
+
 Use a regular user account, not sudo. Prerequisites must already be installed:
 
 - Node.js 22+, npm, Rust stable/Cargo (1.92+ recommended), Python 3.11+ with venv/pip.

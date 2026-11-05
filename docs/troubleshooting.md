@@ -36,6 +36,11 @@ the problem. The app retries a failed engine once before requiring a restart.
 
 ## AppImage or package errors
 
+If startup reports `GLIBC_2.39 not found`, the distribution is older than the
+prebuilt binary's baseline. Current downloads are built on Ubuntu 24.04 and need
+glibc 2.39 or newer. Build from source on the older distribution instead of
+replacing its system C library. AppImage does not remove this requirement.
+
 Try `--appimage-extract-and-run` if FUSE is unavailable. Missing WebKitGTK, GTK,
 audio, or X11 libraries must be installed through your distribution's package
 manager. AppImage does not mean every host library is bundled. The `.deb` declares

@@ -25,8 +25,10 @@ push-to-talk button and a screen for live text.
 
 ## What ships today
 
-**Linux x86_64 and the Flipper Zero companion.** Use an X11 desktop with a working
-microphone and system tray. Native Wayland input is not verified.
+**Linux x86_64 and the Flipper Zero companion.** Current prebuilt downloads use
+Ubuntu 24.04 as their build baseline and require **glibc 2.39 or newer**, plus the
+libraries listed below. On older distributions, build from source. Use an X11
+desktop with a working microphone and system tray. Native Wayland input is not verified.
 
 | Download | Use it for |
 | --- | --- |
