@@ -103,7 +103,7 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   await subscribe("latency",event=>{if (event.text !== undefined) lastTranscript = event.text;});
   const refreshStatus = (): void => { if (refreshTimer !== undefined) return;
     refreshTimer = setTimeout(()=>{refreshTimer = undefined; void call("get_status").then(next=>{
-      if (disposed) return; const changed = next.sidecar_alive !== status.sidecar_alive || next.model_available !== status.model_available || next.device !== status.device;
+      if (disposed) return; const changed = next.sidecar_alive !== status.sidecar_alive || next.model_available !== status.model_available || next.device !== status.device || next.compute !== status.compute || next.fallback_reason !== status.fallback_reason;
       status = next; chrome(); if (changed && page === "Engine") renderPage();
     }).catch(report);},250);
   };

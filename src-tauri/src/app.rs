@@ -33,6 +33,7 @@ pub struct Status {
     pub compute: String,
     pub sidecar_alive: bool,
     pub model_available: bool,
+    pub fallback_reason: Option<String>,
     pub error: Option<String>,
 }
 
@@ -61,6 +62,7 @@ fn apply_warm_status(
     status.model_available = available;
     status.device = device.into();
     status.compute = compute.into();
+    status.fallback_reason = result["fallback_reason"].as_str().map(str::to_owned);
     true
 }
 #[derive(Clone)]
@@ -133,6 +135,7 @@ impl AppState {
             compute: "unloaded".into(),
             sidecar_alive: false,
             model_available: false,
+            fallback_reason: None,
             error: None,
         };
         let companion_network = crate::companion::network::Network::new(app.clone(), &paths.data);
@@ -189,6 +192,7 @@ impl AppState {
             s.model_available = result["model_available"].as_bool().unwrap_or(false);
             s.device = result["device"].as_str().unwrap_or("unloaded").into();
             s.compute = result["compute"].as_str().unwrap_or("unloaded").into();
+            s.fallback_reason = result["fallback_reason"].as_str().map(str::to_owned);
         }
         self.refresh_tray()?;
         self.app
@@ -451,10 +455,11 @@ mod tests {
             compute: "unloaded".into(),
             sidecar_alive: true,
             model_available: true,
+            fallback_reason: None,
             error: None,
         };
         let result = json!({"model":expected.model,"loaded":true,"device":"cpu",
-            "compute":"int8","model_available":true});
+            "compute":"int8","model_available":true,"fallback_reason":"CUDA library missing"});
         let mut changed = expected.clone();
         changed.device = "cuda".into();
         assert!(!apply_warm_status(
@@ -472,5 +477,9 @@ mod tests {
         ));
         assert_eq!(status.device, "cpu");
         assert_eq!(status.compute, "int8");
+        assert_eq!(
+            status.fallback_reason.as_deref(),
+            Some("CUDA library missing")
+        );
     }
 }

@@ -53,6 +53,13 @@ test("sidecar errors refresh the footer without a polling loop",async()=>{
   const h=await settings();h.status.sidecar_alive=false;h.emit("error",{message:"Sidecar stopped"});h.timers.tick(250);await settle();
   assert.match(h.root.querySelector(".sidebar-footer").textContent,/Engine offline/);h.unload();
 });
+test("GPU fallback warning refreshes and clears in Engine settings",async()=>{
+  const h=await settings();await button(h.root,"Engine").dispatch("click");await settle();
+  h.status.fallback_reason="A required CUDA library could not be loaded.";h.emit("state",{state:"idle"});h.timers.tick(250);await settle();
+  assert.match(h.root.textContent,/Using CPU because GPU acceleration is unavailable/);
+  h.status.fallback_reason=null;h.emit("state",{state:"idle"});h.timers.tick(250);await settle();
+  assert.doesNotMatch(h.root.textContent,/Using CPU because GPU acceleration is unavailable/);h.unload();
+});
 test("overlay renders all states, five bars, previews and timed hiding",async()=>{
   const h=await harness();await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);const pill=h.root.querySelector(".pill");
   assert.equal(h.root.dataset.state,"idle");h.timers.tick(1500);assert.equal(pill.hidden,true);

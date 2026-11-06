@@ -18,7 +18,7 @@ export function fixture() {
 }
 export async function harness(overrides={}) {
   const {document,root}=makeDocument(),timers=clock(),events=new Map(),calls=[],unloads=[];
-  let config=fixture(); const status={state:"idle",model:"distil-small.en",device:"cpu",compute:"int8",sidecar_alive:true,model_available:true,error:null};
+  let config=fixture(); const status={state:"idle",model:"distil-small.en",device:"cpu",compute:"int8",sidecar_alive:true,model_available:true,fallback_reason:null,error:null};
   const models=[{name:"tiny.en",repo:"test/fixture",size_mb:75,accuracy:"fastest",installed:false},{name:"distil-small.en",repo:"test/fixture",size_mb:335,accuracy:"balanced",installed:true}];
   const enhanceModel={id:"qwen3-1.7b-q4_k_m",display_name:"Qwen3 1.7B · Q4_K_M",repo:"unsloth/Qwen3-1.7B-GGUF",revision:"d7f544eead698dbd1f15126ef60b45a1e1933222",filename:"Qwen3-1.7B-Q4_K_M.gguf",size_bytes:1107409472,sha256:"b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",installed:false};
   const enhanceStatus={revision:1,model_id:enhanceModel.id,installation_state:"not_installed",load_state:"unloaded",backend_available:true,request_id:null,error_code:null,message:null,download:null};

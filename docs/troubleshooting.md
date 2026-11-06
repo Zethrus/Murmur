@@ -24,10 +24,16 @@ input path.
 
 ## GPU inference falls back to CPU
 
-Release downloads do not bundle NVIDIA CUDA libraries. Device Auto falls back to
-CPU when CUDA initialization or inference fails, and stays there until the engine
-restarts. Forced CUDA reports the error instead. The source installer installs
-CUDA runtime wheels, but still needs a compatible NVIDIA driver.
+Desktop builds from this checkout bundle NVIDIA CUDA userspace libraries;
+published 0.4.2 downloads do not. A compatible host
+NVIDIA driver is still required. Device Auto falls back to CPU when CUDA
+initialization or inference fails, and stays there until the engine restarts or
+the device configuration changes. Engine Settings shows a reason for a genuine
+GPU failure; an ordinary CPU-only machine has no warning. A missing library
+suggests an incomplete package; a driver warning calls for checking driver
+compatibility. Forced CUDA reports the error instead of silently using CPU.
+The separately downloaded `murmur-engine` needs an external CUDA userspace
+runtime for GPU use.
 
 ## The engine does not start
 

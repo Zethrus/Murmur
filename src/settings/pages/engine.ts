@@ -49,9 +49,10 @@ export function engine(ctx: PageContext): HTMLElement {
     card("Local inference",
       e.select("device","Compute device","Auto tries CUDA, then falls back to CPU.",[["auto","Automatic"],["cuda","NVIDIA CUDA"],["cpu","CPU"]]),
       row("Detected hardware","Resolved by the local sidecar; may stay unloaded until first use.",el("span","status-value",ctx.status.sidecar_alive ? `${ctx.status.device} · ${ctx.status.compute}` : "Sidecar offline")),
+      ...(c.engine.device === "auto" && ctx.status.fallback_reason ? [el("p","field-error",`Using CPU because GPU acceleration is unavailable. ${ctx.status.fallback_reason}`)] : []),
       e.select("compute_type","Precision","Auto chooses an efficient precision for your hardware.",["auto","int8","int8_float16","float16","float32","int8_float32"]),
       e.slider("beam_size","Beam size","Higher values trade speed for recognition accuracy.",1,10,1),
       e.toggle("vad_filter","Voice activity filter","Skip silent regions before speech recognition."),
-      row("Engine check","A silent, three-second probe; not a microphone recording. First use may warm the model.",stack(test,testResult))),
+      row("Engine check","A silent, three-second inference probe; not a microphone recording. First use may warm the model.",stack(test,testResult))),
     card("Words worth knowing",row("Dictionary","Seeded with coding vocabulary. These words bias recognition; they are not automatic replacements.",listEditor(c.engine.dictionary,setter(ctx,"engine","dictionary"),"dictionary word"))));
 }

@@ -109,15 +109,32 @@ pub async fn test_engine(app: AppHandle) -> Reply<Value> {
     blocking(move || {
         let state = app.state::<AppState>();
         let config = state.config()?;
-        // A repeatable three-second silent inference probe; VAD may correctly return empty text.
-        let result = state.engine.request(
-            "transcribe",
-            controller::params(&vec![0.0; 48_000], &config),
-        )?;
+        // Silence with VAD disabled still iterates the model's inference generator.
+        let mut result = state
+            .engine
+            .request("transcribe", engine_probe_params(&config))?;
         state.refresh_engine()?;
+        result["text"] = json!("");
         Ok(result)
     })
     .await
+}
+
+fn engine_probe_params(config: &crate::config::Config) -> Value {
+    let mut params = controller::params(&vec![0.0; 48_000], config);
+    params["vad"] = json!(false);
+    params
+}
+
+#[cfg(test)]
+mod engine_probe_tests {
+    #[test]
+    fn probe_forces_inference_without_changing_saved_vad() {
+        let config = crate::config::Config::default();
+        assert!(config.engine.vad_filter);
+        assert_eq!(super::engine_probe_params(&config)["vad"], false);
+        assert!(config.engine.vad_filter);
+    }
 }
 #[tauri::command]
 pub async fn list_devices() -> Reply<Vec<audio::DeviceInfo>> {
