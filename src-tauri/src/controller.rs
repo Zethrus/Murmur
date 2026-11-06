@@ -399,7 +399,10 @@ impl Controller {
             chars = text.len(),
             "transcript received"
         );
-        let current = platform::focused_target(&state.app);
+        let (delivery_guard, current) = delivery_target(
+            |busy| set_delivery_busy(state, busy),
+            || platform::focused_target(&state.app),
+        )?;
         let mode = FocusMode::parse(&self.config.injection.focus_change);
         let decision = focus_guard::decide(self.origin.as_ref(), current.as_ref().ok(), mode);
         let mut held = false;
@@ -432,6 +435,7 @@ impl Controller {
                 None
             }
         };
+        drop(delivery_guard);
         if delivered.is_none() && !held {
             state.companion.publish_final_text("");
         }
@@ -473,15 +477,8 @@ impl Controller {
         }
         let mut injection = self.config.injection.clone();
         injection.clipboard_only |= clipboard_only;
-        // Click-through only while keystrokes/paste are in flight.
-        overlay::set_busy(&state.app, true)?;
-        state.enhance.publish(state);
-        let injected = self.injector.inject(&text, &injection, class, style);
-        if let Err(error) = overlay::set_busy(&state.app, false) {
-            tracing::warn!(%error, "Restore overlay cursor handling");
-        }
-        state.enhance.publish(state);
-        let path = injected?;
+        // Both callers acquire the drag-release barrier before reading focus.
+        let path = self.injector.inject(&text, &injection, class, style)?;
         let latency = start.elapsed().as_millis() as u64;
         tracing::info!(latency_ms = latency, app = %class, style = ?style, chars = text.len(), "transcript delivered");
         state
@@ -583,6 +580,10 @@ impl Controller {
         if !self.idle_for_held(state) {
             return Ok(());
         }
+        let (delivery_guard, current) = delivery_target(
+            |busy| set_delivery_busy(state, busy),
+            || platform::focused_target(&state.app),
+        )?;
         let class = if clipboard {
             // Clipboard-only output still follows the original app's style.
             held.origin
@@ -590,7 +591,7 @@ impl Controller {
                 .filter(|class| !inject::is_own_app(class))
                 .unwrap_or_default()
         } else {
-            match platform::focused_target(&state.app) {
+            match current {
                 Ok(Focus::Window { class, .. }) => class,
                 Ok(Focus::Own) => {
                     self.held_message(state, held.id, FOCUS_TARGET_FIRST);
@@ -618,6 +619,7 @@ impl Controller {
                 return Ok(());
             }
         };
+        drop(delivery_guard);
         state.held.discard(held.id);
         if clipboard && delivered.is_some() {
             state.held.notice(COPIED_HELD, Instant::now());
@@ -710,13 +712,8 @@ impl Controller {
         if state.held.tick(now) {
             state.enhance.refresh_overlay(state);
         }
-        match overlay::settled_placement(&state.app) {
-            Ok(Some(placement)) => {
-                overlay::suppress_moves();
-                state.update(json!({"overlay":{"position":"custom","placement":placement}}))?;
-            }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(%error, "Overlay placement"),
+        if let Err(error) = state.save_overlay_placement() {
+            tracing::warn!(%error, "Save overlay placement; retrying");
         }
         if now >= self.prune_at {
             let days = state.config()?.privacy.history_retention_days;
@@ -868,6 +865,33 @@ impl Controller {
         Ok(())
     }
 }
+/// Keep new drags blocked until the target has been checked and delivery finishes.
+/// Cleanup also publishes on hold, empty, and error paths so held actions re-enable.
+struct DeliveryGuard<F: FnMut(bool) -> Result<()>>(F);
+
+impl<F: FnMut(bool) -> Result<()>> Drop for DeliveryGuard<F> {
+    fn drop(&mut self) {
+        if let Err(error) = (self.0)(false) {
+            tracing::warn!(%error, "Restore overlay cursor handling");
+        }
+    }
+}
+
+fn delivery_target<F: FnMut(bool) -> Result<()>, T>(
+    mut set_busy: F,
+    focused: impl FnOnce() -> T,
+) -> Result<(DeliveryGuard<F>, T)> {
+    set_busy(true)?; // may wait for the compositor's current drag to release
+    let guard = DeliveryGuard(set_busy);
+    Ok((guard, focused()))
+}
+
+fn set_delivery_busy(state: &AppState, busy: bool) -> Result<()> {
+    let result = overlay::set_busy(&state.app, busy);
+    state.enhance.publish(state);
+    result
+}
+
 pub fn run(app: AppHandle, receiver: mpsc::Receiver<Action>) {
     let state = app.state::<AppState>();
     let config = match state.config() {
@@ -915,6 +939,80 @@ mod tests {
     use super::{preview_due, preview_valid, remote_action, Controller, Policy, RemoteAction};
     use crate::{audio::AudioCapture, config::Config};
     use std::time::Duration;
+
+    #[test]
+    fn delivery_target_reads_focus_after_wait_and_keeps_busy_until_drop() {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            mpsc, Arc,
+        };
+        let focus = Arc::new(AtomicU64::new(1));
+        let busy = Arc::new(AtomicBool::new(false));
+        let (started, ready) = mpsc::channel();
+        let (release, waiting) = mpsc::channel();
+        let worker_focus = focus.clone();
+        let worker_busy = busy.clone();
+        let worker = std::thread::spawn(move || {
+            let (guard, current) = super::delivery_target(
+                |value| {
+                    worker_busy.store(value, Ordering::SeqCst);
+                    if value {
+                        started.send(()).unwrap();
+                        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+                    }
+                    Ok(())
+                },
+                || crate::platform::Focus::Window {
+                    id: worker_focus.load(Ordering::SeqCst),
+                    class: "editor".into(),
+                },
+            )
+            .unwrap();
+            let origin = crate::platform::Focus::Window {
+                id: 1,
+                class: "editor".into(),
+            };
+            assert_eq!(
+                crate::focus_guard::decide(
+                    Some(&origin),
+                    Some(&current),
+                    crate::focus_guard::FocusMode::Hold
+                ),
+                crate::focus_guard::Decision::Hold
+            );
+            assert!(worker_busy.load(Ordering::SeqCst));
+            drop(guard);
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        focus.store(2, Ordering::SeqCst); // target changes while a drag delays delivery
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(!busy.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn delivery_target_cleans_up_focus_errors_and_never_reads_after_barrier_failure() {
+        use std::cell::{Cell, RefCell};
+        let publications = RefCell::new(Vec::new());
+        let attempt = || -> anyhow::Result<()> {
+            let (_guard, focus) = super::delivery_target(
+                |value| {
+                    publications.borrow_mut().push(value);
+                    Ok(())
+                },
+                || -> anyhow::Result<()> { anyhow::bail!("focus unavailable") },
+            )?;
+            focus?;
+            Ok(())
+        };
+        assert!(attempt().is_err());
+        assert_eq!(*publications.borrow(), vec![true, false]);
+        let queried = Cell::new(false);
+        let failed =
+            super::delivery_target(|_| anyhow::bail!("drag timed out"), || queried.set(true));
+        assert!(failed.is_err());
+        assert!(!queried.get());
+    }
 
     #[test]
     fn preview_waits_since_previous_result_and_skips_in_flight() {

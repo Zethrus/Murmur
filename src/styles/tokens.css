@@ -46,7 +46,7 @@
   --row-height: 60px; --sidebar-w: 240px; --card-radius: var(--r-lg);
   --switch-track: 32px; --switch-h: 20px; --switch-radius: var(--r-pill);
   --slider-thumb: 14px; --slider-track-h: 4px;
-  --pill-h: 40px; --pill-max-w: 520px; --pill-min-w: 88px; --pill-radius: var(--r-pill);
+  --pill-h: 40px; --pill-max-w: 520px; --pill-min-w: 120px; --pill-radius: var(--r-pill);
   --pill-inset: var(--sp-2) var(--sp-4); --pill-gap: var(--sp-3);
   --pill-shadow: 0 6px 24px rgba(0, 0, 0, 0.16); --pill-weight: var(--weight-medium);
   --pill-label-size: var(--fs-13); --pill-preview-size: var(--fs-13);
@@ -115,7 +115,7 @@
   --overlay-button-h: 28px; --overlay-button-inset: var(--sp-1) var(--sp-3); --overlay-button-radius: var(--r-md);
   --overlay-button-size: var(--fs-12); --overlay-button-weight: var(--weight-medium);
   --overlay-button-motion: var(--dur-fast) var(--ease-out);
-  --drag-handle-w: 12px; --drag-handle-h: 16px; --drag-handle-dot: 3px; --drag-handle-gap: 2px;
+  --drag-handle-w: 24px; --drag-handle-h: 24px; --drag-handle-dot: 3px; --drag-handle-gap: 2px;
   --drag-handle-radius: var(--r-pill); --drag-handle-opacity: 0.55; --drag-handle-hover-opacity: 1;
   --overlay-busy-opacity: 0.7; --work-area-inset: var(--sp-2);
   /* Enhance settings card. */

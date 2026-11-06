@@ -6,9 +6,9 @@ body[data-window="overlay"] #app[data-position="top-center"] { align-items: flex
 [data-busy="true"] .pill { pointer-events: none; opacity: var(--overlay-busy-opacity); }
 .pill-state { display: flex; align-items: center; justify-content: center; gap: var(--pill-state-gap); max-width: var(--layout-full); min-height: var(--bar-h); }
 .pill-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: var(--pill-label-max-w); }
-.drag-handle { flex-shrink: 0; display: grid; grid-template-columns: repeat(2, var(--drag-handle-dot)); align-content: center; gap: var(--drag-handle-gap); width: var(--drag-handle-w); height: var(--drag-handle-h); cursor: grab; opacity: var(--drag-handle-opacity); transition: opacity var(--overlay-button-motion); }
+.drag-handle { flex-shrink: 0; display: grid; grid-template-columns: repeat(2, var(--drag-handle-dot)); align-content: center; justify-content: center; gap: var(--drag-handle-gap); width: var(--drag-handle-w); height: var(--drag-handle-h); cursor: grab; opacity: var(--drag-handle-opacity); transition: opacity var(--overlay-button-motion); }
 .drag-handle:hover { opacity: var(--drag-handle-hover-opacity); }
-.drag-handle:active { cursor: grabbing; }
+[data-dragging="true"] .drag-handle, .drag-handle:active { cursor: grabbing; }
 .drag-handle i { display: block; width: var(--drag-handle-dot); height: var(--drag-handle-dot); border-radius: var(--drag-handle-radius); background: var(--text-muted); box-shadow: var(--drag-handle-dot) var(--space-none) var(--space-none) var(--text-muted); }
 [data-busy="true"] .drag-handle { cursor: default; }
 .indicator { flex-shrink: 0; width: var(--dot-size); height: var(--dot-size); border-radius: var(--dot-radius); background: var(--text-muted); }

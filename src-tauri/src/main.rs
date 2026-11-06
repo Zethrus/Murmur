@@ -177,8 +177,8 @@ fn main() {
         .setup(|app| setup(app).map_err(Into::into))
         .on_window_event(|window, event| {
             if window.label() == "overlay" {
-                if let tauri::WindowEvent::Moved(_) = event {
-                    overlay::moved();
+                if let tauri::WindowEvent::Moved(position) = event {
+                    overlay::moved(*position);
                 }
             }
             if window.label() == "settings" {
@@ -230,7 +230,8 @@ fn main() {
             ipc::discard_held,
             ipc::get_overlay_snapshot,
             ipc::reset_overlay_position,
-            ipc::set_overlay_size
+            ipc::set_overlay_size,
+            ipc::start_overlay_drag
         ])
         .build(tauri::generate_context!());
     match application {

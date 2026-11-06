@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, Engine as EngineConfig},
+    config::{Config, Engine as EngineConfig, Placement},
     controller::{self, Action},
     engine::Engine,
     enhance,
@@ -13,6 +13,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, MutexGuard,
@@ -23,6 +24,22 @@ use tauri::{
     menu::{CheckMenuItem, MenuItem},
     AppHandle, Emitter, Manager,
 };
+
+/// A queued filesystem reload may lag behind a completed drag. Defer its save
+/// until the controller applies the disk config instead of overwriting that edit.
+fn persist_overlay_placement(
+    path: &Path,
+    current: &Config,
+    placement: Placement,
+) -> Result<Option<Config>> {
+    let disk = Config::load(path)?;
+    if toml::to_string(current)? != toml::to_string(&disk)? {
+        return Ok(None);
+    }
+    let new = current.patched(json!({"overlay":{"position":"custom","placement":placement}}))?;
+    new.save(path)?;
+    Ok(Some(new))
+}
 
 #[derive(Clone, Serialize)]
 pub struct Status {
@@ -287,6 +304,13 @@ impl AppState {
     }
     fn apply_runtime(&self, old: &Config, new: &Config) -> Result<()> {
         hotkey::rebind(&self.app, old, new)?;
+        if old.overlay.position != new.overlay.position
+            || serde_json::to_value(&old.overlay.placement)?
+                != serde_json::to_value(&new.overlay.placement)?
+            || (old.overlay.enabled && !new.overlay.enabled)
+        {
+            overlay::reset_placement();
+        }
         if let Err(error) = platform::set_autostart(&self.app, new.general.autostart)
             .and_then(|_| overlay::apply(&self.app, &new.overlay))
         {
@@ -295,6 +319,33 @@ impl AppState {
             let _ = overlay::apply(&self.app, &old.overlay);
             return Err(error);
         }
+        Ok(())
+    }
+    /// Persist observed geometry without reapplying native placement, rebinding
+    /// hotkeys, or reconfiguring the engine. Settings transactions still serialize it.
+    pub fn save_overlay_placement(&self) -> Result<()> {
+        let _transaction = lock(&self.transaction)?;
+        let Some((generation, placement)) = overlay::pending_placement() else {
+            return Ok(());
+        };
+        let new = match persist_overlay_placement(&self.paths.config, &self.config()?, placement) {
+            Ok(Some(new)) => new,
+            Ok(None) => {
+                // Keep placement pending. Reload preserves it for unrelated edits,
+                // but explicit position/reset/disable edits invalidate it normally.
+                self.send(Action::Reload)?;
+                return Ok(());
+            }
+            Err(error) => {
+                overlay::placement_saved(generation, false);
+                return Err(error);
+            }
+        };
+        *lock(&self.config)? = new.clone();
+        overlay::placement_saved(generation, true);
+        self.app
+            .emit("config", &new)
+            .context("Emit overlay placement")?;
         Ok(())
     }
     pub fn update(&self, patch: Value) -> Result<Config> {
@@ -444,9 +495,39 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_warm_status, Status};
-    use crate::config::Engine;
+    use super::{apply_warm_status, persist_overlay_placement, Status};
+    use crate::config::{Config, Engine, Placement};
     use serde_json::json;
+
+    #[test]
+    fn placement_save_preserves_external_edit_until_reload() -> anyhow::Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("murmur-placement-reload-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let current = Config::default();
+        current.save(&path)?;
+        let edited = current.patched(json!({"general":{"theme":"dark"}}))?;
+        edited.save(&path)?; // external edit while the controller still holds `current`
+        let placement = Placement {
+            x_fraction: 0.25,
+            ..Placement::default()
+        };
+        assert!(persist_overlay_placement(&path, &current, placement.clone())?.is_none());
+        let reloaded = Config::load(&path)?;
+        assert_eq!(reloaded.general.theme, "dark");
+        assert_eq!(reloaded.overlay.position, current.overlay.position);
+        assert!(persist_overlay_placement(&path, &reloaded, placement)?.is_some());
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.general.theme, "dark");
+        assert_eq!(saved.overlay.position, "custom");
+        assert_eq!(saved.overlay.placement.x_fraction, 0.25);
+        // An editor's incomplete TOML must also survive an automatic save attempt.
+        std::fs::write(&path, "[general")?;
+        assert!(persist_overlay_placement(&path, &saved, Placement::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&path)?, "[general");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn warm_status_updates_cache_only_for_current_configuration() {
