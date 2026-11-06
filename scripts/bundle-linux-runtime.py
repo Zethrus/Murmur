@@ -5,6 +5,7 @@ Run on the same Debian/Ubuntu machine that built the application. glibc and
 hardware drivers remain host components; Python is already in the engine.
 """
 import argparse
+import os
 from pathlib import Path
 import re
 import shutil
@@ -63,6 +64,25 @@ def package_portable(image, engine, output):
     # A reused output directory may contain assets staged by older scripts.
     for name in ("murmur", "murmur-engine"):
         (output / name).unlink(missing_ok=True)
+
+
+def install_debian_runtime(appdir, package_dir):
+    for name in ("murmur", "murmur-engine"):
+        (package_dir / "usr/bin" / name).unlink(missing_ok=True)
+    runtime_dir = package_dir / "opt/murmur"
+    runtime_dir.parent.mkdir(parents=True, exist_ok=True)
+    # Both paths share the temporary filesystem. Move the completed runtime
+    # instead of duplicating several GiB of CUDA libraries for Debian.
+    appdir.rename(runtime_dir)
+    # AppImage extraction leaves 0700 directories, which dpkg would install as
+    # root-only. Open every directory for traversal; keep shipped file modes.
+    runtime_dir.parent.chmod(0o755)
+    for directory, _, _ in os.walk(runtime_dir):
+        os.chmod(directory, 0o755)
+    launcher = package_dir / "usr/bin/murmur"
+    # Tauri's patched WebKitGTK resolves its helper processes from ./ in usr/.
+    launcher.write_text('#!/bin/sh\ncd /opt/murmur/usr || exit 1\nexec /opt/murmur/AppRun "$@"\n')
+    launcher.chmod(0o755)
 
 
 def package(image, deb, output, lock):
@@ -131,16 +151,7 @@ exec "$APPDIR/AppRun.tauri" "$@"
         # extraction on every launch. Preserve Tauri's desktop integration.
         package_dir = work / "deb"
         run("dpkg-deb", "-R", str(deb), str(package_dir), stdout=subprocess.DEVNULL)
-        for name in ("murmur", "murmur-engine"):
-            (package_dir / "usr/bin" / name).unlink(missing_ok=True)
-        runtime_dir = package_dir / "opt/murmur"
-        runtime_dir.parent.mkdir(parents=True, exist_ok=True)
-        # Both paths share the temporary filesystem. Move the completed runtime
-        # instead of duplicating several GiB of CUDA libraries for Debian.
-        appdir.rename(runtime_dir)
-        launcher = package_dir / "usr/bin/murmur"
-        launcher.write_text('#!/bin/sh\nexec /opt/murmur/AppRun "$@"\n')
-        launcher.chmod(0o755)
+        install_debian_runtime(appdir, package_dir)
         control = package_dir / "DEBIAN/control"
         metadata = control.read_text()
         metadata = re.sub(r"^Depends:.*$", "Depends: libc6 (>= 2.39), bash, coreutils", metadata, flags=re.M)

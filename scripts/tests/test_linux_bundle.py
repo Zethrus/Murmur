@@ -41,3 +41,36 @@ class PortableBundleTests(unittest.TestCase):
                     self.assertEqual(member.mode & 0o777, 0o755)
                     with archive.extractfile(member) as stream:
                         self.assertEqual(stream.read(), source.read_bytes())
+
+
+class DebianRuntimeTests(unittest.TestCase):
+    def test_runtime_is_traversable_and_launcher_enters_app_dir(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # Mirror AppImage extraction under mktemp: private directories.
+            appdir = root / "squashfs-root"
+            webkit = appdir / "usr/lib/x86_64-linux-gnu/webkit2gtk-4.1"
+            webkit.mkdir(parents=True)
+            (appdir / "apprun-hooks").mkdir()
+            engine = appdir / "usr/bin/murmur-engine"
+            engine.parent.mkdir()
+            engine.write_bytes(b"engine")
+            engine.chmod(0o755)
+            notice = appdir / "usr/notice.txt"
+            notice.write_text("notice")
+            notice.chmod(0o644)
+            for directory in (appdir, *(p for p in appdir.rglob("*") if p.is_dir())):
+                directory.chmod(0o700)
+            package_dir = root / "deb"
+            (package_dir / "usr/bin").mkdir(parents=True)
+            (package_dir / "usr/bin/murmur").write_bytes(b"tauri binary")
+            bundle.install_debian_runtime(appdir, package_dir)
+            runtime = package_dir / "opt/murmur"
+            for directory in (package_dir / "opt", runtime, *(p for p in runtime.rglob("*") if p.is_dir())):
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o755, directory)
+            self.assertEqual((runtime / "usr/bin/murmur-engine").stat().st_mode & 0o777, 0o755)
+            self.assertEqual((runtime / "usr/notice.txt").stat().st_mode & 0o777, 0o644)
+            launcher = package_dir / "usr/bin/murmur"
+            self.assertEqual(launcher.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(launcher.read_text(),
+                             '#!/bin/sh\ncd /opt/murmur/usr || exit 1\nexec /opt/murmur/AppRun "$@"\n')
