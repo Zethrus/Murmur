@@ -1,18 +1,23 @@
-# Murmur 0.4.5
+# Murmur 0.4.6
 
-Linux desktop downloads now bundle pinned CUDA userspace libraries for compatible
-NVIDIA drivers. CPU-only machines continue to work.
+Dictation now stays bound to the window you started in. Switching windows
+mid-sentence no longer sends a note into whatever app has focus when the
+transcript is ready, such as a terminal.
 
-- AppImage, Debian, and portable packages include the CUDA runtime alongside the
-  CPU engine, typing tools, and desktop client libraries.
-- Engine Settings reports automatic GPU fallback. Engine check runs real
-  inference even on its silent probe.
-- Manual launches open Settings, including when Murmur is already running.
-  Starting at login stays in the background, and existing login entries are
-  refreshed while preserving the autostart preference.
-- GPU validation supports the relocated Python interpreter used by the release runner.
-- Release checks validate AppImage startup and GPU inference against the final
-  asset hashes.
+- Murmur records the focused window when you press the dictation shortcut and
+  checks it again before typing. If focus changed, the transcript is held in
+  the overlay with Insert here, Copy, and Discard instead of being typed.
+- Held text stays in memory only. It is cleared after two minutes, on Discard,
+  or when the next dictation starts. Inserted text is formatted for the app it
+  lands in, so terminals still receive a single line.
+- Behavior → When focus changes offers Hold for review (default), Return to the
+  original window, Copy to the clipboard, or Insert into the current window.
+- An optional Insert held text shortcut and the Flipper Accept/Dismiss buttons
+  act on held text. The Flipper protocol is unchanged.
+
+Windows are compared by identity, so tabs inside one browser or terminal window
+count as the same target. Switching windows while a long transcript is already
+being typed is not detected.
 
 - Downloads contain the AppImage, Debian package, portable archive, Flipper
   companion, GPU validation evidence, and checksums. Loose app and engine files
