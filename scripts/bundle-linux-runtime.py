@@ -123,6 +123,8 @@ exec "$APPDIR/AppRun.tauri" "$@"
             destination.write(runtime)
             with squash.open("rb") as filesystem:
                 shutil.copyfileobj(filesystem, destination)
+        # The filesystem is now embedded in the AppImage; release its disk space.
+        squash.unlink()
         packaged.chmod(0o755)
         package_portable(packaged, appdir / "usr/bin/murmur-engine", output)
         # Install the extracted runtime so Debian users need neither FUSE nor
@@ -133,7 +135,9 @@ exec "$APPDIR/AppRun.tauri" "$@"
             (package_dir / "usr/bin" / name).unlink(missing_ok=True)
         runtime_dir = package_dir / "opt/murmur"
         runtime_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(appdir, runtime_dir, symlinks=True)
+        # Both paths share the temporary filesystem. Move the completed runtime
+        # instead of duplicating several GiB of CUDA libraries for Debian.
+        appdir.rename(runtime_dir)
         launcher = package_dir / "usr/bin/murmur"
         launcher.write_text('#!/bin/sh\nexec /opt/murmur/AppRun "$@"\n')
         launcher.chmod(0o755)
