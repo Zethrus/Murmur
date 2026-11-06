@@ -63,8 +63,10 @@ def exercise(executable, background):
             config.parent.mkdir(parents=True)
             config.write_text('[general]\nautostart = true\n')
         with (profile / 'stderr.log').open('w+') as log:
+            # Launch from outside the runtime so cwd-relative helper paths fail here.
+            launch = {'env': env, 'cwd': directory, 'stdout': log, 'stderr': subprocess.STDOUT}
             app = subprocess.Popen([str(executable), *(['--background'] if background else [])],
-                                   env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                                   start_new_session=True, **launch)
             try:
                 if background:
                     wait_for(lambda: '--background' in entry.read_text(), app,
@@ -73,12 +75,10 @@ def exercise(executable, background):
                     assert not legacy.exists(), 'Legacy plugin entry was not removed'
                     time.sleep(2)
                     assert not visible_settings(), 'Login launch unexpectedly opened Settings'
-                    subprocess.run([str(executable), '--background'], env=env, stdout=log,
-                                   stderr=subprocess.STDOUT, check=True, timeout=timeout)
+                    subprocess.run([str(executable), '--background'], check=True, timeout=timeout, **launch)
                     time.sleep(1)
                     assert not visible_settings(), 'Second background launch opened Settings'
-                    subprocess.run([str(executable)], env=env, stdout=log,
-                                   stderr=subprocess.STDOUT, check=True, timeout=timeout)
+                    subprocess.run([str(executable)], check=True, timeout=timeout, **launch)
                     wait_for(visible_settings, app, 'Manual relaunch did not open Settings', timeout)
                 else:
                     wait_for(visible_settings, app, 'Manual launch did not open Settings', timeout)
