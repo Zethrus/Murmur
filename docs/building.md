@@ -102,9 +102,8 @@ The final downloads are in `.cache/artifacts/linux`. AppImage creation is requir
 the pinned CUDA userspace libraries under `usr/lib/murmur/cuda`, and notices to
 Tauri's AppImage. It derives the portable archive and Debian package from that
 AppDir. `scripts/test-linux-bundle.py` checks the runtime manifest, library
-resolution, engine, Debian parity, and 2 GiB per-asset limit. The separate
-`murmur-engine` download remains a standalone CPU engine; GPU use requires an
-external compatible CUDA userspace runtime. Models download inside Settings.
+resolution, engine, Debian parity, and 2 GiB per-asset limit. The engine is included in the packages; loose app and engine files are not
+published separately. Models download inside Settings.
 
 On the Ubuntu 24.04 validation build, the final AppImage and `murmur` were
 1,616.3 MiB each, the Debian package 1,612.7 MiB, the portable archive

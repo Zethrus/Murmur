@@ -38,10 +38,10 @@ desktop with a working microphone and system tray. Native Wayland input is not v
 | `SHA256SUMS` | Checking that the downloaded files match the release |
 
 [Get the latest release](https://github.com/Zethrus/Murmur/releases/latest).
-The separate `murmur` download is the same AppImage. `murmur-engine` is also
-available for command-line integrations; it needs an external CUDA userspace
-runtime for GPU use. Linux desktop packages built from this checkout include
-their own runtime. Published 0.4.2 downloads predate this packaging change.
+The speech engine is included in the desktop packages. There is no separate
+engine download to install.
+Linux desktop packages built from this checkout include pinned CUDA userspace
+libraries. Published 0.4.2 downloads predate this packaging change.
 
 The Android APK is planned for **November 6, 2026**. Windows builds are deferred
 until **November 6 or 7**. These are targets, subject to

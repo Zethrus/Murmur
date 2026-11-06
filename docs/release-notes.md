@@ -13,9 +13,12 @@ NVIDIA drivers. CPU-only machines continue to work.
 - Release checks validate AppImage startup and GPU inference against the final
   asset hashes.
 
-Models download inside Settings. The standalone engine download remains CPU-only
-unless a compatible CUDA userspace runtime is provided separately. GPU inference
-requires a compatible host NVIDIA driver.
+- Downloads contain the AppImage, Debian package, portable archive, Flipper
+  companion, GPU validation evidence, and checksums. Loose app and engine files
+  are no longer posted separately.
+
+Models download inside Settings. GPU inference requires a compatible host NVIDIA
+driver.
 
 Use the AppImage for a portable download, or the `.deb` for Debian/Ubuntu.
 If FUSE is unavailable, add `--appimage-extract-and-run`. Verify downloads against

@@ -29,14 +29,15 @@ hardware or model fails the tag job before upload. Pull request and manual jobs
 explicitly report the GPU gate skipped.
 
 The final job downloads every asset and runs `scripts/check-release.py`. It
-requires the app, engine, portable archive, `.deb`, AppImage, and version-matched
-`.fap` and `GPU-VALIDATION.json`. It checks evidence hashes, that the archive
-contains the same AppImage and standalone engine with execute permissions, and
-that every asset is below 2 GiB. It then generates `SHA256SUMS`, verifies it,
-uploads it, and publishes the draft. Unexpected or missing files block
-publication. Record three short deliveries for each terminal/editor and overlay
-on/off combination, with hotkey and companion triggers where available. Report
-the original X11 focus symptom separately if it recurs.
+requires the portable archive, `.deb`, AppImage, version-matched `.fap`, and
+`GPU-VALIDATION.json`. Loose app and engine files are not release assets.
+The Linux build checks that the portable archive contains the same AppImage and
+bundled engine, both executable. The final job checks the archive layout,
+AppImage match, GPU evidence hashes, and 2 GiB per-asset limit. It generates and
+verifies `SHA256SUMS`, uploads it, and publishes the draft. Unexpected or missing
+files block publication. Record three short deliveries for each terminal/editor
+and overlay on/off combination, with hotkey and companion triggers where
+available. Report the original X11 focus symptom separately if it recurs.
 
 A failed build leaves a draft. Fix the failure and rerun the workflow while it is
 still a draft. A published release cannot be overwritten by the prepare job.

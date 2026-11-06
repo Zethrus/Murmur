@@ -160,14 +160,22 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" .cache/artifacts/linux/* --clobber
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            .cache/artifacts/linux/*.AppImage \
+            .cache/artifacts/linux/*.deb \
+            .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
+            .cache/artifacts/linux/GPU-VALIDATION.json --clobber
       - name: Upload build artifacts (best effort)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: murmur-linux-x86_64
-          path: .cache/artifacts/linux/*
+          path: |
+            .cache/artifacts/linux/*.AppImage
+            .cache/artifacts/linux/*.deb
+            .cache/artifacts/linux/murmur-linux-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 3
           compression-level: 0

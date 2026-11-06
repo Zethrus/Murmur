@@ -37,8 +37,7 @@ runtime for GPU use.
 
 ## The engine does not start
 
-The AppImage and Debian package include the engine. The separate `murmur`
-download is also an AppImage and may need `chmod +x murmur`.
+The AppImage, Debian package, and portable archive include the engine.
 
 The frozen engine extracts libraries into temporary storage. A full disk or a
 `noexec` temporary directory can prevent startup. Quit and restart after fixing
