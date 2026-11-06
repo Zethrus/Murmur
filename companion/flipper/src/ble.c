@@ -161,7 +161,8 @@ bool ble_start(BleRxHandler rx) {
     if(!self->profile) {
         ble_detach_current();
         bt_set_status_changed_callback(self->bt, NULL, NULL);
-        while(self->in_flight) furi_delay_tick(1);
+        while(self->in_flight)
+            furi_delay_tick(1);
         furi_record_close(RECORD_BT);
         furi_mutex_free(self->state_mutex);
         free(self);
@@ -169,10 +170,7 @@ bool ble_start(BleRxHandler rx) {
     }
 
     ble_profile_serial_set_event_callback(
-        self->profile,
-        BLE_SVC_SERIAL_DATA_LEN_MAX,
-        ble_serial_event,
-        ble_callback_context(self));
+        self->profile, BLE_SVC_SERIAL_DATA_LEN_MAX, ble_serial_event, ble_callback_context(self));
     /* The RPC transport is not using this profile; we own the stream. */
     ble_profile_serial_set_rpc_active(self->profile, false);
     self->ready = true;
@@ -190,7 +188,8 @@ void ble_stop(void) {
     if(self->bt) {
         bt_set_status_changed_callback(self->bt, NULL, NULL);
     }
-    while(self->in_flight) furi_delay_tick(1);
+    while(self->in_flight)
+        furi_delay_tick(1);
     if(self->bt) {
         self->profile = NULL;
         bt_profile_restore_default(self->bt);

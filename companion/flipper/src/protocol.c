@@ -3,8 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
-static const char* const button_names[MurmurButtonCount] = {"OK", "UP", "DOWN", "BACK", "LEFT", "RIGHT"};
-static const char* const button_keys[MurmurButtonCount] = {"OK", "UP", "DOWN", "BACK", "LEFT", "RIGHT"};
+static const char* const button_names[MurmurButtonCount] =
+    {"OK", "UP", "DOWN", "BACK", "LEFT", "RIGHT"};
+static const char* const button_keys[MurmurButtonCount] =
+    {"OK", "UP", "DOWN", "BACK", "LEFT", "RIGHT"};
 static const char* const verb_names[] = {
     "none",
     "dictate_toggle",
@@ -69,13 +71,21 @@ size_t murmur_build_cfg(const MurmurMap* map, char* out, size_t cap) {
     size_t used = (size_t)snprintf(out, cap, "CFG");
     for(size_t i = 0; i < MurmurButtonCount; i++) {
         if(used >= cap) break;
-        used += (size_t)snprintf(out + used, cap - used, " %s=%s",
-                                 button_keys[i], murmur_verb_wire(map->short_press[i]));
+        used += (size_t)snprintf(
+            out + used,
+            cap - used,
+            " %s=%s",
+            button_keys[i],
+            murmur_verb_wire(map->short_press[i]));
     }
     for(size_t i = 0; i < MurmurButtonCount; i++) {
         if(used >= cap) break;
-        used += (size_t)snprintf(out + used, cap - used, " %s_LONG=%s",
-                                 button_keys[i], murmur_verb_wire(map->long_press[i]));
+        used += (size_t)snprintf(
+            out + used,
+            cap - used,
+            " %s_LONG=%s",
+            button_keys[i],
+            murmur_verb_wire(map->long_press[i]));
     }
     return used < cap ? used : cap;
 }
@@ -154,11 +164,16 @@ bool murmur_parse(const char* line, MurmurMessage* out) {
     if(strncmp(line, "S ", 2) == 0) {
         const char* value = line + 2;
         out->type = MurmurMessageState;
-        if(strncmp(value, "LISTEN", 6) == 0) out->phase = MurmurPhaseListen;
-        else if(strncmp(value, "THINK", 5) == 0) out->phase = MurmurPhaseThink;
-        else if(strncmp(value, "READY", 5) == 0) out->phase = MurmurPhaseReady;
-        else if(strncmp(value, "ERROR", 5) == 0) out->phase = MurmurPhaseError;
-        else out->phase = MurmurPhaseIdle;
+        if(strncmp(value, "LISTEN", 6) == 0)
+            out->phase = MurmurPhaseListen;
+        else if(strncmp(value, "THINK", 5) == 0)
+            out->phase = MurmurPhaseThink;
+        else if(strncmp(value, "READY", 5) == 0)
+            out->phase = MurmurPhaseReady;
+        else if(strncmp(value, "ERROR", 5) == 0)
+            out->phase = MurmurPhaseError;
+        else
+            out->phase = MurmurPhaseIdle;
         return true;
     }
     if(strncmp(line, "A ", 2) == 0) {
@@ -190,7 +205,8 @@ bool murmur_parse(const char* line, MurmurMessage* out) {
         murmur_map_default(&out->map);
         const char* cursor = line + 4;
         while(*cursor) {
-            while(*cursor == ' ') cursor++;
+            while(*cursor == ' ')
+                cursor++;
             if(!*cursor) break;
             const char* end = strchr(cursor, ' ');
             size_t length = end ? (size_t)(end - cursor) : strlen(cursor);

@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define LINK_RING 512
+#define LINK_RING     512
 #define LINK_TX_SLOTS 4
 
 typedef struct {
@@ -53,7 +53,6 @@ struct MurmurLink {
     PendingLine pending[LINK_TX_SLOTS];
     uint8_t pending_head;
     uint8_t pending_tail;
-
 };
 
 static void ring_push(LinkRing* ring, const uint8_t* data, size_t size) {
@@ -258,9 +257,8 @@ static MurmurTransport outbound(MurmurLink* link) {
 static bool queue_line(MurmurLink* link, const char* line, MurmurTransport via) {
     if(!link || !line) return false;
     uint32_t current_ble_session = ble_session_id();
-    bool ble_received =
-        ble_connected() && current_ble_session == link->ble_session &&
-        link->ble_received_session == current_ble_session;
+    bool ble_received = ble_connected() && current_ble_session == link->ble_session &&
+                        link->ble_received_session == current_ble_session;
     if(!link_transport_can_enqueue(via, ble_received)) return false;
     uint8_t next = (link->pending_head + 1) % LINK_TX_SLOTS;
     if(next == link->pending_tail) {
@@ -292,14 +290,10 @@ void link_service(MurmurLink* link) {
     PendingLine* pending = &link->pending[link->pending_tail];
     MurmurTransport via = pending->via;
     uint32_t current_ble_session = ble_session_id();
-    if(via == MurmurTransportNone ||
-       (via == MurmurTransportUsb && !link->usb_connected) ||
+    if(via == MurmurTransportNone || (via == MurmurTransportUsb && !link->usb_connected) ||
        (via == MurmurTransportBle &&
         (!ble_connected() ||
-         !link_pending_valid(
-             via,
-             pending->ble_session,
-             current_ble_session)))) {
+         !link_pending_valid(via, pending->ble_session, current_ble_session)))) {
         link->pending_tail = (link->pending_tail + 1) % LINK_TX_SLOTS;
         return; /* a vanished peer must not block replies to the other transport */
     }
@@ -311,15 +305,14 @@ void link_service(MurmurLink* link) {
         furi_hal_cdc_send(0, (uint8_t*)line, (uint16_t)length);
         sent = true;
     } else {
-        sent = ble_send_for_session(
-            (const uint8_t*)line, length, pending->ble_session);
+        sent = ble_send_for_session((const uint8_t*)line, length, pending->ble_session);
     }
     if(!sent) return; /* keep it queued; the transport is not ready */
     link->pending_tail = (link->pending_tail + 1) % LINK_TX_SLOTS;
 }
 
-static bool drain_ring(MurmurLink* link, LinkRing* ring, MurmurTransport source,
-                       char* out, size_t cap) {
+static bool
+    drain_ring(MurmurLink* link, LinkRing* ring, MurmurTransport source, char* out, size_t cap) {
     while(ring->tail != ring->head) {
         char byte = (char)ring->buffer[ring->tail];
         ring->tail = (ring->tail + 1) % LINK_RING;
@@ -355,12 +348,10 @@ bool link_read_line(MurmurLink* link, char* out, size_t cap) {
     if(drain_ring(link, &link->usb, MurmurTransportUsb, out, cap)) return true;
     if(furi_mutex_acquire(link->ble_mutex, FuriWaitForever) != FuriStatusOk) return false;
     uint32_t current_ble_session = ble_session_id();
-    bool received =
-        current_ble_session == link->ble_session &&
-        link->ble_rx_session == current_ble_session &&
-        link->ble_received_session == current_ble_session;
-    bool ready =
-        received && drain_ring(link, &link->ble, MurmurTransportBle, out, cap);
+    bool received = current_ble_session == link->ble_session &&
+                    link->ble_rx_session == current_ble_session &&
+                    link->ble_received_session == current_ble_session;
+    bool ready = received && drain_ring(link, &link->ble, MurmurTransportBle, out, cap);
     furi_mutex_release(link->ble_mutex);
     return ready;
 }

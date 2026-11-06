@@ -15,23 +15,28 @@
 #include <stdio.h>
 #include <string.h>
 
-#define TICK_MS 25
-#define HELLO_RETRY_MS 2000
-#define HEARTBEAT_MS 5000
+#define TICK_MS         25
+#define HELLO_RETRY_MS  2000
+#define HEARTBEAT_MS    5000
 #define LINK_TIMEOUT_MS 15000
-#define BATTERY_MS 30000
+#define BATTERY_MS      30000
 
-#define LIVE_MAX (MURMUR_TEXT_MAX * 2)
-#define TEXT_LINES 6
-#define LIVE_LINES 4
-#define TEXT_COLS 21
+#define LIVE_MAX      (MURMUR_TEXT_MAX * 2)
+#define TEXT_LINES    6
+#define LIVE_LINES    4
+#define TEXT_COLS     21
 #define HISTORY_SLOTS 3
 #define HISTORY_CHARS 40
 
 static const NotificationSequence sequence_ready_vibro = {
-    &message_vibro_on, &message_delay_100, &message_vibro_off,
-    &message_delay_100, &message_vibro_on, &message_delay_100,
-    &message_vibro_off, NULL,
+    &message_vibro_on,
+    &message_delay_100,
+    &message_vibro_off,
+    &message_delay_100,
+    &message_vibro_on,
+    &message_delay_100,
+    &message_vibro_off,
+    NULL,
 };
 
 typedef struct {
@@ -102,8 +107,11 @@ static void input_callback(InputEvent* event, void* context) {
 }
 
 /** Word wrap into at most `max_lines` rows of `cols` characters. Returns the row count. */
-static size_t wrap_lines(const char* text, char rows[TEXT_LINES][TEXT_COLS + 1], size_t max_lines,
-                         bool keep_tail) {
+static size_t wrap_lines(
+    const char* text,
+    char rows[TEXT_LINES][TEXT_COLS + 1],
+    size_t max_lines,
+    bool keep_tail) {
     size_t length = strlen(text);
     size_t start = 0;
     for(;;) {
@@ -115,26 +123,34 @@ static size_t wrap_lines(const char* text, char rows[TEXT_LINES][TEXT_COLS + 1],
             if(take < remaining) {
                 /* Prefer a break at the last space inside the window. */
                 size_t space = take;
-                while(space > 0 && text[cursor + space] != ' ') space--;
+                while(space > 0 && text[cursor + space] != ' ')
+                    space--;
                 if(space > 0) take = space;
             }
             memcpy(rows[count], text + cursor, take);
             rows[count][take] = '\0';
             count++;
             cursor += take;
-            while(cursor < length && text[cursor] == ' ') cursor++;
+            while(cursor < length && text[cursor] == ' ')
+                cursor++;
         }
         if(!keep_tail || cursor == length) return count;
         /* Skip the oldest word until the newest text fits in the visible rows. */
         size_t next = start;
-        while(next < length && text[next] != ' ') next++;
+        while(next < length && text[next] != ' ')
+            next++;
         start = next < length ? next + 1 : start + 1;
-        while(start < length && text[start] == ' ') start++;
+        while(start < length && text[start] == ' ')
+            start++;
     }
 }
 
-static void draw_text_block(Canvas* canvas, const char* text, int16_t top, size_t max_lines,
-                            bool keep_tail) {
+static void draw_text_block(
+    Canvas* canvas,
+    const char* text,
+    int16_t top,
+    size_t max_lines,
+    bool keep_tail) {
     char rows[TEXT_LINES][TEXT_COLS + 1];
     size_t count = wrap_lines(text, rows, max_lines, keep_tail);
     for(size_t i = 0; i < count; i++) {
@@ -163,8 +179,13 @@ static void draw_callback(Canvas* canvas, void* context) {
         transport_marker = "U";
     }
     if(app->connected && app->negotiated) {
-        snprintf(header, sizeof(header), "%s %u%% %ums", transport_marker,
-                 app->battery, app->latency_ms);
+        snprintf(
+            header,
+            sizeof(header),
+            "%s %u%% %ums",
+            transport_marker,
+            app->battery,
+            app->latency_ms);
     } else if(app->connected) {
         snprintf(header, sizeof(header), "%s v%u", transport_marker, app->peer_protocol);
     } else if(ble_is_advertising) {
@@ -189,11 +210,17 @@ static void draw_callback(Canvas* canvas, void* context) {
     }
 
     if(app->phase == MurmurPhaseIdle && app->history_view >= 0) {
-        uint8_t slot = (app->history_next + HISTORY_SLOTS - 1 - (uint8_t)app->history_view) % HISTORY_SLOTS;
+        uint8_t slot =
+            (app->history_next + HISTORY_SLOTS - 1 - (uint8_t)app->history_view) % HISTORY_SLOTS;
         draw_text_block(canvas, app->history[slot], 12, LIVE_LINES, false);
         canvas_draw_line(canvas, 0, 52, 127, 52);
         char index[8];
-        snprintf(index, sizeof(index), "%u/%u", (unsigned)app->history_view + 1, (unsigned)app->history_count);
+        snprintf(
+            index,
+            sizeof(index),
+            "%u/%u",
+            (unsigned)app->history_view + 1,
+            (unsigned)app->history_count);
         canvas_draw_str(canvas, 2, 62, index);
         canvas_draw_str_aligned(canvas, 126, 62, AlignRight, AlignBottom, "DN accept");
         return;
@@ -202,11 +229,10 @@ static void draw_callback(Canvas* canvas, void* context) {
     if(app->suggestion[0]) {
         char rows[TEXT_LINES][TEXT_COLS + 1];
         size_t count = wrap_lines(app->suggestion, rows, TEXT_LINES, false);
-        for(size_t i = app->suggestion_scroll;
-            i < count && i < (size_t)app->suggestion_scroll + 4;
+        for(size_t i = app->suggestion_scroll; i < count && i < (size_t)app->suggestion_scroll + 4;
             i++) {
-            canvas_draw_str(canvas, 2, (int16_t)(20 + (int16_t)(i - app->suggestion_scroll) * 9),
-                            rows[i]);
+            canvas_draw_str(
+                canvas, 2, (int16_t)(20 + (int16_t)(i - app->suggestion_scroll) * 9), rows[i]);
         }
         canvas_draw_line(canvas, 0, 52, 127, 52);
         canvas_draw_str(canvas, 2, 62, "DN accept");
@@ -220,12 +246,15 @@ static void draw_callback(Canvas* canvas, void* context) {
         if(app->phase == MurmurPhaseIdle && ble_connected() &&
            link_transport(app->link) == MurmurTransportBle) {
             char received[16];
-            snprintf(received, sizeof(received), "rx %lu",
-                     (unsigned long)link_received_bytes(app->link, MurmurTransportBle));
+            snprintf(
+                received,
+                sizeof(received),
+                "rx %lu",
+                (unsigned long)link_received_bytes(app->link, MurmurTransportBle));
             canvas_draw_str_aligned(canvas, 126, 20, AlignRight, AlignBottom, received);
         }
-        canvas_draw_str_aligned(canvas, 64, 30, AlignCenter, AlignCenter,
-                                murmur_phase_text(app->phase));
+        canvas_draw_str_aligned(
+            canvas, 64, 30, AlignCenter, AlignCenter, murmur_phase_text(app->phase));
         if(app->notice[0]) {
             canvas_draw_str_aligned(canvas, 64, 42, AlignCenter, AlignCenter, app->notice);
         } else if(app->last_action[0]) {
@@ -260,7 +289,8 @@ static void vibrate(MurmurApp* app) {
 
 static void remember_text(MurmurApp* app, bool replace) {
     if(!app->live[0]) return;
-    uint8_t slot = replace ? (app->history_next + HISTORY_SLOTS - 1) % HISTORY_SLOTS : app->history_next;
+    uint8_t slot = replace ? (app->history_next + HISTORY_SLOTS - 1) % HISTORY_SLOTS :
+                             app->history_next;
     char* entry = app->history[slot];
     size_t n = strcspn(app->live, "\r\n");
     if(n > HISTORY_CHARS) n = HISTORY_CHARS;
@@ -299,8 +329,12 @@ static void handle_press(MurmurApp* app, MurmurButton button, bool long_press) {
         return;
     }
     app->notice[0] = '\0';
-    snprintf(app->last_action, sizeof(app->last_action), "%s -> %s",
-             murmur_button_name(button), murmur_verb_name(verb));
+    snprintf(
+        app->last_action,
+        sizeof(app->last_action),
+        "%s -> %s",
+        murmur_button_name(button),
+        murmur_verb_name(verb));
     char line[32];
     snprintf(line, sizeof(line), "B %s%s", murmur_button_name(button), long_press ? " LONG" : "");
     send_line(app, line);
@@ -364,8 +398,10 @@ static void handle_message(MurmurApp* app, const char* line) {
             remember_text(app, false);
         }
         if(app->phase != message.phase && !murmur_phase_is_quiet(message.phase)) {
-            notification_message(app->notifications,
-                                 message.phase == MurmurPhaseReady ? &sequence_ready_vibro : &sequence_single_vibro);
+            notification_message(
+                app->notifications,
+                message.phase == MurmurPhaseReady ? &sequence_ready_vibro :
+                                                    &sequence_single_vibro);
         }
         bool new_turn = clear_live_on_phase_change(app->phase, message.phase);
         bool aborted_turn = app->phase == MurmurPhaseListen && message.phase == MurmurPhaseIdle;
@@ -393,7 +429,9 @@ static void handle_message(MurmurApp* app, const char* line) {
         }
         break;
     case MurmurMessageText:
-        if(app->discarded_turn || app->phase == MurmurPhaseError || app->phase == MurmurPhaseOffline) break;
+        if(app->discarded_turn || app->phase == MurmurPhaseError ||
+           app->phase == MurmurPhaseOffline)
+            break;
         if(!message.text[0]) {
             clear_provisional_history(app);
             clear_live_turn(app);
@@ -527,10 +565,13 @@ int32_t murmur_companion_app(void* p) {
                     app->discard_prompt = false;
                 }
             } else if(event.key == InputKeyBack && event.type == InputTypeLong) {
-                if(app->phase == MurmurPhaseListen) app->discard_prompt = true;
-                else app->running = false;
-            } else if(app->ptt && event.key == InputKeyOk &&
-                      (event.type == InputTypePress || event.type == InputTypeRelease)) {
+                if(app->phase == MurmurPhaseListen)
+                    app->discard_prompt = true;
+                else
+                    app->running = false;
+            } else if(
+                app->ptt && event.key == InputKeyOk &&
+                (event.type == InputTypePress || event.type == InputTypeRelease)) {
                 if(event.type == InputTypePress) {
                     app->suppress_ok_release = false;
                     send_line(app, "B OK PRESS");
@@ -545,15 +586,22 @@ int32_t murmur_companion_app(void* p) {
             } else if(event.type == InputTypeShort || event.type == InputTypeLong) {
                 if(key_to_button(event.key, &button)) {
                     bool long_press = event.type == InputTypeLong;
-                    if(app->phase == MurmurPhaseIdle && !app->suggestion[0] && app->history_count && !long_press &&
+                    if(app->phase == MurmurPhaseIdle && !app->suggestion[0] &&
+                       app->history_count && !long_press &&
                        (button == MurmurButtonLeft || button == MurmurButtonRight)) {
-                        if(app->history_view < 0) app->history_view = 0;
-                        else app->history_view = (app->history_view +
-                            (button == MurmurButtonRight ? 1 : app->history_count - 1)) % app->history_count;
-                    } else if(app->phase == MurmurPhaseIdle && app->history_view >= 0 &&
-                              button == MurmurButtonDown && !long_press) {
+                        if(app->history_view < 0)
+                            app->history_view = 0;
+                        else
+                            app->history_view =
+                                (app->history_view +
+                                 (button == MurmurButtonRight ? 1 : app->history_count - 1)) %
+                                app->history_count;
+                    } else if(
+                        app->phase == MurmurPhaseIdle && app->history_view >= 0 &&
+                        button == MurmurButtonDown && !long_press) {
                         char request[24];
-                        snprintf(request, sizeof(request), "D ACCEPT %u", (unsigned)app->history_view);
+                        snprintf(
+                            request, sizeof(request), "D ACCEPT %u", (unsigned)app->history_view);
                         send_line(app, request);
                     } else if(!handle_suggestion_key(app, button, long_press)) {
                         handle_press(app, button, long_press);

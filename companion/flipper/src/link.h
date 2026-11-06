@@ -25,10 +25,10 @@ static inline MurmurTransport link_choose_transport(
     bool ble_is_connected,
     bool ble_has_frame,
     uint32_t ble_last_frame) {
-    bool usb_recent =
-        usb_connected && usb_has_frame && (uint32_t)(now - usb_last_frame) <= LINK_TRANSPORT_RECENCY_MS;
-    bool ble_recent =
-        ble_is_connected && ble_has_frame && (uint32_t)(now - ble_last_frame) <= LINK_TRANSPORT_RECENCY_MS;
+    bool usb_recent = usb_connected && usb_has_frame &&
+                      (uint32_t)(now - usb_last_frame) <= LINK_TRANSPORT_RECENCY_MS;
+    bool ble_recent = ble_is_connected && ble_has_frame &&
+                      (uint32_t)(now - ble_last_frame) <= LINK_TRANSPORT_RECENCY_MS;
     if(usb_recent) return MurmurTransportUsb;
     if(ble_recent) return MurmurTransportBle;
     return MurmurTransportNone;
@@ -45,8 +45,8 @@ static inline bool link_ble_session_matches(uint32_t queued_session, uint32_t cu
 }
 
 /** USB entries survive BLE reconnects; BLE entries belong to one session. */
-static inline bool link_pending_valid(
-    MurmurTransport via, uint32_t queued_session, uint32_t current_ble_session) {
+static inline bool
+    link_pending_valid(MurmurTransport via, uint32_t queued_session, uint32_t current_ble_session) {
     return via != MurmurTransportBle ||
            link_ble_session_matches(queued_session, current_ble_session);
 }

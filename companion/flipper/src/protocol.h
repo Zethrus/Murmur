@@ -7,9 +7,9 @@
 /** Wire protocol revision. Mirrored in src-tauri/src/companion/protocol.rs. */
 #define MURMUR_PROTOCOL_VERSION 4
 /** 220 wire bytes (including newline), plus the C string terminator. */
-#define MURMUR_MAX_LINE 221
+#define MURMUR_MAX_LINE         221
 /** 217 UTF-8 payload bytes, plus the C string terminator. */
-#define MURMUR_TEXT_MAX 218
+#define MURMUR_TEXT_MAX         218
 
 typedef enum {
     MurmurVerbNone = 0,
