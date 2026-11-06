@@ -27,6 +27,11 @@ reproduction target; Windows native validation follows when its build is availab
   window placement or rebind shortcuts. Failed disk writes retry. Explicit presets,
   reset and disable invalidate pending placement; cancelled native moves retain
   ownership until release.
+- Automatic placement saves defer when disk configuration differs from the live
+  configuration, allowing a queued reload to apply manual TOML edits first.
+  Invalid TOML is retained and reported rather than replaced by an automatic save.
+  This protects edits already on disk at the freshness check; it does not provide
+  a filesystem transaction with an external editor writing simultaneously.
 - GTK's non-resizable window also needed its default size and size request updated;
   `resize()` alone left an oversized native rectangle. The window remains
   non-resizable. Text delivery waits for an active drag to finish before enabling
@@ -47,6 +52,11 @@ Observed on November 6, 2026:
 
 Local run logs and native evidence are in `.omx/evidence/overlay-drag/` (ignored
 workspace artifacts). Ignored Rust tests were not executed.
+
+PR review follow-up: the targeted Rust regression
+`placement_save_preserves_external_edit_until_reload` passes. It verifies that a
+pending external edit survives a placement-save attempt, then both the edited
+setting and placement persist after reload, and incomplete TOML is not overwritten.
 
 Run from the repository root:
 
