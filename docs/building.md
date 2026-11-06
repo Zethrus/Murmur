@@ -9,7 +9,7 @@ Use a regular user account, not sudo. Prerequisites must already be installed:
 - C/C++ build tools, CMake, Clang and libclang development libraries,
   pkg-config, WebKitGTK 4.1, libsoup 3, GTK3,
   Ayatana AppIndicator, librsvg, ALSA, X11 and XKB development libraries.
-- `patchelf`, `file` and librsvg tools for bundles; `xprop` for focused-window detection, `xdotool` for typing and paste, and a running D-Bus session for Bluetooth.
+- `patchelf`, `file`, `squashfs-tools` and librsvg tools for bundles; `xprop` for focused-window detection, `xdotool` for typing and paste, and a running D-Bus session for Bluetooth.
 - An X11 desktop, working microphone/audio stack and tray support. Native Wayland
   injection is unverified; use an X11 session if compositor restrictions interfere.
 
@@ -81,7 +81,7 @@ npm run tauri dev                # desktop app; source Python engine from the ve
 For a release build without installing into your home directory:
 
 ```sh
-scripts/build-linux.sh          # frozen engine + app + deb; AppImage best-effort
+scripts/build-linux.sh          # frozen engine + bundled app, deb and AppImage
 # Keep the frozen engine beside the raw release binary for manual execution:
 cp src-tauri/binaries/murmur-engine-x86_64-unknown-linux-gnu src-tauri/target/release/murmur-engine
 src-tauri/target/release/murmur
@@ -89,10 +89,15 @@ src-tauri/target/release/murmur
 
 The default build directory is `src-tauri/target`; manual build-linux.sh honors
 Cargo target overrides. The installer and CI deliberately pin that directory.
-An extracted portable Linux archive includes the executable pair. A raw CI
-artifact download can lose executable bits: run `chmod +x murmur murmur-engine`
-or use the `.tar.gz`, which preserves permissions. Linux bundles need compatible
-system webview/audio libraries; portable does not mean a fully static application.
+The final downloads are in `.cache/artifacts/linux`. AppImage creation is required.
+`scripts/bundle-linux-runtime.py` adds typing tools, missing client libraries and
+license notices to Tauri's AppImage, then produces the portable archive and Debian
+package from that runtime. `scripts/test-linux-bundle.py` checks the shipped tools,
+library resolution, engine, and Debian contents. Models download inside Settings.
+
+These bundles still use the host's glibc, desktop services, and hardware drivers.
+Build on the oldest supported distribution; the current release baseline is
+Ubuntu 24.04 with glibc 2.39. CUDA libraries are not part of the CPU release.
 
 ## Windows development build (deferred)
 

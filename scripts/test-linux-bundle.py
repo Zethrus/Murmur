@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Check actual shipped executables, helper libraries and Debian runtime parity."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, text=True, **kwargs)
+
+
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').digest()
+
+
+def check(directory):
+    directory = directory.resolve()
+    image, = directory.glob('*.AppImage')
+    deb, = directory.glob('*.deb')
+    assert digest(image) == digest(directory / 'murmur'), 'Desktop download must be the full AppImage'
+    with tempfile.TemporaryDirectory(prefix='murmur-bundle-test-') as temporary:
+        work = Path(temporary)
+        run(str(image), '--appimage-extract', cwd=work, stdout=subprocess.DEVNULL)
+        root = work / 'squashfs-root'
+        env = dict(os.environ, LD_LIBRARY_PATH=str(root / 'usr/lib'))
+        for name in ('murmur', 'murmur-engine', 'xdotool', 'xprop'):
+            executable = root / 'usr/bin' / name
+            assert executable.is_file() and os.access(executable, os.X_OK), name
+            linked = run('ldd', str(executable), env=env, capture_output=True).stdout
+            assert 'not found' not in linked, linked
+        run(str(root / 'usr/bin/xdotool'), '--version', env=env)
+        if env.get('DISPLAY'):
+            run(str(root / 'usr/bin/xprop'), '-version', env=env)
+        assert digest(root / 'usr/bin/murmur-engine') == digest(directory / 'murmur-engine')
+        requests = [{'id': 1, 'method': 'ping'}, {'id': 2, 'method': 'models.list'}, {'id': 3, 'method': 'shutdown'}]
+        engine = run(str(root / 'usr/bin/murmur-engine'), '--models-dir', str(work / 'models'),
+                     input=''.join(json.dumps(request) + '\n' for request in requests),
+                     env=env, capture_output=True, timeout=60)
+        replies = [json.loads(line) for line in engine.stdout.splitlines()]
+        assert len(replies) == 3 and all(reply['ok'] for reply in replies), replies
+        assert replies[0]['result'] == {'pong': True}
+        assert all(not model['installed'] for model in replies[1]['result'])
+        assert replies[2]['result'] == {'shutdown': True}
+        assert (root / 'usr/lib/libxdo.so.3').is_file()
+        assert (root / 'usr/lib/libasound.so.2').is_file()
+        assert (root / 'usr/share/doc/murmur/bundled-runtime/xdotool.copyright').is_file()
+        package = work / 'deb'
+        run('dpkg-deb', '-x', str(deb), str(package))
+        for file in root.rglob('*'):
+            if file.is_file():
+                assert digest(file) == digest(package / 'opt/murmur' / file.relative_to(root)), file
+        assert '/opt/murmur/AppRun' in (package / 'usr/bin/murmur').read_text()
+    print('AppImage, tools, engine, and Debian runtime verified.')
+
+
+if __name__ == '__main__':
+    check(Path(sys.argv[1]))

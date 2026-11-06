@@ -12,7 +12,8 @@ Check that a model is both installed and selected in Engine. A model name in the
 configuration is not a download. Select the correct microphone in Audio, then
 focus a text field before recording.
 
-Use an X11 session. Install `xdotool` and `xprop` (`x11-utils` on Debian/Ubuntu).
+Use an X11 session. Release 0.4.2 and newer include `xdotool` and `xprop`.
+Source installations still need these utilities from the distribution.
 Check for a shortcut conflict and try another combination in General. Escape is
 reserved for cancellation. If typing fails, try Clipboard only to isolate the
 input path.
@@ -26,9 +27,8 @@ CUDA runtime wheels, but still needs a compatible NVIDIA driver.
 
 ## The engine does not start
 
-Keep `murmur-engine` beside `murmur` when using the portable files. Prefer the
-archive because it preserves executable permissions. Raw downloads may need
-`chmod +x murmur murmur-engine`.
+The AppImage and Debian package include the engine. The separate `murmur`
+download is also an AppImage and may need `chmod +x murmur`.
 
 The frozen engine extracts libraries into temporary storage. A full disk or a
 `noexec` temporary directory can prevent startup. Quit and restart after fixing
@@ -41,10 +41,10 @@ prebuilt binary's baseline. Current downloads are built on Ubuntu 24.04 and need
 glibc 2.39 or newer. Build from source on the older distribution instead of
 replacing its system C library. AppImage does not remove this requirement.
 
-Try `--appimage-extract-and-run` if FUSE is unavailable. Missing WebKitGTK, GTK,
-audio, or X11 libraries must be installed through your distribution's package
-manager. AppImage does not mean every host library is bundled. The `.deb` declares
-its native dependencies.
+Try `--appimage-extract-and-run` if FUSE is unavailable. Release 0.4.2 and newer
+bundle WebKitGTK, GTK, audio client libraries, and typing tools in each desktop
+download. The host still needs a working X11 desktop, audio services, and hardware
+drivers. Report a missing application library as a packaging bug.
 
 ## The Flipper does not connect
 

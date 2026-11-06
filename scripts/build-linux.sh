@@ -12,7 +12,7 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 # Baseline Rust + AVX2 llama.cpp, shared with CI so release artifacts cannot drift.
 . "$ROOT/scripts/cpu-baseline.sh"
 # bindgen needs libclang (checked below); the C/C++ compiler is g++, not the clang driver.
-for tool in cmake g++; do
+for tool in cmake g++ xdotool xprop mksquashfs; do
   command -v "$tool" >/dev/null || { printf 'Missing Enhance build prerequisite: %s\n' "$tool" >&2; exit 1; }
 done
 if ! compgen -G '/usr/lib/llvm-*/lib/libclang.so*' >/dev/null &&
@@ -31,6 +31,9 @@ scripts/engine-sidecar.sh --build
 # Use the project-pinned Tauri CLI; no global cargo-tauri install required.
 npx tauri build --bundles deb
 python3 scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release" --artifact "$CARGO_TARGET_DIR/release/murmur"
-if ! npx tauri bundle --bundles appimage; then
-  printf '%s\n' 'Optional AppImage bundling failed; the binary and .deb remain available.' >&2
-fi
+npx tauri bundle --bundles appimage
+python3 scripts/bundle-linux-runtime.py \
+  --appimage "$CARGO_TARGET_DIR"/release/bundle/appimage/*.AppImage \
+  --deb "$CARGO_TARGET_DIR"/release/bundle/deb/*.deb \
+  --output "$ROOT/.cache/artifacts/linux"
+python3 scripts/test-linux-bundle.py "$ROOT/.cache/artifacts/linux"
