@@ -46,18 +46,22 @@ def test_lazy_warm_cpu_and_options(models: Models, monkeypatch: pytest.MonkeyPat
     assert constructor.call_count == 1
     assert constructor.call_args.kwargs["local_files_only"] is True
     assert speech.status()["device"] == "cpu" and speech.compute == "int8"
+    assert speech.status()["fallback_reason"] is None
 
 
 def test_cuda_load_failure_sticky_fallback(models: Models, monkeypatch: pytest.MonkeyPatch) -> None:
     available(models, monkeypatch)
     monkeypatch.setattr("murmur_engine.stt.detect", lambda: Hardware(1))
-    constructor = Mock(side_effect=[RuntimeError("CUDA missing"), fake_session()])
+    constructor = Mock(side_effect=[RuntimeError("Library libcublas.so.12 missing"), fake_session()])
     monkeypatch.setattr("faster_whisper.WhisperModel", constructor)
     speech = Speech(models)
     speech.transcribe(pcm())
     speech.transcribe(pcm())
     assert [call.kwargs["device"] for call in constructor.call_args_list] == ["cuda", "cpu"]
     assert speech.cpu_fallback and speech.compute == "int8"
+    assert "required CUDA library" in speech.status()["fallback_reason"]
+    speech.configure({"device": "cpu"})
+    assert speech.status()["fallback_reason"] is None
 
 
 def test_cuda_generator_failure_falls_back(models: Models, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,6 +76,7 @@ def test_cuda_generator_failure_falls_back(models: Models, monkeypatch: pytest.M
     speech = Speech(models)
     assert speech.transcribe(pcm())["text"] == "hello world"
     assert speech.device == "cpu"
+    assert "GPU initialization" in speech.status()["fallback_reason"]
 
 
 def test_explicit_cuda_error_is_reported(models: Models, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,6 +86,7 @@ def test_explicit_cuda_error_is_reported(models: Models, monkeypatch: pytest.Mon
     with pytest.raises(RuntimeError):
         speech.transcribe(pcm(device="cuda"))
     assert not speech.cpu_fallback
+    assert speech.status()["fallback_reason"] is None
 
 
 def test_cpu_error_does_not_retry(models: Models, monkeypatch: pytest.MonkeyPatch) -> None:

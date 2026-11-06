@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from linux_cuda_runtime import stage as stage_cuda, check_asset_sizes
 
 # glibc must stay together with the host loader and NSS configuration.
 HOST_LIBRARIES = re.compile(r"^(?:ld-linux.*|lib(?:c|m|pthread|dl|rt|resolv|util|anl)\.so\..*)$")
@@ -53,7 +54,7 @@ def bundle_libraries(appdir, binaries):
         capture_output=True).stdout)
 
 
-def package(image, deb, output):
+def package(image, deb, output, lock):
     image, deb, output = image.resolve(), deb.resolve(), output.resolve()
     if image.parent == output or deb.parent == output:
         raise ValueError("Output directory must differ from the original bundles")
@@ -72,6 +73,7 @@ def package(image, deb, output):
             shutil.copy2(source, target)
             binaries.append(Path(source))
         bundle_libraries(appdir, binaries)
+        stage_cuda(appdir, lock)
         shutil.copytree('/usr/share/alsa', appdir / 'usr/share/alsa', symlinks=False)
         fonts = appdir / 'usr/share/fonts'
         fonts.mkdir(exist_ok=True)
@@ -137,6 +139,7 @@ exec "$APPDIR/AppRun.tauri" "$@"
         # Original checksums describe files replaced above.
         (package_dir / "DEBIAN/md5sums").unlink(missing_ok=True)
         run("dpkg-deb", "--root-owner-group", "-Zgzip", "-b", str(package_dir), str(output / deb.name))
+        check_asset_sizes(output.iterdir())
 
 
 if __name__ == "__main__":
@@ -144,5 +147,6 @@ if __name__ == "__main__":
     parser.add_argument("--appimage", type=Path, required=True)
     parser.add_argument("--deb", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--lock", type=Path, default=Path(__file__).resolve().parents[1] / "engine/requirements-linux-release.txt")
     args = parser.parse_args()
-    package(args.appimage, args.deb, args.output)
+    package(args.appimage, args.deb, args.output, args.lock)

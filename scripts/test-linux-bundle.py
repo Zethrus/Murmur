@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from linux_cuda_runtime import verify as verify_cuda, check_asset_sizes
 
 
 def run(*args, **kwargs):
@@ -22,11 +23,13 @@ def check(directory):
     directory = directory.resolve()
     image, = directory.glob('*.AppImage')
     deb, = directory.glob('*.deb')
+    check_asset_sizes(directory.iterdir())
     assert digest(image) == digest(directory / 'murmur'), 'Desktop download must be the full AppImage'
     with tempfile.TemporaryDirectory(prefix='murmur-bundle-test-') as temporary:
         work = Path(temporary)
         run(str(image), '--appimage-extract', cwd=work, stdout=subprocess.DEVNULL)
         root = work / 'squashfs-root'
+        manifest = verify_cuda(root)
         env = dict(os.environ, LD_LIBRARY_PATH=str(root / 'usr/lib'))
         for name in ('murmur', 'murmur-engine', 'xdotool', 'xprop'):
             executable = root / 'usr/bin' / name
@@ -54,6 +57,7 @@ def check(directory):
         for file in root.rglob('*'):
             if file.is_file():
                 assert digest(file) == digest(package / 'opt/murmur' / file.relative_to(root)), file
+        assert verify_cuda(package / 'opt/murmur') == manifest
         assert '/opt/murmur/AppRun' in (package / 'usr/bin/murmur').read_text()
     print('AppImage, tools, engine, and Debian runtime verified.')
 

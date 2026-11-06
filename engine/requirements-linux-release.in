@@ -1,0 +1,4 @@
+# Input to the reproducible Linux release wheel lock.
+-r requirements-cuda.txt
+numpy==1.26.4
+pyinstaller==6.22.3

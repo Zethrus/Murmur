@@ -1,10 +1,16 @@
+## Unreleased Linux packaging changes
+
+New desktop builds include pinned CUDA userspace libraries for compatible NVIDIA drivers. CPU-only machines continue to work. Engine Settings explains automatic GPU fallback, and Engine check runs real inference even on its silent probe.
+
+## Murmur 0.4.2
+
 Murmur 0.4.2 bundles the Linux application runtime.
 
 - AppImage, Debian, and portable downloads include the typing tools and client libraries.
 - Python and the CPU speech engine are included. No separate Python, WebKitGTK, xdotool, or xprop installation is needed.
 - The standalone `murmur` download is now the full AppImage too.
 - Debian installs the extracted runtime, so it does not need FUSE.
-- Models download from Settings when you choose Install. CUDA remains optional and is not bundled.
+- Models download from Settings when you choose Install. CUDA is not bundled in the published 0.4.2 assets.
 
 Choose the AppImage for a portable download, or the `.deb` for Debian/Ubuntu.
 Make the AppImage executable and launch it. If FUSE is unavailable, add

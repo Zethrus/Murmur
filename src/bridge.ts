@@ -11,7 +11,7 @@ export type DictationState = "idle" | "listening" | "transcribing" | "done" | "e
 export interface Status {
   state: DictationState; model: string; device: string; compute: string;
   source?: "local" | "phone" | null;
-  sidecar_alive: boolean; model_available: boolean; error: string | null;
+  sidecar_alive: boolean; model_available: boolean; fallback_reason: string | null; error: string | null;
 }
 export type OverlayPosition = "top-center" | "bottom-center" | "custom";
 export interface OverlayPlacement {
