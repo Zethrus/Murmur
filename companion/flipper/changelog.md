@@ -1,5 +1,5 @@
-v0.4.6:
-First Apps Catalog release. Added app icon and catalog description. Version matches Murmur 0.4.6.
+v0.4.7:
+First Apps Catalog release. Added app icon and catalog description. Version matches Murmur 0.4.7.
 
 v0.4.2:
 Version header now stays in sync with the desktop app.
