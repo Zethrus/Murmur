@@ -37,7 +37,7 @@ def check_assets(tag, directory):
         raise ValueError("Invalid release tag")
     version = tag[1:]
     required = {
-        "murmur", "murmur-engine", "murmur-linux-x86_64.tar.gz",
+        "murmur-linux-x86_64.tar.gz",
         f"Murmur_{version}_amd64.deb", f"Murmur_{version}_amd64.AppImage",
         f"murmur-companion-{tag}.fap",
     }
@@ -48,19 +48,16 @@ def check_assets(tag, directory):
         p = directory / name
         if p.is_symlink() or not p.is_file() or p.stat().st_size == 0:
             raise ValueError(f"Missing, empty or unsafe asset: {name}")
-    with (directory / "murmur").open("rb") as desktop, (directory / f"Murmur_{version}_amd64.AppImage").open("rb") as image:
-        if hashlib.file_digest(desktop, "sha256").digest() != hashlib.file_digest(image, "sha256").digest():
-            raise ValueError("Standalone desktop must include the full AppImage runtime")
     with tarfile.open(directory / "murmur-linux-x86_64.tar.gz") as archive:
         members = archive.getmembers()
         if {m.name for m in members} != {"murmur", "murmur-engine"} or len(members) != 2:
             raise ValueError("Portable archive must contain only the executable pair")
         for member in members:
-            if not member.isfile() or not member.mode & 0o111:
-                raise ValueError(f"Archive member is not executable: {member.name}")
-            with archive.extractfile(member) as stream, (directory / member.name).open("rb") as raw:
-                if hashlib.file_digest(stream, "sha256").digest() != hashlib.file_digest(raw, "sha256").digest():
-                    raise ValueError(f"Portable and standalone assets differ: {member.name}")
+            if not member.isfile() or not member.mode & 0o111 or member.size == 0:
+                raise ValueError(f"Archive member must be a nonempty executable: {member.name}")
+        with archive.extractfile("murmur") as stream, (directory / f"Murmur_{version}_amd64.AppImage").open("rb") as image:
+            if hashlib.file_digest(stream, "sha256").digest() != hashlib.file_digest(image, "sha256").digest():
+                raise ValueError("Portable desktop must match the AppImage")
     lines = []
     for name in sorted(required):
         with (directory / name).open("rb") as stream:

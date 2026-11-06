@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 
 
@@ -22,7 +23,9 @@ def check(directory):
     directory = directory.resolve()
     image, = directory.glob('*.AppImage')
     deb, = directory.glob('*.deb')
-    assert digest(image) == digest(directory / 'murmur'), 'Desktop download must be the full AppImage'
+    assert {path.name for path in directory.iterdir()} == {
+        image.name, deb.name, 'murmur-linux-x86_64.tar.gz'
+    }, 'Linux output must contain only the AppImage, Debian package, and portable archive'
     with tempfile.TemporaryDirectory(prefix='murmur-bundle-test-') as temporary:
         work = Path(temporary)
         run(str(image), '--appimage-extract', cwd=work, stdout=subprocess.DEVNULL)
@@ -36,7 +39,14 @@ def check(directory):
         run(str(root / 'usr/bin/xdotool'), '--version', env=env)
         if env.get('DISPLAY'):
             run(str(root / 'usr/bin/xprop'), '-version', env=env)
-        assert digest(root / 'usr/bin/murmur-engine') == digest(directory / 'murmur-engine')
+        with tarfile.open(directory / 'murmur-linux-x86_64.tar.gz') as archive:
+            members = archive.getmembers()
+            assert len(members) == 2 and {member.name for member in members} == {'murmur', 'murmur-engine'}
+            for member in members:
+                assert member.isfile() and member.mode & 0o111 and member.size > 0, member.name
+                expected = image if member.name == 'murmur' else root / 'usr/bin/murmur-engine'
+                with archive.extractfile(member) as stream:
+                    assert hashlib.file_digest(stream, 'sha256').digest() == digest(expected), member.name
         requests = [{'id': 1, 'method': 'ping'}, {'id': 2, 'method': 'models.list'}, {'id': 3, 'method': 'shutdown'}]
         engine = run(str(root / 'usr/bin/murmur-engine'), '--models-dir', str(work / 'models'),
                      input=''.join(json.dumps(request) + '\n' for request in requests),

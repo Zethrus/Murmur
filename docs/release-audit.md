@@ -48,6 +48,10 @@ The archive contains the same executable pair as the standalone downloads, with
 execute permissions preserved. All seven public download links, including the
 checksum file, returned successfully without authentication.
 
+The loose `murmur` and `murmur-engine` downloads were subsequently removed from
+the release pages. The packaged downloads were retained, and `SHA256SUMS` was
+updated to list those files.
+
 The packaged app remained running for 12 seconds in an isolated D-Bus/Xvfb session.
 The downloaded frozen engine passed ping, model listing, and shutdown checks with
 an empty model directory and no download. This is a startup check, not a speech
