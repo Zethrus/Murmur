@@ -5,7 +5,7 @@
 
 #include <string.h>
 
-#define CONFIG_DIR "/ext/apps_data/murmur_companion"
+#define CONFIG_DIR  "/ext/apps_data/murmur_companion"
 #define CONFIG_FILE CONFIG_DIR "/config.txt"
 
 void config_load(MurmurMap* map) {
