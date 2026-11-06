@@ -80,6 +80,17 @@ class UserFiles(unittest.TestCase):
             subprocess.run(["desktop-file-validate", str(prefix / "share/applications/murmur.desktop")], check=True)
             subprocess.run(["desktop-file-validate", str(self.home / ".config/autostart/murmur.desktop")], check=True)
 
+    def test_only_login_entry_passes_background_flag(self):
+        self.install()
+        desktop = (self.home / ".local/share/applications/murmur.desktop").read_text()
+        login = (self.home / ".config/autostart/murmur.desktop").read_text()
+        self.assertNotIn("--background", desktop)
+        self.assertIn(" --background\n", login)
+        # Reinstall upgrades an entry written by a previous version.
+        (self.home / ".config/autostart/murmur.desktop").write_text(desktop)
+        self.install()
+        self.assertIn(" --background\n", (self.home / ".config/autostart/murmur.desktop").read_text())
+
     def test_uninstall_keeps_data_and_purge_removes_it(self):
         self.install()
         app = self.home / ".local/share/murmur"

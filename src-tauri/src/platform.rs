@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tauri::{AppHandle, Manager};
+#[cfg(not(target_os = "linux"))]
 use tauri_plugin_autostart::ManagerExt;
 use tracing_subscriber::{filter::filter_fn, prelude::*};
 #[derive(Clone)]
@@ -117,15 +118,30 @@ pub fn open_settings(app: &AppHandle) -> Result<()> {
     window.set_focus().context("Focus settings")?;
     Ok(())
 }
+#[cfg(target_os = "linux")]
+pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<()> {
+    let home = env_path("HOME")?;
+    let config = env::var_os("XDG_CONFIG_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    let runtime = app.env();
+    let executable = crate::autostart::launcher(
+        runtime.appimage.map(PathBuf::from),
+        runtime.appdir.map(PathBuf::from),
+        env::current_exe().context("Find Murmur executable")?,
+    );
+    crate::autostart::update(&home, &config, &executable, enabled)
+}
+#[cfg(not(target_os = "linux"))]
 pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<()> {
     let manager = app.autolaunch();
-    if manager.is_enabled().context("Read autostart state")? != enabled {
-        if enabled {
-            manager.enable()
-        } else {
-            manager.disable()
-        }
-        .context("Update autostart")?;
+    if enabled {
+        // Refresh existing registrations too: older versions did not include
+        // --background, and an update can change the executable's location.
+        manager.enable().context("Update autostart")?;
+    } else if manager.is_enabled().context("Read autostart state")? {
+        manager.disable().context("Update autostart")?;
     }
     Ok(())
 }

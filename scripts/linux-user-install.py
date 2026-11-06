@@ -136,7 +136,9 @@ def install(binary, sidecar):
         put(app / f"icons/{size}x{size}/murmur.png", source=source)
         put(prefix / f"share/icons/hicolor/{size}x{size}/apps/murmur.png", source=source)
     put(data / "applications/murmur.desktop", text=entry)
-    put(config / "autostart/murmur.desktop", text=entry + "X-GNOME-Autostart-enabled=true\n")
+    autostart_entry = entry.replace(
+        f"Exec={desktop_exec(launcher)}\n", f"Exec={desktop_exec(launcher)} --background\n")
+    put(config / "autostart/murmur.desktop", text=autostart_entry + "X-GNOME-Autostart-enabled=true\n")
     config_file = config / "murmur/config.toml"
     if not config_file.exists():
         put(config_file, text="[general]\nautostart = true\n", mode=0o600)

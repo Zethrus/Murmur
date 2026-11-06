@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
 mod audio;
+#[cfg(target_os = "linux")]
+mod autostart;
 #[cfg(test)]
 mod coding_tests;
 mod companion;
@@ -140,18 +142,36 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         enabled,
     })?;
     state.start()?;
+    if show_settings_on_launch(std::env::args_os()) {
+        platform::open_settings(&handle)?;
+    }
     Ok(())
+}
+
+// argv includes the executable. Login startup passes --background; normal
+// launches (including a second instance) should bring Settings into view.
+fn show_settings_on_launch(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> bool {
+    !args
+        .into_iter()
+        .skip(1)
+        .any(|arg| arg.as_ref() == "--background")
 }
 
 fn main() {
     let application = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Err(error) = platform::open_settings(app) {
-                tracing::warn!(%error, "Second instance");
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if show_settings_on_launch(args) {
+                if let Err(error) = platform::open_settings(app) {
+                    tracing::warn!(%error, "Second instance");
+                }
             }
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .arg("--background")
+                .build(),
+        )
         .setup(|app| setup(app).map_err(Into::into))
         .on_window_event(|window, event| {
             if window.label() == "overlay" {

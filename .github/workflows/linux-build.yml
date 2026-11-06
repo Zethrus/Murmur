@@ -56,6 +56,8 @@ jobs:
              command -v cmake >/dev/null && command -v g++ >/dev/null && \
              command -v xdotool >/dev/null && command -v xprop >/dev/null && \
              command -v mksquashfs >/dev/null && \
+             command -v xvfb-run >/dev/null && command -v xauth >/dev/null && \
+             command -v dbus-run-session >/dev/null && \
              test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf && \
              (compgen -G '/usr/lib/llvm-*/lib/libclang.so*' >/dev/null || \
               test -f "${LIBCLANG_PATH:-/nonexistent}/libclang.so"); then
@@ -67,7 +69,7 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libasound2-dev \
             build-essential cmake clang libclang-dev llvm-dev pkg-config patchelf \
             libxkbcommon-dev libx11-dev libgtk-3-dev librsvg2-bin file \
-            xdotool x11-utils squashfs-tools fonts-dejavu-core
+            xdotool x11-utils squashfs-tools fonts-dejavu-core xvfb xauth dbus
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -140,6 +142,7 @@ jobs:
             --deb "$release"/bundle/deb/*.deb \
             --output .cache/artifacts/linux
           python3 scripts/test-linux-bundle.py .cache/artifacts/linux
+          python3 scripts/test-linux-startup.py .cache/artifacts/linux/*.AppImage
       - name: Attach Linux assets to the draft (tags only)
         if: startsWith(github.ref, 'refs/tags/')
         env:

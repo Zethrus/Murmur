@@ -55,6 +55,8 @@ def check(directory):
             if file.is_file():
                 assert digest(file) == digest(package / 'opt/murmur' / file.relative_to(root)), file
         assert '/opt/murmur/AppRun' in (package / 'usr/bin/murmur').read_text()
+        run(sys.executable, str(Path(__file__).with_name('test-linux-startup.py')),
+            str(package / 'opt/murmur/AppRun'), timeout=120)
     print('AppImage, tools, engine, and Debian runtime verified.')
 
 
