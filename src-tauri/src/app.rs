@@ -96,6 +96,8 @@ pub struct AppState {
     pub enhance: enhance::runtime::Runtime,
     pub companion: crate::companion::Companion,
     pub companion_network: crate::companion::network::Network,
+    /// Transcript held back because focus changed during dictation.
+    pub held: crate::held::HeldStore,
     config: Mutex<Config>,
     transaction: Mutex<()>,
     status: Mutex<Status>,
@@ -163,6 +165,7 @@ impl AppState {
             enhance,
             companion: crate::companion::Companion::new(app),
             companion_network,
+            held: crate::held::HeldStore::default(),
             config: Mutex::new(config),
             transaction: Mutex::new(()),
             status: Mutex::new(status),
@@ -185,9 +188,10 @@ impl AppState {
     pub fn config(&self) -> Result<Config> {
         Ok(lock(&self.config)?.clone())
     }
-    /// A pending or ready Enhance suggestion keeps the overlay visible regardless of idle_hide.
+    /// A pending or ready Enhance suggestion, or a held transcript, keeps the overlay visible
+    /// regardless of idle_hide.
     pub fn overlay_held(&self) -> bool {
-        self.enhance.holds_overlay()
+        self.enhance.holds_overlay() || self.held.holds_overlay()
     }
     pub fn status(&self) -> Result<Status> {
         let mut status = lock(&self.status)?.clone();

@@ -58,6 +58,16 @@ PR review follow-up: the targeted Rust regression
 pending external edit survives a placement-save attempt, then both the edited
 setting and placement persist after reload, and incomplete TOML is not overwritten.
 
+Integration with the focus-aware delivery changes on `master`: the merged UI
+suite passes 41 tests, including held-transcript/drag visibility interaction.
+Both merged Rust configurations pass 203 tests (2 ignored with default features,
+1 without), and the native 20-drag sequence passes. A subsequent focused
+controller regression verifies that focus is sampled **after** drag release,
+that new drags stay blocked until delivery ends, and that cleanup restores and
+publishes the non-busy state even when focus lookup fails. All six controller
+tests pass with and without default features. This ordering applies to normal
+dictation and explicit held-text insertion.
+
 Run from the repository root:
 
 ```sh

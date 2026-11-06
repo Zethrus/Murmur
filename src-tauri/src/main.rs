@@ -10,6 +10,8 @@ mod config;
 mod controller;
 mod engine;
 mod enhance;
+mod focus_guard;
+mod held;
 mod history;
 mod hotkey;
 mod inject;
@@ -223,6 +225,9 @@ fn main() {
             ipc::rewrite_last_dictation,
             ipc::accept_enhancement,
             ipc::discard_enhancement,
+            ipc::insert_held,
+            ipc::copy_held,
+            ipc::discard_held,
             ipc::get_overlay_snapshot,
             ipc::reset_overlay_position,
             ipc::set_overlay_size,

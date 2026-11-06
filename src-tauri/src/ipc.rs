@@ -328,6 +328,23 @@ pub fn discard_enhancement(state: State<'_, AppState>, suggestion_id: String) ->
     state.enhance.discard(&state, id);
     Ok(())
 }
+fn held_action(state: &AppState, held_id: &str, action: fn(Option<u64>) -> Action) -> Reply<()> {
+    let id = crate::enhance::runtime::parse_id(held_id);
+    state.send(action(id)).map_err(error)
+}
+/// Type the held transcript into the window focused now.
+#[tauri::command]
+pub fn insert_held(state: State<'_, AppState>, held_id: String) -> Reply<()> {
+    held_action(&state, &held_id, Action::InsertHeld)
+}
+#[tauri::command]
+pub fn copy_held(state: State<'_, AppState>, held_id: String) -> Reply<()> {
+    held_action(&state, &held_id, Action::CopyHeld)
+}
+#[tauri::command]
+pub fn discard_held(state: State<'_, AppState>, held_id: String) -> Reply<()> {
+    held_action(&state, &held_id, Action::DiscardHeld)
+}
 #[tauri::command]
 pub fn get_overlay_snapshot(state: State<'_, AppState>) -> Reply<Value> {
     Ok(state.enhance.snapshot(&state))

@@ -1,4 +1,5 @@
 import {call, on, startOverlayDrag, type Config, type DictationState, type Enhancement, type Events, type OverlaySnapshot} from "../bridge";
+import {heldPanel} from "./held";
 import {cssLength, isNewer, sizeChanged, windowSize, type Size} from "./layout";
 
 const NONE: Enhancement = {phase:"none",dictation_id:null,suggestion_id:null,original_text:null,proposed_text:null,acceptance_mode:"unavailable",message:null,expires_at:null};
@@ -14,12 +15,13 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   const handle = root.querySelector<HTMLElement>(".drag-handle")!, panel = root.querySelector<HTMLElement>(".suggestion")!, proposed = root.querySelector<HTMLElement>(".suggestion-text")!;
   const message = root.querySelector<HTMLElement>(".suggestion-message")!, accept = root.querySelector<HTMLButtonElement>(".accept-button")!, discard = root.querySelector<HTMLButtonElement>(".discard-button")!;
   const bars = [...root.querySelectorAll<HTMLElement>(".bars i")];
+  const held = heldPanel(); pill.append(held.element);
   let state: DictationState = "idle", config: Config | undefined, receivedState = false, receivedConfig = false, lastError = "Dictation unavailable", disposed = false;
   let enhancement: Enhancement = NONE, revision = -1, busy = false, acting = false, dragging = false, localMessage = "";
   let timer: ReturnType<typeof setTimeout> | undefined, expiry: ReturnType<typeof setTimeout> | undefined, noticeTimer: ReturnType<typeof setTimeout> | undefined;
   const disposers: (()=>void)[] = [];
   panel.hidden = true;
-  const scheduleHide = (ms: number): void => { clearTimeout(timer); timer = setTimeout(()=>{ if (!dragging && !active(enhancement)) pill.hidden = true; },ms); };
+  const scheduleHide = (ms: number): void => { clearTimeout(timer); timer = setTimeout(()=>{ if (!dragging && !active(enhancement) && !held.active()) pill.hidden = true; },ms); };
 
   const apply = (next: Config): void => {
     config = next; document.documentElement.dataset.theme = next.general.theme;
@@ -48,7 +50,13 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
       label.textContent = "Enhance";
     }
   };
-  const isExpanded = (): boolean => (state === "listening" && !!preview.textContent && !!config?.overlay.show_preview) || !panel.hidden;
+  /** Held-text view; it outranks the Enhance label because nothing was delivered. */
+  const renderHeld = (): void => {
+    held.show(state !== "listening" && state !== "transcribing");
+    root.dataset.held = String(held.visible()); root.dataset.expanded = String(isExpanded());
+    if (held.visible()) { clearTimeout(timer); pill.hidden = config ? !config.overlay.enabled : true; label.textContent = "Focus changed"; }
+  };
+  const isExpanded = (): boolean => (state === "listening" && !!preview.textContent && !!config?.overlay.show_preview) || !panel.hidden || held.visible();
   const render = (next: DictationState): void => {
     const previous = state; state = next; clearTimeout(timer); root.dataset.state = next;
     pill.hidden = config ? !config.overlay.enabled : true;
@@ -56,8 +64,8 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     label.textContent = {idle:"mur",listening:"Listening",transcribing:"Finding your words",done:"Done",error:lastError}[next];
     if (next !== "listening") preview.textContent = "";
     if (next === "listening" && previous !== "listening") { setEnhancement(NONE); }
-    renderEnhancement();
-    if (active(enhancement) && !panel.hidden) { bars.forEach(bar=>bar.style.removeProperty("--level")); return; }
+    renderEnhancement(); renderHeld();
+    if ((active(enhancement) && !panel.hidden) || held.visible()) { bars.forEach(bar=>bar.style.removeProperty("--level")); return; }
     if (next === "done") scheduleHide(900);
     else if (next === "error") scheduleHide(1600);
     else if (next === "idle" && config?.overlay.idle_hide) {
@@ -78,19 +86,20 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   };
   /** After a suggestion closes, fall back to the ordinary idle presentation. */
   const settle = (): void => {
-    renderEnhancement(); if (state === "listening" || state === "transcribing") return;
+    renderEnhancement(); renderHeld(); if (state === "listening" || state === "transcribing" || held.visible() || active(enhancement)) return;
     if (config?.overlay.idle_hide) { if (!dragging) pill.hidden = true; } else render("idle");
   };
   const applySnapshot = (snapshot: OverlaySnapshot): void => {
     if (!isNewer(revision,snapshot.revision)) return; revision = snapshot.revision;
-    const wasActive = active(enhancement); busy = snapshot.delivery_busy; root.dataset.busy = String(busy);
+    const wasActive = active(enhancement), wasHeld = held.active(); busy = snapshot.delivery_busy; root.dataset.busy = String(busy);
+    held.update(snapshot.held ?? null,busy);
     render(snapshot.dictation_state);
     if (snapshot.dictation_state === "listening") {
       preview.textContent = snapshot.partial_text;
       root.dataset.expanded = String(isExpanded());
     }
     setEnhancement(snapshot.enhancement ?? NONE);
-    if (wasActive && !active(enhancement)) settle(); else renderEnhancement();
+    if ((wasActive && !active(enhancement)) || (wasHeld && !held.active())) settle(); else { renderEnhancement(); renderHeld(); }
   };
 
   const act = async (kind: "accept" | "discard"): Promise<void> => {

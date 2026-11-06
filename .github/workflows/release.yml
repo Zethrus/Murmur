@@ -40,7 +40,7 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/flipper-build.yml
   # Windows and Android are deferred. See docs/roadmap.md.
-  publish:
+  validate:
     needs: [linux, flipper]
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     steps:
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Verify all assets and publish
+      - name: Verify all assets and retain the draft for testing
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -60,4 +60,3 @@ jobs:
           python3 scripts/check-release.py assets "$GITHUB_REF_NAME" release-assets
           (cd release-assets && sha256sum --check SHA256SUMS)
           gh release upload "$GITHUB_REF_NAME" release-assets/SHA256SUMS --clobber
-          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
