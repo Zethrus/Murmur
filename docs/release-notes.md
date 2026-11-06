@@ -1,4 +1,4 @@
-# Murmur 0.4.4
+# Murmur 0.4.5
 
 Linux desktop downloads now bundle pinned CUDA userspace libraries for compatible
 NVIDIA drivers. CPU-only machines continue to work.
@@ -10,6 +10,7 @@ NVIDIA drivers. CPU-only machines continue to work.
 - Manual launches open Settings, including when Murmur is already running.
   Starting at login stays in the background, and existing login entries are
   refreshed while preserving the autostart preference.
+- GPU validation supports the relocated Python interpreter used by the release runner.
 - Release checks validate AppImage startup and GPU inference against the final
   asset hashes.
 
