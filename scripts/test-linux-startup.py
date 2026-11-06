@@ -23,8 +23,14 @@ def visible_settings():
     return bool(result.stdout.strip())
 
 
-def wait_for(condition, app, message):
-    deadline = time.monotonic() + 25
+def launch_timeout(executable):
+    # Extract-and-run unpacks the full CUDA runtime on every invocation,
+    # including second-instance launches. Keep the extracted-app check tight.
+    return 180 if executable.suffix == '.AppImage' else 25
+
+
+def wait_for(condition, app, message, timeout=25):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if app.poll() is not None:
             raise AssertionError(f'Murmur exited early: {app.returncode}')
@@ -35,6 +41,7 @@ def wait_for(condition, app, message):
 
 
 def exercise(executable, background):
+    timeout = launch_timeout(executable)
     with tempfile.TemporaryDirectory(prefix='murmur-startup-') as directory:
         profile = Path(directory)
         runtime = profile / 'runtime'
@@ -61,20 +68,20 @@ def exercise(executable, background):
             try:
                 if background:
                     wait_for(lambda: '--background' in entry.read_text(), app,
-                             'Existing autostart entry was not updated')
+                             'Existing autostart entry was not updated', timeout)
                     assert '/old/murmur' not in entry.read_text()
                     assert not legacy.exists(), 'Legacy plugin entry was not removed'
                     time.sleep(2)
                     assert not visible_settings(), 'Login launch unexpectedly opened Settings'
                     subprocess.run([str(executable), '--background'], env=env, stdout=log,
-                                   stderr=subprocess.STDOUT, check=True, timeout=25)
+                                   stderr=subprocess.STDOUT, check=True, timeout=timeout)
                     time.sleep(1)
                     assert not visible_settings(), 'Second background launch opened Settings'
                     subprocess.run([str(executable)], env=env, stdout=log,
-                                   stderr=subprocess.STDOUT, check=True, timeout=25)
-                    wait_for(visible_settings, app, 'Manual relaunch did not open Settings')
+                                   stderr=subprocess.STDOUT, check=True, timeout=timeout)
+                    wait_for(visible_settings, app, 'Manual relaunch did not open Settings', timeout)
                 else:
-                    wait_for(visible_settings, app, 'Manual launch did not open Settings')
+                    wait_for(visible_settings, app, 'Manual launch did not open Settings', timeout)
                     assert not entry.exists() and not legacy.exists(), 'Disabled autostart entries remain'
                 print(('Login, autostart migration, and manual relaunch' if background else 'Manual launch') + ': passed', flush=True)
             except Exception:
@@ -111,7 +118,7 @@ def main():
             config.write_text(BUS_CONFIG)
             subprocess.run(['xvfb-run', '-a', 'dbus-run-session', '--config-file=' + str(config),
                             'python3', str(Path(__file__).resolve()), str(executable), '--session'],
-                           check=True, timeout=120)
+                           check=True, timeout=5 * launch_timeout(executable) + 60)
 
 
 if __name__ == '__main__':

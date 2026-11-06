@@ -22,12 +22,34 @@ Check for a shortcut conflict and try another combination in General. Escape is
 reserved for cancellation. If typing fails, try Clipboard only to isolate the
 input path.
 
+## Text was held instead of typed
+
+Murmur binds each dictation to the window focused when you press the shortcut.
+If a different window has focus when the transcript is ready, the overlay shows
+**Not inserted: focus changed** with Insert here, Copy, and Discard. Focus the
+window the text belongs in, then choose Insert here, press the optional insert
+shortcut, or press Accept on the Flipper. Held text stays in memory only. It is
+cleared after two minutes, on Discard, or when the next dictation starts.
+
+Change this in Behavior → When focus changes. Windows are compared by identity,
+so switching between two windows of one app counts as a change. Tabs inside one
+browser or terminal window cannot be told apart. Focus is checked just before
+typing starts; switching windows while a long transcript is being typed is not
+detected. With **Return to the original window**, a window manager or Windows
+may refuse to refocus; the text is then held.
+
 ## GPU inference falls back to CPU
 
-Release downloads do not bundle NVIDIA CUDA libraries. Device Auto falls back to
-CPU when CUDA initialization or inference fails, and stays there until the engine
-restarts. Forced CUDA reports the error instead. The source installer installs
-CUDA runtime wheels, but still needs a compatible NVIDIA driver.
+Desktop builds from this checkout bundle NVIDIA CUDA userspace libraries;
+published 0.4.2 downloads do not. A compatible host
+NVIDIA driver is still required. Device Auto falls back to CPU when CUDA
+initialization or inference fails, and stays there until the engine restarts or
+the device configuration changes. Engine Settings shows a reason for a genuine
+GPU failure; an ordinary CPU-only machine has no warning. A missing library
+suggests an incomplete package; a driver warning calls for checking driver
+compatibility. Forced CUDA reports the error instead of silently using CPU.
+The separately downloaded `murmur-engine` needs an external CUDA userspace
+runtime for GPU use.
 
 ## The engine does not start
 

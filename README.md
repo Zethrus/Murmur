@@ -40,6 +40,8 @@ desktop with a working microphone and system tray. Native Wayland input is not v
 [Get the latest release](https://github.com/Zethrus/Murmur/releases/latest).
 The speech engine is included in the desktop packages. There is no separate
 engine download to install.
+Linux desktop packages built from this checkout include pinned CUDA userspace
+libraries. Published 0.4.2 downloads predate this packaging change.
 
 The Android APK is planned for **November 6, 2026**. Windows builds are deferred
 until **November 6 or 7**. These are targets, subject to
@@ -96,8 +98,9 @@ hotkey to **Toggle** in General. Closing Settings keeps Murmur running; choose
 
 Models download only when you choose Install. After that, speech recognition
 works offline. Downloads include a Python runtime, so Python, Rust and Node are
-not needed to run them. NVIDIA CUDA libraries are not bundled. CPU inference
-works out of the box; for the CUDA-aware source installation, see
+not needed to run them. New desktop builds include pinned CUDA userspace libraries;
+a compatible host NVIDIA driver is required for GPU inference. CPU inference
+works without a GPU. For the source installation, see
 [building from source](docs/building.md).
 
 ## Built for everyday dictation

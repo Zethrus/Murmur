@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, Engine as EngineConfig},
+    config::{Config, Engine as EngineConfig, Placement},
     controller::{self, Action},
     engine::Engine,
     enhance,
@@ -13,6 +13,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, MutexGuard,
@@ -24,6 +25,22 @@ use tauri::{
     AppHandle, Emitter, Manager,
 };
 
+/// A queued filesystem reload may lag behind a completed drag. Defer its save
+/// until the controller applies the disk config instead of overwriting that edit.
+fn persist_overlay_placement(
+    path: &Path,
+    current: &Config,
+    placement: Placement,
+) -> Result<Option<Config>> {
+    let disk = Config::load(path)?;
+    if toml::to_string(current)? != toml::to_string(&disk)? {
+        return Ok(None);
+    }
+    let new = current.patched(json!({"overlay":{"position":"custom","placement":placement}}))?;
+    new.save(path)?;
+    Ok(Some(new))
+}
+
 #[derive(Clone, Serialize)]
 pub struct Status {
     pub state: String,
@@ -33,6 +50,7 @@ pub struct Status {
     pub compute: String,
     pub sidecar_alive: bool,
     pub model_available: bool,
+    pub fallback_reason: Option<String>,
     pub error: Option<String>,
 }
 
@@ -61,6 +79,7 @@ fn apply_warm_status(
     status.model_available = available;
     status.device = device.into();
     status.compute = compute.into();
+    status.fallback_reason = result["fallback_reason"].as_str().map(str::to_owned);
     true
 }
 #[derive(Clone)]
@@ -77,6 +96,8 @@ pub struct AppState {
     pub enhance: enhance::runtime::Runtime,
     pub companion: crate::companion::Companion,
     pub companion_network: crate::companion::network::Network,
+    /// Transcript held back because focus changed during dictation.
+    pub held: crate::held::HeldStore,
     config: Mutex<Config>,
     transaction: Mutex<()>,
     status: Mutex<Status>,
@@ -133,6 +154,7 @@ impl AppState {
             compute: "unloaded".into(),
             sidecar_alive: false,
             model_available: false,
+            fallback_reason: None,
             error: None,
         };
         let companion_network = crate::companion::network::Network::new(app.clone(), &paths.data);
@@ -143,6 +165,7 @@ impl AppState {
             enhance,
             companion: crate::companion::Companion::new(app),
             companion_network,
+            held: crate::held::HeldStore::default(),
             config: Mutex::new(config),
             transaction: Mutex::new(()),
             status: Mutex::new(status),
@@ -165,9 +188,10 @@ impl AppState {
     pub fn config(&self) -> Result<Config> {
         Ok(lock(&self.config)?.clone())
     }
-    /// A pending or ready Enhance suggestion keeps the overlay visible regardless of idle_hide.
+    /// A pending or ready Enhance suggestion, or a held transcript, keeps the overlay visible
+    /// regardless of idle_hide.
     pub fn overlay_held(&self) -> bool {
-        self.enhance.holds_overlay()
+        self.enhance.holds_overlay() || self.held.holds_overlay()
     }
     pub fn status(&self) -> Result<Status> {
         let mut status = lock(&self.status)?.clone();
@@ -189,6 +213,7 @@ impl AppState {
             s.model_available = result["model_available"].as_bool().unwrap_or(false);
             s.device = result["device"].as_str().unwrap_or("unloaded").into();
             s.compute = result["compute"].as_str().unwrap_or("unloaded").into();
+            s.fallback_reason = result["fallback_reason"].as_str().map(str::to_owned);
         }
         self.refresh_tray()?;
         self.app
@@ -279,6 +304,13 @@ impl AppState {
     }
     fn apply_runtime(&self, old: &Config, new: &Config) -> Result<()> {
         hotkey::rebind(&self.app, old, new)?;
+        if old.overlay.position != new.overlay.position
+            || serde_json::to_value(&old.overlay.placement)?
+                != serde_json::to_value(&new.overlay.placement)?
+            || (old.overlay.enabled && !new.overlay.enabled)
+        {
+            overlay::reset_placement();
+        }
         if let Err(error) = platform::set_autostart(&self.app, new.general.autostart)
             .and_then(|_| overlay::apply(&self.app, &new.overlay))
         {
@@ -287,6 +319,33 @@ impl AppState {
             let _ = overlay::apply(&self.app, &old.overlay);
             return Err(error);
         }
+        Ok(())
+    }
+    /// Persist observed geometry without reapplying native placement, rebinding
+    /// hotkeys, or reconfiguring the engine. Settings transactions still serialize it.
+    pub fn save_overlay_placement(&self) -> Result<()> {
+        let _transaction = lock(&self.transaction)?;
+        let Some((generation, placement)) = overlay::pending_placement() else {
+            return Ok(());
+        };
+        let new = match persist_overlay_placement(&self.paths.config, &self.config()?, placement) {
+            Ok(Some(new)) => new,
+            Ok(None) => {
+                // Keep placement pending. Reload preserves it for unrelated edits,
+                // but explicit position/reset/disable edits invalidate it normally.
+                self.send(Action::Reload)?;
+                return Ok(());
+            }
+            Err(error) => {
+                overlay::placement_saved(generation, false);
+                return Err(error);
+            }
+        };
+        *lock(&self.config)? = new.clone();
+        overlay::placement_saved(generation, true);
+        self.app
+            .emit("config", &new)
+            .context("Emit overlay placement")?;
         Ok(())
     }
     pub fn update(&self, patch: Value) -> Result<Config> {
@@ -436,9 +495,39 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_warm_status, Status};
-    use crate::config::Engine;
+    use super::{apply_warm_status, persist_overlay_placement, Status};
+    use crate::config::{Config, Engine, Placement};
     use serde_json::json;
+
+    #[test]
+    fn placement_save_preserves_external_edit_until_reload() -> anyhow::Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("murmur-placement-reload-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let current = Config::default();
+        current.save(&path)?;
+        let edited = current.patched(json!({"general":{"theme":"dark"}}))?;
+        edited.save(&path)?; // external edit while the controller still holds `current`
+        let placement = Placement {
+            x_fraction: 0.25,
+            ..Placement::default()
+        };
+        assert!(persist_overlay_placement(&path, &current, placement.clone())?.is_none());
+        let reloaded = Config::load(&path)?;
+        assert_eq!(reloaded.general.theme, "dark");
+        assert_eq!(reloaded.overlay.position, current.overlay.position);
+        assert!(persist_overlay_placement(&path, &reloaded, placement)?.is_some());
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.general.theme, "dark");
+        assert_eq!(saved.overlay.position, "custom");
+        assert_eq!(saved.overlay.placement.x_fraction, 0.25);
+        // An editor's incomplete TOML must also survive an automatic save attempt.
+        std::fs::write(&path, "[general")?;
+        assert!(persist_overlay_placement(&path, &saved, Placement::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&path)?, "[general");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn warm_status_updates_cache_only_for_current_configuration() {
@@ -451,10 +540,11 @@ mod tests {
             compute: "unloaded".into(),
             sidecar_alive: true,
             model_available: true,
+            fallback_reason: None,
             error: None,
         };
         let result = json!({"model":expected.model,"loaded":true,"device":"cpu",
-            "compute":"int8","model_available":true});
+            "compute":"int8","model_available":true,"fallback_reason":"CUDA library missing"});
         let mut changed = expected.clone();
         changed.device = "cuda".into();
         assert!(!apply_warm_status(
@@ -472,5 +562,9 @@ mod tests {
         ));
         assert_eq!(status.device, "cpu");
         assert_eq!(status.compute, "int8");
+        assert_eq!(
+            status.fallback_reason.as_deref(),
+            Some("CUDA library missing")
+        );
     }
 }

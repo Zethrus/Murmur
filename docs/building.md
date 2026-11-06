@@ -71,7 +71,7 @@ Unrelated applications' files are not removed. No privileged install is supporte
 ```sh
 mkdir -p .cache/tmp .cache/pip
 export TMPDIR="$PWD/.cache/tmp" PIP_CACHE_DIR="$PWD/.cache/pip"
-python3 -m venv --system-site-packages engine/.venv
+python3 -m venv engine/.venv
 engine/.venv/bin/python -m pip install -r engine/requirements-cuda.txt pyinstaller pytest
 npm ci
 npm run tauri dev                # desktop app; source Python engine from the venv
@@ -87,20 +87,63 @@ cp src-tauri/binaries/murmur-engine-x86_64-unknown-linux-gnu src-tauri/target/re
 src-tauri/target/release/murmur
 ```
 
+Linux release builds use CPython 3.12 and `scripts/prepare-linux-release.sh` in
+both local and CI builds. It creates a clean `engine/.release-venv` and installs
+the SHA-256 locked wheel set in `engine/requirements-linux-release.txt`; the
+development `engine/.venv` is separate. The lock pins faster-whisper 1.2.1,
+CTranslate2 4.6.3, PyInstaller 6.22.3, and the CUDA 12.9 cuBLAS, cuDNN 9.27,
+and NVRTC wheels. The CUDA wheel hashes were checked against PyPI's published
+files. `engine/requirements-linux-release.in` records the resolution inputs.
+
 The default build directory is `src-tauri/target`; manual build-linux.sh honors
 Cargo target overrides. The installer and CI deliberately pin that directory.
 The final downloads are in `.cache/artifacts/linux`. AppImage creation is required.
-`scripts/bundle-linux-runtime.py` adds typing tools, missing client libraries and
-license notices to Tauri's AppImage, then produces the portable archive and Debian
-package from that runtime. `scripts/test-linux-bundle.py` checks the shipped tools,
-library resolution, engine, and Debian contents. `scripts/test-linux-startup.py`
-launches the AppImage on an isolated X11 display and D-Bus session to check manual
-startup, background startup, autostart migration, and manual reactivation.
-Models download inside Settings.
+`scripts/bundle-linux-runtime.py` adds typing tools, missing client libraries,
+the pinned CUDA userspace libraries under `usr/lib/murmur/cuda`, and notices to
+Tauri's AppImage. It derives the portable archive and Debian package from that
+AppDir. `scripts/test-linux-bundle.py` checks the runtime manifest, library
+resolution, engine, Debian parity, and 2 GiB per-asset limit. The engine is included in the packages; loose app and engine files are not
+published separately. Models download inside Settings.
+
+On the Ubuntu 24.04 validation build, the final AppImage and `murmur` were
+1,616.3 MiB each, the Debian package 1,612.7 MiB, the portable archive
+1,744.0 MiB, and the standalone engine 132.9 MiB. The Debian installed size
+was 2,645.4 MiB. These are local build measurements, not fixed sizes for
+later releases; the build rejects any release asset at or above 2 GiB.
+
+`scripts/test-linux-startup.py` launches the AppImage on an isolated X11 display
+and D-Bus session to check manual startup, background startup, autostart migration,
+and manual reactivation.
 
 These bundles still use the host's glibc, desktop services, and hardware drivers.
 Build on the oldest supported distribution; the current release baseline is
-Ubuntu 24.04 with glibc 2.39. CUDA libraries are not part of the CPU release.
+Ubuntu 24.04 with glibc 2.39. GPU inference needs a compatible host NVIDIA
+driver. [NVIDIA lists](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-toolkit-release-notes/index.html)
+575.51.03 as the minimum for CUDA 12.9 GA, and its
+[cuDNN 9.27 CUDA 12.x matrix](https://docs.nvidia.com/deeplearning/cudnn/backend/v9.27.0/reference/support-matrix.html)
+covers Ada GPUs; the affected RTX 4060 Laptop GPU uses
+driver 580.178.04. Other hardware and driver combinations require validation.
+The build copies each selected NVIDIA wheel's `License.txt` into
+`usr/share/doc/murmur/bundled-runtime`. Before public distribution, review the
+exact wheel notices and the [CUDA](https://docs.nvidia.com/cuda/eula/index.html)
+and [cuDNN](https://docs.nvidia.com/deeplearning/cudnn/backend/latest/reference/eula.html)
+distribution terms for the intended package; this build check does not make a
+legal determination.
+
+For a trusted GPU host with an already staged model, run
+`python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux
+--models-dir /path/to/staged/models`. It performs offline VAD-disabled forced
+CUDA, Auto, explicit CPU, and GPU-hidden Auto transcription, checks library
+origin, and writes `GPU-VALIDATION.json` tied to the built asset hashes. The
+fixture is a three-second excerpt of [OpenAI Whisper's `tests/jfk.flac`](https://github.com/openai/whisper/blob/main/tests/jfk.flac). Pass
+`--baseline-engine` and `--baseline-libraries` to compare ten warmed runs with
+a known working manual-path engine. The first inference is recorded separately.
+On the affected RTX 4060 Laptop GPU, this build's ten-run warmed median was
+65.0 ms, versus 62.0 ms for the working 0.4.2 engine with manual CUDA paths,
+using the same `distil-small.en` model, automatic `int8_float16` precision, and
+fixed fixture. Packaged cold inference was 993.4 ms; launch through the first
+reply was 2,594.4 ms. Forced CUDA and Auto stayed on GPU. Explicit CPU and
+GPU-hidden Auto completed transcription without a GPU failure warning.
 
 ## Windows development build (deferred)
 

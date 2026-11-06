@@ -74,11 +74,13 @@ the repository root (./)
 │       ├── main.rs          # tauri::Builder, plugins, tray, windows, command registration
 │       ├── app.rs           # AppState: config, engine client, controller handle, status
 │       ├── config.rs        # serde structs, defaults, load/save, mtime watcher, unknown-key keep
-│       ├── platform.rs      # paths, autostart toggle, focused-window class, spawn-new-instance
+│       ├── platform.rs      # paths, autostart toggle, focused-window identity/refocus, spawn-new-instance
 │       ├── audio.rs         # cpal stream, ring buffer, RMS/VU, utterance assembly, device list
 │       ├── hotkey.rs        # combo parse/serialise, hold/toggle/tap/cancel semantics
 │       ├── engine.rs        # sidecar spawn/restart, JSON-RPC client, request timeouts, events
 │       ├── inject.rs        # enigo typing, clipboard paste + restore, exclusion list
+│       ├── focus_guard.rs   # deliver/hold/refocus/copy decision when focus changed mid-dictation
+│       ├── held.rs          # in-memory held transcript for overlay review, expiry
 │       ├── postproc.rs      # fillers, replacements, capitalisation, trailing space
 │       ├── sound.rs         # synthesise cues (sine mix), rodio playback, volume/mute
 │       ├── overlay.rs       # window show/hide/position/scale, event forwarding
@@ -186,6 +188,13 @@ human-readable message.
    clipboard-restore fallback that leaves the text in the clipboard if restore fails.
    `clipboard_only` or focused-app match in `exclude_apps` → clipboard only.
    Never inject into Murmur's own windows. On Windows use enigo unicode typing for the fast path.
+   **Focus binding (focus_guard.rs, held.rs)**: the focused window identity (X11
+   `_NET_ACTIVE_WINDOW` ID or Windows HWND) is recorded when dictation starts and compared at
+   delivery. On mismatch, or when the start window is unknown, `injection.focus_change` applies:
+   `hold` (default; overlay review with Insert here / Copy / Discard, memory only, 2 min expiry,
+   cleared by the next dictation), `refocus` (activate the original window, verify, else hold),
+   `copy` (clipboard only), `insert` (previous behaviour). Held text is re-post-processed for the
+   destination app when inserted. Tabs inside one window are not distinguishable.
 6. **Sounds (sound.rs)**: synthesise at runtime (no audio files in the repo): start = two
    rising sine tones (660→880 Hz, 45 ms each, 8 ms envelope), stop = falling (880→660), error =
    two 180 Hz buzzes. Scale amplitude by `volume`, play fire-and-forget on a dedicated thread

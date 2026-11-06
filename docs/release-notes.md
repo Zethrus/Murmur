@@ -1,24 +1,37 @@
-Murmur 0.4.3 opens Settings when you launch the app.
+# Murmur 0.4.6
 
-- Manual launches show Settings immediately, including when Murmur is already running.
-- Starting at login stays in the background. Login entries now pass `--background`.
-- Existing enabled login entries are refreshed when the app starts. Duplicate legacy entries are removed.
-- Linux login entries respect XDG_CONFIG_HOME and use the bundled launcher for Debian installs.
-- Release checks now launch the AppImage and verify window visibility for manual and background startup.
-- Downloads contain the AppImage, Debian package, portable archive, Flipper companion, and checksums. Loose app and engine files are no longer posted separately.
+Dictation now stays bound to the window you started in. Switching windows
+mid-sentence no longer sends a note into whatever app has focus when the
+transcript is ready, such as a terminal.
 
-If an older copy is running, quit it from the tray before launching this version.
-Closing Settings keeps Murmur running; Quit in the tray exits the application.
+- Murmur records the focused window when you press the dictation shortcut and
+  checks it again before typing. If focus changed, the transcript is held in
+  the overlay with Insert here, Copy, and Discard instead of being typed.
+- Held text stays in memory only. It is cleared after two minutes, on Discard,
+  or when the next dictation starts. Inserted text is formatted for the app it
+  lands in, so terminals still receive a single line.
+- Behavior → When focus changes offers Hold for review (default), Return to the
+  original window, Copy to the clipboard, or Insert into the current window.
+- An optional Insert held text shortcut and the Flipper Accept/Dismiss buttons
+  act on held text. The Flipper protocol is unchanged.
 
-Linux AppImage, Debian, and portable downloads include the CPU runtime and typing
-tools. Models download inside Settings. No separate Python, WebKitGTK, xdotool,
-or xprop installation is needed. CUDA is optional and is not bundled.
+Windows are compared by identity, so tabs inside one browser or terminal window
+count as the same target. Switching windows while a long transcript is already
+being typed is not detected.
+
+- Downloads contain the AppImage, Debian package, portable archive, Flipper
+  companion, GPU validation evidence, and checksums. Loose app and engine files
+  are no longer posted separately.
+
+Models download inside Settings. GPU inference requires a compatible host NVIDIA
+driver.
 
 Use the AppImage for a portable download, or the `.deb` for Debian/Ubuntu.
-If FUSE is unavailable, add `--appimage-extract-and-run` when launching the AppImage.
-Verify downloads against `SHA256SUMS`.
+If FUSE is unavailable, add `--appimage-extract-and-run`. Verify downloads against
+`SHA256SUMS`. Quit an older running copy from its tray menu before launching this
+version. Closing Settings keeps Murmur running; tray → Quit exits the application.
 
 The supported baseline is Linux x86_64, glibc 2.39 or newer, and an X11 desktop
 with working audio services and hardware drivers. Packages are unsigned.
-The matching Flipper Zero companion is included. Android is planned for November 6.
-Windows is deferred until November 6 or 7, depending on testing.
+The matching Flipper Zero companion is included. Windows and Android downloads
+remain deferred.

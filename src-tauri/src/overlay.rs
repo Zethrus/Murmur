@@ -1,8 +1,12 @@
 //! Native overlay window: placement (preset or user-dragged, per monitor), measured sizing,
 //! visibility, and interactivity. The overlay is never focused; it is clickable while visible
 //! except during actual text injection, when it becomes click-through.
+mod drag;
+mod movement;
 use crate::config::{Overlay, Placement};
 use anyhow::{Context, Result};
+pub use drag::drag;
+use movement::Drag;
 use serde_json::json;
 use std::{
     sync::{Mutex, OnceLock},
@@ -16,8 +20,6 @@ pub const MIN_SIZE: (f64, f64) = (120.0, 40.0);
 pub const MAX_SIZE: (f64, f64) = (1200.0, 900.0);
 /// Distance from the work-area edge for the preset positions, in logical px.
 const EDGE_INSET: f64 = 28.0;
-const MOVE_DEBOUNCE: Duration = Duration::from_millis(300);
-const PROGRAMMATIC_GRACE: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -72,6 +74,15 @@ pub fn choose_display(displays: &[Display], placement: &Placement) -> usize {
         })
         .or_else(|| displays.iter().position(geometry))
         .unwrap_or(0)
+}
+
+/// Presets target the primary display even when an earlier custom record remains.
+pub fn display_index(displays: &[Display], prefs: &Overlay) -> usize {
+    if prefs.position == "custom" {
+        choose_display(displays, &prefs.placement)
+    } else {
+        0
+    }
 }
 
 /// The monitor with the largest intersection with the window.
@@ -152,31 +163,74 @@ pub fn placement_for(display: &Display, window: &Rect) -> Placement {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Runtime {
     /// Logical size reported by the view (already includes the scale preference).
     size: Option<(f64, f64)>,
     layout_revision: u64,
     layout_instance: String,
-    programmatic_until: Option<Instant>,
-    moved_at: Option<Instant>,
+    generation: u64,
+    drag: Option<Drag>,
+    placement: Option<Placement>,
+    unsaved: bool,
+    retry_at: Option<Instant>,
+    hide_pending: bool,
     busy: bool,
 }
 fn runtime() -> std::sync::MutexGuard<'static, Runtime> {
     static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
     RUNTIME
-        .get_or_init(|| {
-            Mutex::new(Runtime {
-                size: None,
-                layout_revision: 0,
-                layout_instance: String::new(),
-                programmatic_until: None,
-                moved_at: None,
-                busy: false,
-            })
-        })
+        .get_or_init(|| Mutex::new(Runtime::default()))
         .lock()
         .unwrap_or_else(|p| p.into_inner())
+}
+impl Runtime {
+    fn prefs(&self, prefs: &Overlay) -> Option<Overlay> {
+        if self.drag.is_some() {
+            return None;
+        }
+        let mut prefs = prefs.clone();
+        if let Some(placement) = &self.placement {
+            prefs.position = "custom".into();
+            prefs.placement = placement.clone();
+        }
+        Some(prefs)
+    }
+
+    fn moved(&mut self, position: (i32, i32), now: Instant) {
+        if let Some(drag) = &mut self.drag {
+            drag.moved(position, now);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.generation += 1;
+        // Keep native gesture ownership until release, but discard its placement.
+        // A preset request during a native grab must not fight the compositor.
+        if let Some(drag) = &mut self.drag {
+            drag.cancelled = true;
+        }
+        self.placement = None;
+        self.unsaved = false;
+        self.retry_at = None;
+        self.hide_pending = false;
+    }
+
+    fn pending(&self, now: Instant) -> Option<(u64, Placement)> {
+        if self.drag.is_some() || !self.unsaved || self.retry_at.is_some_and(|at| now < at) {
+            return None;
+        }
+        self.placement
+            .clone()
+            .map(|placement| (self.generation, placement))
+    }
+
+    fn saved(&mut self, generation: u64, success: bool, now: Instant) {
+        if self.generation == generation {
+            self.unsaved = !success;
+            self.retry_at = (!success).then(|| now + Duration::from_secs(1));
+        }
+    }
 }
 
 // Visibility decisions run in FIFO order on the event loop. Never hold a worker-side
@@ -266,40 +320,40 @@ fn clear_background(app: &AppHandle) {
     }
 }
 
-/// Mutter draws a drop shadow around the overlay's whole window rectangle, which reads as a
-/// bordered box floating around the pill even though the window itself is transparent. A
-/// notification-type window is excluded from the shadow policy, so the pill stands alone.
-#[cfg(target_os = "linux")]
-fn suppress_window_shadow(app: &AppHandle) {
-    use gtk::prelude::*;
-    let Some(window) = app.get_webview_window("overlay") else {
-        return;
-    };
-    match window.gtk_window() {
-        Ok(gtk_window) => gtk_window.set_type_hint(gtk::gdk::WindowTypeHint::Notification),
-        Err(error) => tracing::debug!(%error, "overlay type hint skipped"),
-    }
-}
-
 /// Size and position the overlay without changing visibility or focus.
 pub fn position(app: &AppHandle, prefs: &Overlay) -> Result<()> {
+    let (prefs, size) = {
+        let rt = runtime();
+        let Some(prefs) = rt.prefs(prefs) else {
+            return Ok(());
+        };
+        (prefs, rt.size)
+    };
     let window = app
         .get_webview_window("overlay")
         .context("Overlay window missing")?;
     let list = displays(&window)?;
-    let Some(display) = list.get(choose_display(&list, &prefs.placement)) else {
+    let Some(display) = list.get(display_index(&list, &prefs)) else {
         return Ok(());
     };
-    let (lw, lh) = runtime()
-        .size
-        .unwrap_or((DEFAULT_SIZE.0 * prefs.scale, DEFAULT_SIZE.1 * prefs.scale));
+    let (lw, lh) = size.unwrap_or((DEFAULT_SIZE.0 * prefs.scale, DEFAULT_SIZE.1 * prefs.scale));
     let (w, h) = clamp_size(
         &display.work,
         (lw * display.scale).round() as u32,
         (lh * display.scale).round() as u32,
     );
-    let (x, y) = place(prefs, display, w, h);
-    runtime().programmatic_until = Some(Instant::now() + PROGRAMMATIC_GRACE);
+    let (x, y) = place(&prefs, display, w, h);
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        let gtk = window.gtk_window()?;
+        let scale = f64::from(gtk.scale_factor());
+        resize_gtk(
+            &gtk,
+            (f64::from(w) / scale).round() as i32,
+            (f64::from(h) / scale).round() as i32,
+        );
+    }
     window
         .set_size(PhysicalSize::new(w, h))
         .context("Size overlay")?;
@@ -307,6 +361,16 @@ pub fn position(app: &AppHandle, prefs: &Overlay) -> Result<()> {
         .set_position(PhysicalPosition::new(x, y))
         .context("Position overlay")?;
     Ok(())
+}
+
+/// GTK ignores resize() on a non-resizable window if its natural/default
+/// requisition still asks for the old size. Update that requisition as well;
+/// this preserves non-resizability without changing the window's semantic type.
+#[cfg(target_os = "linux")]
+fn resize_gtk(window: &gtk::ApplicationWindow, width: i32, height: i32) {
+    use gtk::prelude::*;
+    window.set_default_size(width, height);
+    window.set_size_request(width, height);
 }
 
 fn show_interactive(window: &tauri::WebviewWindow) -> Result<()> {
@@ -331,8 +395,7 @@ pub fn apply(app: &AppHandle, prefs: &Overlay) -> Result<()> {
 }
 fn apply_main(app: &AppHandle, prefs: &Overlay) -> Result<()> {
     clear_background(app);
-    #[cfg(target_os = "linux")]
-    suppress_window_shadow(app);
+    // Keep the normal managed window type: Mutter forbids moving notification windows.
     position(app, prefs)?;
     let window = app
         .get_webview_window("overlay")
@@ -343,7 +406,7 @@ fn apply_main(app: &AppHandle, prefs: &Overlay) -> Result<()> {
         .and_then(|s| s.status().ok())
         .is_none_or(|s| s.state == "idle");
     let held = state.as_ref().is_some_and(|s| s.overlay_held());
-    if !prefs.enabled || (prefs.idle_hide && idle && !held) {
+    if !prefs.enabled || (prefs.idle_hide && idle && !held && !dragging()) {
         window.hide().context("Hide idle overlay")?;
         return Ok(());
     }
@@ -389,6 +452,13 @@ pub fn hide(app: &AppHandle) -> Result<()> {
     })
 }
 fn hide_main(app: &AppHandle) -> Result<()> {
+    {
+        let mut rt = runtime();
+        if rt.drag.is_some() {
+            rt.hide_pending = true;
+            return Ok(());
+        }
+    }
     if app
         .try_state::<crate::app::AppState>()
         .is_some_and(|state| {
@@ -420,9 +490,32 @@ fn apply_native_cursor(window: &gtk::ApplicationWindow, busy: bool) -> Result<()
     Ok(())
 }
 
+// A compositor's move grab can consume synthetic keyboard events. Let the user
+// release it before injection, while busy blocks another gesture. Called only on
+// the controller worker; the UI and drag watchdog continue independently.
+fn wait_for_drag_release(mut moving: impl FnMut() -> bool, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while moving() {
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "Overlay move did not release before text delivery"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
+}
+
 /// Click-through while text is being injected so a stray click cannot land on the overlay.
 pub fn set_busy(app: &AppHandle, busy: bool) -> Result<()> {
     runtime().busy = busy;
+    if busy {
+        if let Err(error) =
+            wait_for_drag_release(dragging, movement::MAX_DRAG + Duration::from_secs(2))
+        {
+            runtime().busy = false;
+            return Err(error);
+        }
+    }
     let handle = app.clone();
     let action = move || {
         if let Some(window) = handle.get_webview_window("overlay") {
@@ -481,6 +574,27 @@ mod visibility_tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn native_move_release_precedes_injection() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let held = Arc::new(AtomicBool::new(true));
+        let (send, receive) = mpsc::channel();
+        let moving = held.clone();
+        let worker = std::thread::spawn(move || {
+            super::wait_for_drag_release(|| moving.load(Ordering::Acquire), Duration::from_secs(2))
+                .unwrap();
+            send.send(()).unwrap();
+        });
+        assert!(receive.recv_timeout(Duration::from_millis(100)).is_err());
+        held.store(false, Ordering::Release);
+        receive.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        assert!(super::wait_for_drag_release(|| true, Duration::ZERO).is_err());
+    }
+
+    #[test]
     fn stalled_main_executor_blocks_injection_until_click_through_ack() {
         let (queue, main) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
         let (ready, injection) = mpsc::channel::<()>();
@@ -521,8 +635,21 @@ mod visibility_tests {
             panic!("GTK application registration unavailable: {error}");
         }
         let window = gtk::ApplicationWindow::new(&app);
-        window.set_default_size(200, 100);
+        window.set_default_size(608, 160);
+        window.set_resizable(false);
         window.show_all();
+        // Regression: resize() alone leaves a non-resizable GTK window at 608x200.
+        for (w, h) in [(144, 66), (200, 100)] {
+            super::resize_gtk(&window, w, h);
+            window.resize(w, h);
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while window.size() != (w, h) && Instant::now() < deadline {
+                while gtk::glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(window.size(), (w, h));
+            assert!(!window.is_resizable());
+        }
         let gdk = window.window().unwrap();
         let xid = gdk.downcast::<gdkx11::X11Window>().unwrap().xid() as u32;
         let (conn, _) = x11rb::connect(None).unwrap();
@@ -652,43 +779,112 @@ pub fn accept_size(
     }
     Ok(Some(next))
 }
-/// Window moved event (user drag or our own repositioning).
-pub fn moved() {
-    let mut rt = runtime();
-    if rt
-        .programmatic_until
-        .is_some_and(|until| Instant::now() < until)
-    {
-        return;
-    }
-    rt.moved_at = Some(Instant::now());
+/// Only explicit handle gestures own placement. Late programmatic events outside a
+/// gesture cannot be mistaken for user movement, regardless of dispatch latency.
+pub fn moved(position: PhysicalPosition<i32>) {
+    runtime().moved((position.x, position.y), Instant::now());
 }
-/// Once a user move has settled for 300 ms, return the placement to persist.
-pub fn settled_placement(app: &AppHandle) -> Result<Option<Placement>> {
-    {
-        let mut rt = runtime();
-        match rt.moved_at {
-            Some(at) if at.elapsed() >= MOVE_DEBOUNCE => rt.moved_at = None,
-            _ => return Ok(None),
+
+pub fn dragging() -> bool {
+    runtime().drag.is_some()
+}
+
+/// Explicit preset/reset/disable wins over a pending or active gesture.
+pub fn reset_placement() {
+    runtime().reset();
+}
+
+pub fn pending_placement() -> Option<(u64, Placement)> {
+    runtime().pending(Instant::now())
+}
+
+pub fn placement_saved(generation: u64, success: bool) {
+    runtime().saved(generation, success, Instant::now());
+}
+
+#[cfg(test)]
+mod placement_runtime_tests {
+    use super::*;
+
+    fn saved_position() -> Placement {
+        Placement {
+            monitor_width: 1920,
+            monitor_height: 1080,
+            x_fraction: 0.2,
+            y_fraction: 0.4,
+            ..Placement::default()
         }
     }
-    let window = app
-        .get_webview_window("overlay")
-        .context("Overlay window missing")?;
-    let pos = window.outer_position().context("Overlay position")?;
-    let size = window.outer_size().context("Overlay size")?;
-    let rect = Rect {
-        x: pos.x,
-        y: pos.y,
-        w: size.width,
-        h: size.height,
-    };
-    let list = displays(&window)?;
-    Ok(display_for(&list, &rect).map(|i| placement_for(&list[i], &rect)))
-}
-/// Suppress persistence for the moves our own placement-only config save will trigger.
-pub fn suppress_moves() {
-    let mut rt = runtime();
-    rt.programmatic_until = Some(Instant::now() + PROGRAMMATIC_GRACE);
-    rt.moved_at = None;
+
+    #[test]
+    fn resize_defers_during_drag_and_uses_unsaved_position_after_release() {
+        let now = Instant::now();
+        let mut rt = Runtime {
+            drag: Some(Drag::new((100, 100), now)),
+            ..Runtime::default()
+        };
+        rt.size = Some((600.0, 240.0)); // newest measurement is retained
+        assert!(rt.prefs(&Overlay::default()).is_none());
+        rt.drag = None;
+        rt.placement = Some(saved_position());
+        rt.unsaved = true;
+        let prefs = rt.prefs(&Overlay::default()).unwrap();
+        assert_eq!(prefs.position, "custom");
+        assert_eq!(prefs.placement.x_fraction, 0.2);
+        assert_eq!(rt.size, Some((600.0, 240.0)));
+    }
+
+    #[test]
+    fn programmatic_events_do_not_create_or_overwrite_pending_user_placement() {
+        let mut rt = Runtime::default();
+        rt.moved((100, 200), Instant::now());
+        assert!(rt.pending(Instant::now()).is_none());
+        rt.placement = Some(saved_position());
+        rt.unsaved = true;
+        rt.moved((800, 900), Instant::now()); // delayed old set_position acknowledgement
+        assert_eq!(rt.pending(Instant::now()).unwrap().1.x_fraction, 0.2);
+    }
+
+    #[test]
+    fn failed_save_retries_and_stale_ack_cannot_clear_newer_placement() {
+        let now = Instant::now();
+        let mut rt = Runtime {
+            generation: 2,
+            placement: Some(saved_position()),
+            unsaved: true,
+            ..Runtime::default()
+        };
+        rt.saved(2, false, now);
+        assert!(rt.pending(now).is_none());
+        assert!(rt.pending(now + Duration::from_secs(1)).is_some());
+        rt.saved(1, true, now);
+        assert!(rt.unsaved);
+        rt.saved(2, true, now);
+        assert!(rt.pending(now).is_none());
+        assert_eq!(
+            rt.prefs(&Overlay::default()).unwrap().placement.x_fraction,
+            0.2
+        );
+    }
+
+    #[test]
+    fn reset_cancels_active_drag_and_pending_save() {
+        let mut rt = Runtime {
+            generation: 2,
+            placement: Some(saved_position()),
+            unsaved: true,
+            drag: Some(Drag::new((100, 100), Instant::now())),
+            ..Runtime::default()
+        };
+        rt.reset();
+        assert_eq!(rt.generation, 3);
+        assert!(rt.pending(Instant::now()).is_none());
+        assert!(rt.drag.as_ref().unwrap().cancelled);
+        assert!(rt.prefs(&Overlay::default()).is_none());
+        rt.drag = None; // release of the cancelled native grab
+        assert_eq!(
+            rt.prefs(&Overlay::default()).unwrap().position,
+            "bottom-center"
+        );
+    }
 }

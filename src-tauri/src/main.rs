@@ -10,6 +10,8 @@ mod config;
 mod controller;
 mod engine;
 mod enhance;
+mod focus_guard;
+mod held;
 mod history;
 mod hotkey;
 mod inject;
@@ -175,8 +177,8 @@ fn main() {
         .setup(|app| setup(app).map_err(Into::into))
         .on_window_event(|window, event| {
             if window.label() == "overlay" {
-                if let tauri::WindowEvent::Moved(_) = event {
-                    overlay::moved();
+                if let tauri::WindowEvent::Moved(position) = event {
+                    overlay::moved(*position);
                 }
             }
             if window.label() == "settings" {
@@ -223,9 +225,13 @@ fn main() {
             ipc::rewrite_last_dictation,
             ipc::accept_enhancement,
             ipc::discard_enhancement,
+            ipc::insert_held,
+            ipc::copy_held,
+            ipc::discard_held,
             ipc::get_overlay_snapshot,
             ipc::reset_overlay_position,
-            ipc::set_overlay_size
+            ipc::set_overlay_size,
+            ipc::start_overlay_drag
         ])
         .build(tauri::generate_context!());
     match application {

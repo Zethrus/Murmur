@@ -146,3 +146,29 @@ fn size_reports_are_validated_and_revisioned() {
         Some((300.0, 300.0))
     );
 }
+
+#[test]
+fn presets_ignore_a_previous_custom_monitor() {
+    let displays = vec![
+        display("PRIMARY", 0, 0, 1920, 1080, 1.0),
+        display("LEFT", -2560, 0, 2560, 1440, 1.5),
+    ];
+    let mut prefs = Overlay {
+        position: "custom".into(),
+        placement: placement_for(
+            &displays[1],
+            &Rect {
+                x: -2000,
+                y: 200,
+                w: 300,
+                h: 100,
+            },
+        ),
+        ..Overlay::default()
+    };
+    assert_eq!(crate::overlay::display_index(&displays, &prefs), 1);
+    for preset in ["top-center", "bottom-center"] {
+        prefs.position = preset.into();
+        assert_eq!(crate::overlay::display_index(&displays, &prefs), 0);
+    }
+}

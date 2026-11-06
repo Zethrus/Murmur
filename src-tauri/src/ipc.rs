@@ -109,15 +109,32 @@ pub async fn test_engine(app: AppHandle) -> Reply<Value> {
     blocking(move || {
         let state = app.state::<AppState>();
         let config = state.config()?;
-        // A repeatable three-second silent inference probe; VAD may correctly return empty text.
-        let result = state.engine.request(
-            "transcribe",
-            controller::params(&vec![0.0; 48_000], &config),
-        )?;
+        // Silence with VAD disabled still iterates the model's inference generator.
+        let mut result = state
+            .engine
+            .request("transcribe", engine_probe_params(&config))?;
         state.refresh_engine()?;
+        result["text"] = json!("");
         Ok(result)
     })
     .await
+}
+
+fn engine_probe_params(config: &crate::config::Config) -> Value {
+    let mut params = controller::params(&vec![0.0; 48_000], config);
+    params["vad"] = json!(false);
+    params
+}
+
+#[cfg(test)]
+mod engine_probe_tests {
+    #[test]
+    fn probe_forces_inference_without_changing_saved_vad() {
+        let config = crate::config::Config::default();
+        assert!(config.engine.vad_filter);
+        assert_eq!(super::engine_probe_params(&config)["vad"], false);
+        assert!(config.engine.vad_filter);
+    }
 }
 #[tauri::command]
 pub async fn list_devices() -> Reply<Vec<audio::DeviceInfo>> {
@@ -311,6 +328,23 @@ pub fn discard_enhancement(state: State<'_, AppState>, suggestion_id: String) ->
     state.enhance.discard(&state, id);
     Ok(())
 }
+fn held_action(state: &AppState, held_id: &str, action: fn(Option<u64>) -> Action) -> Reply<()> {
+    let id = crate::enhance::runtime::parse_id(held_id);
+    state.send(action(id)).map_err(error)
+}
+/// Type the held transcript into the window focused now.
+#[tauri::command]
+pub fn insert_held(state: State<'_, AppState>, held_id: String) -> Reply<()> {
+    held_action(&state, &held_id, Action::InsertHeld)
+}
+#[tauri::command]
+pub fn copy_held(state: State<'_, AppState>, held_id: String) -> Reply<()> {
+    held_action(&state, &held_id, Action::CopyHeld)
+}
+#[tauri::command]
+pub fn discard_held(state: State<'_, AppState>, held_id: String) -> Reply<()> {
+    held_action(&state, &held_id, Action::DiscardHeld)
+}
 #[tauri::command]
 pub fn get_overlay_snapshot(state: State<'_, AppState>) -> Reply<Value> {
     Ok(state.enhance.snapshot(&state))
@@ -318,7 +352,7 @@ pub fn get_overlay_snapshot(state: State<'_, AppState>) -> Reply<Value> {
 #[tauri::command]
 pub async fn reset_overlay_position(app: AppHandle) -> Reply<()> {
     blocking(move || {
-        overlay::suppress_moves();
+        overlay::reset_placement();
         app.state::<AppState>().update(json!({"overlay":{
             "position":"bottom-center",
             "placement":{"monitor_name":"","monitor_x":0,"monitor_y":0,"monitor_width":0,
@@ -348,6 +382,16 @@ pub fn set_overlay_size(
         layout_revision,
         &layout_instance,
     )
+    .inspect_err(|error| tracing::warn!(%error, "overlay sizing failed"))
     .map_err(error)?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn start_overlay_drag(app: AppHandle, window: WebviewWindow) -> Reply<()> {
+    require_window(&window, "overlay")?;
+    overlay::drag(app)
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "overlay drag failed"))
+        .map_err(error)
 }

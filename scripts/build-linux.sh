@@ -12,7 +12,7 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 # Baseline Rust + AVX2 llama.cpp, shared with CI so release artifacts cannot drift.
 . "$ROOT/scripts/cpu-baseline.sh"
 # bindgen needs libclang (checked below); the C/C++ compiler is g++, not the clang driver.
-for tool in cmake g++ xdotool xprop mksquashfs xvfb-run xauth dbus-run-session; do
+for tool in cmake g++ xdotool xprop mksquashfs readelf xvfb-run xauth dbus-run-session; do
   command -v "$tool" >/dev/null || { printf 'Missing Enhance build prerequisite: %s\n' "$tool" >&2; exit 1; }
 done
 if ! compgen -G '/usr/lib/llvm-*/lib/libclang.so*' >/dev/null &&
@@ -21,18 +21,15 @@ if ! compgen -G '/usr/lib/llvm-*/lib/libclang.so*' >/dev/null &&
   printf '%s\n' 'Missing libclang shared library (install libclang-dev or set LIBCLANG_PATH).' >&2
   exit 1
 fi
-if [[ ! -x engine/.venv/bin/python ]]; then
-  /usr/bin/python3 -m venv --system-site-packages engine/.venv
-fi
-engine/.venv/bin/python -m pip install -r engine/requirements-cuda.txt pyinstaller
+scripts/prepare-linux-release.sh "${MURMUR_BUILD_PYTHON:-python3}"
 npm ci
 npm run build
-scripts/engine-sidecar.sh --build
+scripts/engine-sidecar.sh --build "$ROOT/engine/.release-venv/bin/python"
 # Use the project-pinned Tauri CLI; no global cargo-tauri install required.
 npx tauri build --bundles deb
 python3 scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release" --artifact "$CARGO_TARGET_DIR/release/murmur"
 npx tauri bundle --bundles appimage
-python3 scripts/bundle-linux-runtime.py \
+engine/.release-venv/bin/python scripts/bundle-linux-runtime.py \
   --appimage "$CARGO_TARGET_DIR"/release/bundle/appimage/*.AppImage \
   --deb "$CARGO_TARGET_DIR"/release/bundle/deb/*.deb \
   --output "$ROOT/.cache/artifacts/linux"

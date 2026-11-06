@@ -93,7 +93,11 @@ impl Process {
                     }
                     // Engine stderr is our only view into Python failures; keep it short and local.
                     let line: String = line.chars().take(400).collect();
-                    tracing::debug!(target: "murmur::engine", "stderr: {line}");
+                    if line.contains("Automatic engine fallback to CPU:") {
+                        tracing::warn!(target: "murmur::engine", "{line}");
+                    } else {
+                        tracing::debug!(target: "murmur::engine", "stderr: {line}");
+                    }
                 }
             })
             .context("Start sidecar diagnostic reader");
@@ -210,11 +214,80 @@ fn sidecar_command() -> Result<Command> {
     } else {
         let executable = std::env::current_exe().context("Locate Murmur executable")?;
         let parent = executable.parent().context("Executable has no parent")?;
-        Ok(Command::new(parent.join(if cfg!(windows) {
+        let mut command = Command::new(parent.join(if cfg!(windows) {
             "murmur-engine.exe"
         } else {
             "murmur-engine"
-        })))
+        }));
+        #[cfg(target_os = "linux")]
+        configure_linux_cuda(&mut command, parent)?;
+        Ok(command)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_cuda(command: &mut Command, executable_dir: &Path) -> Result<()> {
+    use std::{collections::HashSet, env, ffi::OsString};
+    let cuda = executable_dir
+        .parent()
+        .context("Executable has no runtime parent")?
+        .join("lib/murmur/cuda");
+    if !cuda.is_dir() {
+        return Ok(());
+    }
+    let mut seen = HashSet::<OsString>::new();
+    let inherited = env::var_os("LD_LIBRARY_PATH")
+        .map(|value| env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let paths = std::iter::once(cuda)
+        .chain(inherited)
+        .filter(|path| !path.as_os_str().is_empty() && seen.insert(path.as_os_str().to_owned()));
+    command.env(
+        "LD_LIBRARY_PATH",
+        env::join_paths(paths).context("Join engine library paths")?,
+    );
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod cuda_launch_tests {
+    use super::configure_linux_cuda;
+    use std::{fs, process::Command};
+
+    fn root() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "murmur cuda launch {} {:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    #[test]
+    fn release_command_scopes_cuda_path_to_engine() {
+        let root = root();
+        let bin = root.join("usr/bin");
+        let cuda = root.join("usr/lib/murmur/cuda");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&cuda).unwrap();
+        let mut command = Command::new(bin.join("murmur-engine"));
+        configure_linux_cuda(&mut command, &bin).unwrap();
+        let value = command
+            .get_envs()
+            .find(|(name, _)| *name == "LD_LIBRARY_PATH")
+            .and_then(|(_, value)| value)
+            .unwrap();
+        assert_eq!(std::env::split_paths(value).next().unwrap(), cuda);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn absent_cuda_keeps_cpu_launch() {
+        let root = root();
+        let mut command = Command::new("murmur-engine");
+        configure_linux_cuda(&mut command, &root).unwrap();
+        assert!(command
+            .get_envs()
+            .all(|(name, _)| name != "LD_LIBRARY_PATH"));
     }
 }
 pub struct Engine {

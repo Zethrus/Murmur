@@ -1,5 +1,7 @@
-# Optional GPU runtime for faster-whisper. CPU inference works without this file.
-# Release artefacts never bundle CUDA: cuDNN + cuBLAS add ~1.4 GB to a PyInstaller onefile.
+# Linux desktop release pins. The standalone engine remains CPU-capable without them.
 -r requirements.txt
-nvidia-cublas-cu12>=12.4 ; sys_platform == "linux" or sys_platform == "win32"
-nvidia-cudnn-cu12>=9.1 ; sys_platform == "linux" or sys_platform == "win32"
+nvidia-cublas-cu12==12.9.3.13 ; sys_platform == "linux"
+nvidia-cudnn-cu12==9.27.0.42 ; sys_platform == "linux"
+nvidia-cuda-nvrtc-cu12==12.9.86 ; sys_platform == "linux"
+nvidia-cublas-cu12>=12.4 ; sys_platform == "win32"
+nvidia-cudnn-cu12>=9.1 ; sys_platform == "win32"

@@ -56,6 +56,7 @@ jobs:
              command -v cmake >/dev/null && command -v g++ >/dev/null && \
              command -v xdotool >/dev/null && command -v xprop >/dev/null && \
              command -v mksquashfs >/dev/null && \
+             command -v readelf >/dev/null && \
              command -v xvfb-run >/dev/null && command -v xauth >/dev/null && \
              command -v dbus-run-session >/dev/null && \
              test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf && \
@@ -94,9 +95,8 @@ jobs:
           workspaces: src-tauri -> target
       - name: Build frozen engine
         run: |
-          python -m venv --system-site-packages engine/.venv
-          engine/.venv/bin/python -m pip install -r engine/requirements.txt pyinstaller
-          scripts/engine-sidecar.sh --build
+          scripts/prepare-linux-release.sh python
+          scripts/engine-sidecar.sh --build "$PWD/engine/.release-venv/bin/python"
           test -s src-tauri/binaries/murmur-engine-x86_64-unknown-linux-gnu
       - run: npm ci
       - run: npm run build
@@ -119,7 +119,7 @@ jobs:
           headless cargo test --manifest-path src-tauri/Cargo.toml
           headless cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
       - name: Test speech sidecar
-        run: engine/.venv/bin/python -m pip install pytest && engine/.venv/bin/python -m pytest engine/tests -q
+        run: engine/.release-venv/bin/python -m pip install pytest && engine/.release-venv/bin/python -m pytest engine/tests -q
       - name: Build app, deb and AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
@@ -137,12 +137,25 @@ jobs:
           release="$CARGO_TARGET_DIR/release"
           test -s "$release/murmur"
           mkdir -p .cache/artifacts/linux
-          python3 scripts/bundle-linux-runtime.py \
+          engine/.release-venv/bin/python scripts/bundle-linux-runtime.py \
             --appimage "$release"/bundle/appimage/*.AppImage \
             --deb "$release"/bundle/deb/*.deb \
             --output .cache/artifacts/linux
           python3 scripts/test-linux-bundle.py .cache/artifacts/linux
           python3 scripts/test-linux-startup.py .cache/artifacts/linux/*.AppImage
+      - name: GPU hardware validation skipped for PR or manual build
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: echo 'GPU inference skipped; trusted hardware validation is required before release.'
+      - name: Validate final Linux assets on trusted GPU hardware
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          MURMUR_GPU_TEST_MODELS: ${{ vars.MURMUR_GPU_TEST_MODELS }}
+        run: |
+          set -euo pipefail
+          test -n "$MURMUR_GPU_TEST_MODELS" || { echo 'Set MURMUR_GPU_TEST_MODELS to an offline staged model directory on the trusted runner.' >&2; exit 1; }
+          command -v nvidia-smi >/dev/null || { echo 'Trusted NVIDIA GPU runner required for release.' >&2; exit 1; }
+          python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux \
+            --models-dir "$MURMUR_GPU_TEST_MODELS"
       - name: Attach Linux assets to the draft (tags only)
         if: startsWith(github.ref, 'refs/tags/')
         env:
@@ -151,7 +164,8 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" \
             .cache/artifacts/linux/*.AppImage \
             .cache/artifacts/linux/*.deb \
-            .cache/artifacts/linux/murmur-linux-x86_64.tar.gz --clobber
+            .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
+            .cache/artifacts/linux/GPU-VALIDATION.json --clobber
       - name: Upload build artifacts (best effort)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         continue-on-error: true

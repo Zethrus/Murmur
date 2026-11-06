@@ -65,7 +65,10 @@ section!(Audio {
 });
 section!(Injection {
     method: String = "auto".into(), clipboard_only: bool = false, trailing_space: bool = true,
-    capitalize: bool = true, remove_fillers: bool = false, exclude_apps: Vec<String> = Vec::new(), prefer_paste: bool = true
+    capitalize: bool = true, remove_fillers: bool = false, exclude_apps: Vec<String> = Vec::new(), prefer_paste: bool = true,
+    // What to do when the focused window at delivery differs from the one at dictation start.
+    focus_change: String = "hold".into(),
+    insert_held_hotkey: String = "".into()
 });
 section!(Postproc {
     replacements: BTreeMap<String, String> = BTreeMap::from([("mur mur".into(), "Murmur".into())]),
@@ -219,6 +222,10 @@ impl Config {
             (
                 self.injection.method.as_str(),
                 &["auto", "type", "clipboard"][..],
+            ),
+            (
+                self.injection.focus_change.as_str(),
+                crate::focus_guard::FocusMode::CHOICES,
             ),
             (self.postproc.style.as_str(), &["prose", "code", "auto"][..]),
             (
@@ -394,6 +401,20 @@ mod tests {
         assert!(Config::default()
             .patched(serde_json::json!({"audio":{"gain":"bad"}}))
             .is_err());
+    }
+    #[test]
+    fn focus_change_defaults_to_hold_and_rejects_unknown_modes() -> Result<()> {
+        let c: Config = toml::from_str("[injection]\nmethod='auto'")?;
+        c.validate()?;
+        assert_eq!(c.injection.focus_change, "hold");
+        assert_eq!(c.injection.insert_held_hotkey, "");
+        for mode in ["hold", "refocus", "copy", "insert"] {
+            Config::default().patched(serde_json::json!({"injection":{"focus_change":mode}}))?;
+        }
+        assert!(Config::default()
+            .patched(serde_json::json!({"injection":{"focus_change":"guess"}}))
+            .is_err());
+        Ok(())
     }
     #[test]
     fn enhance_defaults_and_migration() -> Result<()> {

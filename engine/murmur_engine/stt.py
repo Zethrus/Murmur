@@ -19,6 +19,7 @@ class Speech:
     device: str = "unloaded"
     compute: str = "unloaded"
     cpu_fallback: bool = False
+    fallback_reason: str | None = None
     _session: Any = field(default=None, repr=False)
     _key: tuple[str, str, str] | None = None
     _attempted_device: str = "unloaded"
@@ -35,6 +36,8 @@ class Speech:
             self.models.definition(model)
         if (model, device, compute) != (self.model, self.requested_device, self.requested_compute):
             self.unload()
+            self.cpu_fallback = False
+            self.fallback_reason = None
         self.model, self.requested_device, self.requested_compute = model, device, compute
 
     def unload(self) -> None:
@@ -46,6 +49,7 @@ class Speech:
         return {"model": self.model, "device": self.device, "compute": self.compute,
                 "model_available": bool(self.model) and self.models.installed(self.model),
                 "loaded": self._session is not None, "cpu_fallback": self.cpu_fallback,
+                "fallback_reason": self.fallback_reason if self.requested_device == "auto" else None,
                 "hardware": detect().to_dict()}
 
     def _load(self) -> None:
@@ -101,12 +105,23 @@ class Speech:
         start = time.perf_counter()
         try:
             text, language = self._infer(pcm, params)
-        except (RuntimeError, OSError):
+        except (RuntimeError, OSError) as exc:
             if self.requested_device != "auto" or self.cpu_fallback or self._attempted_device != "cuda":
                 raise
-            logging.warning("Automatic engine fallback to CPU")
+            self.fallback_reason = _gpu_failure_reason(exc)
+            logging.warning("Automatic engine fallback to CPU: %s", self.fallback_reason)
             self.cpu_fallback = True
             self.unload()
             text, language = self._infer(pcm, params)
         return {"text": text, "language": language, "duration_ms": len(pcm) / 16,
                 "infer_ms": round((time.perf_counter() - start) * 1000, 2)}
+
+
+def _gpu_failure_reason(error: Exception) -> str:
+    """Classify failures without leaking paths, prompts, or model content into status."""
+    message = str(error).lower()
+    if any(name in message for name in ("libcublas", "libcudnn", "libnvrtc")):
+        return "A required CUDA library could not be loaded. Reinstall the desktop package."
+    if any(name in message for name in ("driver", "libcuda", "insufficient cuda")):
+        return "The NVIDIA driver could not run this CUDA runtime. Check driver compatibility."
+    return "GPU initialization or inference failed. Check the NVIDIA driver and desktop package."

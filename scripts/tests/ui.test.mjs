@@ -53,6 +53,13 @@ test("sidecar errors refresh the footer without a polling loop",async()=>{
   const h=await settings();h.status.sidecar_alive=false;h.emit("error",{message:"Sidecar stopped"});h.timers.tick(250);await settle();
   assert.match(h.root.querySelector(".sidebar-footer").textContent,/Engine offline/);h.unload();
 });
+test("GPU fallback warning refreshes and clears in Engine settings",async()=>{
+  const h=await settings();await button(h.root,"Engine").dispatch("click");await settle();
+  h.status.fallback_reason="A required CUDA library could not be loaded.";h.emit("state",{state:"idle"});h.timers.tick(250);await settle();
+  assert.match(h.root.textContent,/Using CPU because GPU acceleration is unavailable/);
+  h.status.fallback_reason=null;h.emit("state",{state:"idle"});h.timers.tick(250);await settle();
+  assert.doesNotMatch(h.root.textContent,/Using CPU because GPU acceleration is unavailable/);h.unload();
+});
 test("overlay renders all states, five bars, previews and timed hiding",async()=>{
   const h=await harness();await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);const pill=h.root.querySelector(".pill");
   assert.equal(h.root.dataset.state,"idle");h.timers.tick(1500);assert.equal(pill.hidden,true);
@@ -217,15 +224,15 @@ test("new dictation replaces the suggestion; expiry clears text from the overlay
   h.timers.tick(119000);assert.equal(h.root.dataset.enhance,"ready");h.timers.tick(2000);assert.equal(h.root.dataset.enhance,"none");assert.equal(h.root.querySelector(".suggestion-text").textContent,"");h.unload();
 });
 test("drag starts only from the handle with the primary button and never while delivering",async()=>{
-  const h=await overlay(),handle=h.root.querySelector(".drag-handle");await handle.dispatch("pointerdown",{button:0});assert.equal(h.drags.length,1);
-  await handle.dispatch("pointerdown",{button:2});assert.equal(h.drags.length,1);
-  h.emit("overlay-update",snap(1,READY));await h.root.querySelector(".suggestion-text").dispatch("pointerdown",{button:0});assert.equal(h.drags.length,1);
-  h.emit("overlay-update",snap(2,READY,{delivery_busy:true}));await handle.dispatch("pointerdown",{button:0});assert.equal(h.drags.length,1);
+  const h=await overlay(),handle=h.root.querySelector(".drag-handle");await handle.dispatch("mousedown",{button:0});assert.equal(h.drags.length,1);
+  await handle.dispatch("mousedown",{button:2});assert.equal(h.drags.length,1);
+  h.emit("overlay-update",snap(1,READY));await h.root.querySelector(".suggestion-text").dispatch("mousedown",{button:0});assert.equal(h.drags.length,1);
+  h.emit("overlay-update",snap(2,READY,{delivery_busy:true}));await handle.dispatch("mousedown",{button:0});assert.equal(h.drags.length,1);
   assert.equal(h.root.dataset.busy,"true");assert.equal(h.root.querySelector(".accept-button").disabled,true);h.unload();
 });
 test("denied native drag reports a visible error",async()=>{
   const h=await overlay({startOverlayDrag:async()=>{throw new Error("permission denied");}});
-  await h.root.querySelector(".drag-handle").dispatch("pointerdown",{button:0});await settle();
+  await h.root.querySelector(".drag-handle").dispatch("mousedown",{button:0});await settle();
   assert.equal(h.root.dataset.dragError,"true");assert.match(h.root.textContent,/Could not move overlay: Error: permission denied/);h.unload();
 });
 test("scale changes remeasure and page reload resets layout identity",async()=>{
@@ -247,4 +254,76 @@ test("measured overlay size is reported once per change with increasing layout r
   assert.deepEqual(sizes.map(({layoutInstance,...rest})=>rest),[{width:240,height:88,layoutRevision:1},{width:600,height:221,layoutRevision:2}]);
   assert.ok(sizes[0].layoutInstance);assert.equal(sizes[0].layoutInstance,sizes[1].layoutInstance);
   h.unload();assert.equal(h.observers.live.size,0);assert.equal([...h.events.values()].reduce((n,s)=>n+s.size,0),0);
+});
+
+test("native drag owns the gesture until completion and defers idle hiding",async()=>{
+  let release;const h=await overlay({startOverlayDrag:()=>new Promise(resolve=>{release=resolve;})});
+  const handle=h.root.querySelector(".drag-handle"),pill=h.root.querySelector(".pill");
+  await handle.dispatch("mousedown",{button:0});
+  await handle.dispatch("mousedown",{button:0});
+  assert.equal(h.drags.length,1,"one native move per gesture");
+  h.timers.tick(2000);assert.equal(pill.hidden,false,"idle timer must not hide a held drag");
+  h.emit("state",{state:"done"});h.timers.tick(2000);assert.equal(pill.hidden,false);
+  release();await settle();h.timers.tick(2000);assert.equal(pill.hidden,true,"normal hiding resumes");h.unload();
+});
+
+test("a subsequent successful drag clears the previous error",async()=>{
+  let fail=true;const h=await overlay({startOverlayDrag:async()=>{if(fail)throw new Error("move unavailable");}});
+  const handle=h.root.querySelector(".drag-handle");await handle.dispatch("mousedown",{button:0});await settle();
+  assert.equal(h.root.dataset.dragError,"true");fail=false;
+  await handle.dispatch("mousedown",{button:0});await settle();
+  assert.notEqual(h.root.dataset.dragError,"true");assert.doesNotMatch(h.root.textContent,/Could not move overlay/);h.unload();
+});
+
+// ---- Held transcript (focus changed during dictation) ----
+const NO_ENH = enh("none",{dictation_id:null,acceptance_mode:"unavailable"});
+const HELD = {kind:"held",id:"3",text:"Buy milk.",origin_app:"obsidian",message:null,expires_at:Date.now()+120000};
+test("held transcript and native drag independently prevent idle hiding",async()=>{
+  let release;const h=await overlay({startOverlayDrag:()=>new Promise(resolve=>{release=resolve;})});
+  const handle=h.root.querySelector(".drag-handle"),pill=h.root.querySelector(".pill");
+  h.emit("overlay-update",snap(1,NO_ENH,{held:HELD}));
+  await handle.dispatch("mousedown",{button:0});
+  h.emit("overlay-update",snap(2,NO_ENH,{held:null}));
+  h.timers.tick(5000);assert.equal(pill.hidden,false,"closing held text must not hide a drag");
+  h.emit("overlay-update",snap(3,NO_ENH,{held:HELD}));
+  release();await settle();h.timers.tick(5000);
+  assert.equal(pill.hidden,false,"releasing a drag must not hide held text");
+  assert.equal(h.root.querySelector(".held").hidden,false);
+  h.emit("overlay-update",snap(4,NO_ENH,{held:null}));
+  assert.equal(pill.hidden,true,"hiding resumes after both holds end");h.unload();
+});
+test("held transcript shows review actions, overrides idle hiding and calls backend by id",async()=>{
+  const h=await overlay(),pill=h.root.querySelector(".pill"),panel=h.root.querySelector(".held");
+  h.emit("overlay-update",snap(1,NO_ENH,{held:HELD}));
+  assert.equal(panel.hidden,false);assert.equal(pill.hidden,false);assert.equal(h.root.dataset.held,"true");
+  assert.equal(h.root.querySelector(".held-text").textContent,"Buy milk.");assert.match(panel.textContent,/Started in obsidian/);
+  assert.equal(h.root.querySelector(".pill-label").textContent,"Focus changed");
+  h.timers.tick(5000);assert.equal(pill.hidden,false,"idle hiding waits while text is held");
+  for(const [cls,command] of [["held-insert","insert_held"],["held-copy","copy_held"],["held-discard","discard_held"]]){
+    await h.root.querySelector(`.${cls}`).dispatch("click");await settle();
+    assert.deepEqual(plain(h.calls.filter(c=>c.name===command).at(-1).args),{heldId:"3"});
+  }
+  h.emit("overlay-update",snap(2,NO_ENH,{held:null}));assert.equal(panel.hidden,true);assert.equal(pill.hidden,true);h.unload();
+});
+test("held panel hides while dictating, disables during delivery and shows backend messages",async()=>{
+  const h=await overlay(),panel=h.root.querySelector(".held");
+  h.emit("overlay-update",snap(1,NO_ENH,{held:HELD,dictation_state:"transcribing"}));assert.equal(panel.hidden,true);
+  h.emit("overlay-update",snap(2,NO_ENH,{held:HELD,delivery_busy:true}));assert.equal(panel.hidden,false);
+  assert.equal(h.root.querySelector(".held-insert").disabled,true);
+  h.emit("overlay-update",snap(3,NO_ENH,{held:{...HELD,message:"Focus the app you want, then insert."}}));
+  assert.equal(h.root.querySelector(".held-insert").disabled,false);assert.match(panel.textContent,/Focus the app you want/);
+  h.emit("overlay-update",snap(4,NO_ENH,{held:{...HELD,origin_app:null}}));assert.match(panel.textContent,/Started outside a known window/);h.unload();
+});
+test("held notice shows a message without actions, and command errors stay inline",async()=>{
+  const h=await overlay({insert_held:async()=>{throw new Error("Dictation controller stopped");}}),panel=h.root.querySelector(".held");
+  h.emit("overlay-update",snap(1,NO_ENH,{held:{kind:"notice",id:null,text:null,origin_app:null,message:"Copied to the clipboard.",expires_at:null}}));
+  assert.equal(panel.hidden,false);assert.equal(h.root.querySelector(".held-actions").hidden,true);assert.match(panel.textContent,/Copied to the clipboard/);
+  h.emit("overlay-update",snap(2,NO_ENH,{held:HELD}));await h.root.querySelector(".held-insert").dispatch("click");await settle();
+  assert.match(panel.textContent,/Dictation controller stopped/);h.unload();
+});
+test("behavior saves focus-change mode and the insert-held shortcut",async()=>{
+  const h=await behaviorPage(),mode=h.document.getElementById("field-when-focus-changes");
+  assert.equal(mode.value,"hold");mode.value="refocus";await mode.dispatch("change");assert.equal(h.config.injection.focus_change,"refocus");
+  const capture=h.document.getElementById("field-insert-held-text-shortcut");await capture.dispatch("click");
+  await capture.dispatch("keydown",{key:"I",code:"KeyI",ctrlKey:true,altKey:true});assert.equal(h.config.injection.insert_held_hotkey,"Ctrl+Alt+I");h.unload();
 });
