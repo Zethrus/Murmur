@@ -1,8 +1,13 @@
-# Murmur 0.4.6
+# Murmur 0.4.7
 
-Dictation now stays bound to the window you started in. Switching windows
-mid-sentence no longer sends a note into whatever app has focus when the
-transcript is ready, such as a terminal.
+Everything new since Murmur 0.4.5: dictation that stays in the window you
+started in, a working Debian package, reliable overlay dragging, and a Flipper
+companion ready for the Apps Catalog.
+
+## Dictation stays in the window you started in
+
+Switching windows mid-sentence no longer sends a note into whatever app has
+focus when the transcript is ready, such as a terminal.
 
 - Murmur records the focused window when you press the dictation shortcut and
   checks it again before typing. If focus changed, the transcript is held in
@@ -19,9 +24,32 @@ Windows are compared by identity, so tabs inside one browser or terminal window
 count as the same target. Switching windows while a long transcript is already
 being typed is not detected.
 
+## Fixes
+
+- **Debian package launches for every user.** Installing the `.deb` no longer
+  leaves `/opt/murmur` readable only by root, which made `murmur` fail with
+  "Permission denied" for desktop users. The launcher also starts from the
+  application directory so its web view helpers are found.
+- **Overlay dragging works reliably on GNOME/X11.** The overlay can be moved
+  again under GNOME, and repeated drags work instead of only the first one.
+  Pausing with the mouse held no longer ends a drag. The drag handle is larger
+  and no longer selects text.
+- **Overlay position is saved without surprises.** The final position is saved
+  after you release the mouse, and the overlay no longer resizes or jumps while
+  it is being dragged. Dictated text waits until a drag finishes before typing.
+- **Manual config edits are kept.** Edits you make to the configuration file
+  are no longer overwritten when the overlay saves its position. An invalid
+  configuration file is reported instead of being replaced.
+
+## Flipper Zero companion
+
+- The companion now has an app icon, a description, and a changelog, ready for
+  the Flipper Apps Catalog. Its version matches Murmur 0.4.7.
+
+## Downloads
+
 - Downloads contain the AppImage, Debian package, portable archive, Flipper
-  companion, GPU validation evidence, and checksums. Loose app and engine files
-  are no longer posted separately.
+  companion, GPU validation evidence, and checksums.
 
 Models download inside Settings. GPU inference requires a compatible host NVIDIA
 driver.
