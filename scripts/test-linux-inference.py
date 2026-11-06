@@ -146,9 +146,16 @@ print(json.dumps(paths))
 """
     env = {key: value for key, value in os.environ.items()
            if key not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH")}
-    env.update(LD_LIBRARY_PATH=str(cuda), MURMUR_PROBE_LIBRARIES=json.dumps(names))
-    paths = json.loads(subprocess.run([sys.executable, "-c", program], env=env,
-                                      capture_output=True, text=True, check=True).stdout)
+    # Relocated setup-python interpreters need their own libpython. Do not
+    # inherit arbitrary host CUDA paths; origin checks below still require
+    # every probed CUDA library to come from the package.
+    search = os.pathsep.join((str(cuda), str(Path(sys.base_prefix) / "lib")))
+    env.update(LD_LIBRARY_PATH=search, MURMUR_PROBE_LIBRARIES=json.dumps(names))
+    result = subprocess.run([sys.executable, "-c", program], env=env,
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"CUDA runtime probe failed: {result.stderr.strip()}")
+    paths = json.loads(result.stdout)
     if set(paths) != set(names) or any(not Path(path).is_relative_to(cuda) for path in paths.values()):
         raise RuntimeError(f"CUDA loader origin invalid: {paths}")
     return paths
