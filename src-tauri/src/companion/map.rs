@@ -96,16 +96,21 @@ pub fn dispatch(state: &AppState, verb: Verb) -> Option<&'static str> {
                 .ok()
                 .map(|_| "STARTED")
         }
+        // Held text (focus changed during dictation) takes precedence over a suggestion.
         Verb::Accept => state
-            .send(Action::AcceptCurrent(state.enhance.shortcut_suggestion()))
+            .send(match state.held.current_id() {
+                Some(id) => Action::InsertHeld(Some(id)),
+                None => Action::AcceptCurrent(state.enhance.shortcut_suggestion()),
+            })
             .ok()
             .map(|_| "OK"),
-        Verb::Dismiss => match state.enhance.shortcut_suggestion() {
-            Some(id) => {
+        Verb::Dismiss => match (state.held.current_id(), state.enhance.shortcut_suggestion()) {
+            (Some(id), _) => state.send(Action::DiscardHeld(Some(id))).ok().map(|_| "OK"),
+            (None, Some(id)) => {
                 state.enhance.discard(state, Some(id));
                 Some("OK")
             }
-            None => None,
+            (None, None) => None,
         },
         Verb::Cancel => state.send(Action::Cancel).ok().map(|_| "OK"),
         Verb::None => None,

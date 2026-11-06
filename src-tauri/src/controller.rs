@@ -3,7 +3,12 @@ use crate::{
     audio::{AudioCapture, AudioEvent, RemoteAudioSource},
     companion::network::{Policy, Source},
     config::Config,
-    hotkey, inject, overlay, platform, postproc,
+    focus_guard::{self, Decision, FocusMode},
+    held, hotkey, inject,
+    inject::InjectionPath,
+    overlay,
+    platform::{self, Focus},
+    postproc::{self, Style},
     sound::Cue,
 };
 use anyhow::{Context, Result};
@@ -39,6 +44,12 @@ pub enum Action {
     Rewrite(Option<(u64, u64)>),
     /// Enhance: accept (copy) the suggestion observed at keypress.
     AcceptCurrent(Option<u64>),
+    /// Type the held transcript observed at keypress into the window focused now.
+    InsertHeld(Option<u64>),
+    /// Copy the held transcript to the clipboard.
+    CopyHeld(Option<u64>),
+    /// Forget the held transcript.
+    DiscardHeld(Option<u64>),
     Quit,
 }
 pub fn params(pcm: &[f32], config: &Config) -> Value {
@@ -116,6 +127,17 @@ fn warm_engine(app: &AppHandle, config: &Config) {
         tracing::warn!(%error, "Start speech model warmup");
     }
 }
+/// What `deliver` sent, handed on to history and Enhance.
+struct Delivery {
+    body: String,
+    text: String,
+    style: Style,
+    class: String,
+    path: InjectionPath,
+}
+const FOCUS_TARGET_FIRST: &str = "Focus the app you want, then insert.";
+const COPIED: &str = "Focus changed during dictation. Copied to the clipboard instead.";
+const COPIED_HELD: &str = "Copied to the clipboard.";
 struct Controller {
     audio: Option<AudioCapture>,
     local_audio: Option<AudioCapture>,
@@ -126,6 +148,8 @@ struct Controller {
     injector: inject::Injector,
     active: bool,
     force_code: bool,
+    /// Window focused when the current dictation started; `None` if it could not be read.
+    origin: Option<Focus>,
     epoch: u64,
     started: Instant,
     reset_at: Option<Instant>,
@@ -149,6 +173,7 @@ impl Controller {
             injector: inject::Injector::default(),
             active: false,
             force_code: false,
+            origin: None,
             epoch: 0,
             started: Instant::now(),
             reset_at: None,
@@ -206,6 +231,13 @@ impl Controller {
         }
         self.config = state.config()?;
         self.force_code = code;
+        // Bind this dictation to the window focused at the hotkey press.
+        self.origin = platform::focused_target(&state.app)
+            .inspect_err(|error| tracing::info!(%error, "Dictation target window unknown"))
+            .ok();
+        if state.held.clear() {
+            state.enhance.refresh_overlay(state);
+        }
         if !state.status()?.model_available {
             state.refresh_engine()?;
         }
@@ -367,61 +399,242 @@ impl Controller {
             chars = text.len(),
             "transcript received"
         );
-        let focused = platform::focused_app(&state.app)?;
-        let style = postproc::resolve_style(&self.config, &focused, self.force_code);
-        let body = postproc::clean_body(text, &self.config, style);
-        let text = inject::safe_text(&postproc::process_cleaned(&body, &self.config), &focused);
-        let mut delivered = None;
-        if !text.is_empty() {
-            // Click-through only while keystrokes/paste are in flight.
-            overlay::set_busy(&state.app, true)?;
-            state.enhance.publish(state);
-            let injected = self
-                .injector
-                .inject(&text, &self.config.injection, &focused, style);
-            if let Err(error) = overlay::set_busy(&state.app, false) {
-                tracing::warn!(%error, "Restore overlay cursor handling");
+        let current = platform::focused_target(&state.app);
+        let mode = FocusMode::parse(&self.config.injection.focus_change);
+        let decision = focus_guard::decide(self.origin.as_ref(), current.as_ref().ok(), mode);
+        let mut held = false;
+        let delivered = match decision {
+            Decision::Deliver => {
+                let class = current?.class().to_owned();
+                self.deliver(state, text, self.force_code, &class, false, duration, start)?
             }
-            state.enhance.publish(state);
-            let path = injected?;
-            delivered = Some(path);
-            let latency = start.elapsed().as_millis() as u64;
-            tracing::info!(latency_ms = latency, app = %focused, style = ?style, chars = text.len(), "transcript delivered");
-            state
-                .app
-                .emit("latency", json!({"latency_ms":latency,"text":text}))?;
-            if state.config()?.privacy.history_enabled {
-                state.history(|history| {
-                    if let Some(h) = history {
-                        h.insert(
-                            &text,
-                            &focused,
-                            duration,
-                            latency,
-                            &self.config.engine.model,
-                        )?;
-                    }
-                    Ok(())
-                })?;
+            Decision::Refocus(id) => match self.refocus(state, id) {
+                Some(class) => {
+                    self.deliver(state, text, self.force_code, &class, false, duration, start)?
+                }
+                None => {
+                    held = self.hold(state, text, duration);
+                    None
+                }
+            },
+            Decision::Copy => {
+                let class = self.copy_class(current.as_ref().ok());
+                let delivery =
+                    self.deliver(state, text, self.force_code, &class, true, duration, start)?;
+                if delivery.is_some() {
+                    state.held.notice(COPIED, Instant::now());
+                    state.enhance.refresh_overlay(state);
+                }
+                delivery
             }
-        }
-        if text.is_empty() {
+            Decision::Hold => {
+                held = self.hold(state, text, duration);
+                None
+            }
+        };
+        if delivered.is_none() && !held {
             state.companion.publish_final_text("");
         }
         state.refresh_engine()?;
-        state.transition("done")?;
+        state.transition(if held { "idle" } else { "done" })?;
         state.audio_source(None);
         self.active = false;
         self.stopped_preview_epoch = self.preview.as_ref().map(|_| self.epoch);
         self.epoch += 1;
-        self.reset_at = Some(Instant::now() + Duration::from_millis(900));
+        if held {
+            self.hide_at = Some(Instant::now() + Duration::from_millis(1500));
+        } else {
+            self.reset_at = Some(Instant::now() + Duration::from_millis(900));
+        }
         // The original is delivered first; Enhance only ever runs afterwards.
-        if let Some(path) = delivered {
-            state
-                .enhance
-                .delivered(state, body, text, style, &focused, path, &self.config);
+        if let Some(delivery) = delivered {
+            self.hand_off(state, delivery);
         }
         Ok(())
+    }
+    /// Post-process the raw transcript for the destination app and inject it, then record
+    /// latency and history. Returns `None` when post-processing leaves nothing to send.
+    #[allow(clippy::too_many_arguments)]
+    fn deliver(
+        &mut self,
+        state: &AppState,
+        raw: &str,
+        force_code: bool,
+        class: &str,
+        clipboard_only: bool,
+        duration: u64,
+        start: Instant,
+    ) -> Result<Option<Delivery>> {
+        let style = postproc::resolve_style(&self.config, class, force_code);
+        let body = postproc::clean_body(raw, &self.config, style);
+        let text = inject::safe_text(&postproc::process_cleaned(&body, &self.config), class);
+        if text.is_empty() {
+            return Ok(None);
+        }
+        let mut injection = self.config.injection.clone();
+        injection.clipboard_only |= clipboard_only;
+        // Click-through only while keystrokes/paste are in flight.
+        overlay::set_busy(&state.app, true)?;
+        state.enhance.publish(state);
+        let injected = self.injector.inject(&text, &injection, class, style);
+        if let Err(error) = overlay::set_busy(&state.app, false) {
+            tracing::warn!(%error, "Restore overlay cursor handling");
+        }
+        state.enhance.publish(state);
+        let path = injected?;
+        let latency = start.elapsed().as_millis() as u64;
+        tracing::info!(latency_ms = latency, app = %class, style = ?style, chars = text.len(), "transcript delivered");
+        state
+            .app
+            .emit("latency", json!({"latency_ms":latency,"text":text}))?;
+        if state.config()?.privacy.history_enabled {
+            state.history(|history| {
+                if let Some(h) = history {
+                    h.insert(&text, class, duration, latency, &self.config.engine.model)?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(Some(Delivery {
+            body,
+            text,
+            style,
+            class: class.to_owned(),
+            path,
+        }))
+    }
+    fn hand_off(&self, state: &AppState, delivery: Delivery) {
+        state.enhance.delivered(
+            state,
+            delivery.body,
+            delivery.text,
+            delivery.style,
+            &delivery.class,
+            delivery.path,
+            &self.config,
+        );
+    }
+    /// Bring the original window back. Returns its class once it has focus again.
+    fn refocus(&self, state: &AppState, id: u64) -> Option<String> {
+        if let Err(error) = platform::activate_window(id) {
+            tracing::info!(%error, "Refocus original window failed; holding transcript");
+            return None;
+        }
+        let now = platform::focused_target(&state.app).ok();
+        match focus_guard::decide(self.origin.as_ref(), now.as_ref(), FocusMode::Hold) {
+            Decision::Deliver => now.map(|focus| focus.class().to_owned()),
+            _ => None,
+        }
+    }
+    /// Style for clipboard-only delivery follows the window dictation started in.
+    fn copy_class(&self, current: Option<&Focus>) -> String {
+        [self.origin.as_ref(), current]
+            .into_iter()
+            .flatten()
+            .find_map(|focus| match focus {
+                Focus::Window { class, .. } => Some(class.clone()),
+                Focus::Own => None,
+            })
+            .unwrap_or_default()
+    }
+    /// Keep the transcript for review. Returns whether anything was held.
+    fn hold(&self, state: &AppState, raw: &str, duration: u64) -> bool {
+        let origin = self.origin.as_ref().map(|focus| match focus {
+            Focus::Own => "Murmur".to_owned(),
+            Focus::Window { class, .. } => class.clone(),
+        });
+        let class = origin.as_deref().unwrap_or_default();
+        let style = postproc::resolve_style(&self.config, class, self.force_code);
+        let preview = postproc::process_cleaned(
+            &postproc::clean_body(raw, &self.config, style),
+            &self.config,
+        );
+        if preview.is_empty() {
+            return false;
+        }
+        tracing::info!(
+            origin = origin.as_deref().unwrap_or("unknown"),
+            chars = preview.len(),
+            "Transcript held: focus changed during dictation"
+        );
+        state.companion.publish_suggestion(&preview);
+        state.held.hold(
+            held::Pending {
+                raw: raw.to_owned(),
+                preview,
+                force_code: self.force_code,
+                origin,
+                duration_ms: duration,
+            },
+            Instant::now(),
+        );
+        state.enhance.refresh_overlay(state);
+        true
+    }
+    fn idle_for_held(&self, state: &AppState) -> bool {
+        !self.active && state.status().is_ok_and(|s| s.state != "transcribing")
+    }
+    /// Deliver held text: type it into the window focused now (the user chose where it goes),
+    /// or copy it. Held text is kept, with a message, unless delivery succeeds.
+    fn deliver_held(&mut self, state: &AppState, id: Option<u64>, clipboard: bool) -> Result<()> {
+        let Some(held) = id.and_then(|id| state.held.get(id)) else {
+            return Ok(());
+        };
+        if !self.idle_for_held(state) {
+            return Ok(());
+        }
+        let class = if clipboard {
+            // Clipboard-only output still follows the original app's style.
+            held.origin
+                .clone()
+                .filter(|class| !inject::is_own_app(class))
+                .unwrap_or_default()
+        } else {
+            match platform::focused_target(&state.app) {
+                Ok(Focus::Window { class, .. }) => class,
+                Ok(Focus::Own) => {
+                    self.held_message(state, held.id, FOCUS_TARGET_FIRST);
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.held_message(state, held.id, &format!("{error:#}"));
+                    return Ok(());
+                }
+            }
+        };
+        let delivered = match self.deliver(
+            state,
+            &held.raw,
+            held.force_code,
+            &class,
+            clipboard,
+            held.duration_ms,
+            Instant::now(),
+        ) {
+            Ok(delivered) => delivered,
+            Err(error) => {
+                tracing::warn!(%error, "Deliver held transcript");
+                self.held_message(state, held.id, &format!("Could not deliver: {error:#}"));
+                return Ok(());
+            }
+        };
+        state.held.discard(held.id);
+        if clipboard && delivered.is_some() {
+            state.held.notice(COPIED_HELD, Instant::now());
+        }
+        state.enhance.refresh_overlay(state);
+        let Some(delivery) = delivered else {
+            return Ok(());
+        };
+        state.transition("done")?;
+        self.reset_at = Some(Instant::now() + Duration::from_millis(900));
+        self.hand_off(state, delivery);
+        Ok(())
+    }
+    fn held_message(&self, state: &AppState, id: u64, message: &str) {
+        if state.held.set_message(id, message) {
+            state.enhance.refresh_overlay(state);
+        }
     }
     fn fail(&mut self, state: &AppState, error: &str) {
         state.companion_network.end_turn();
@@ -494,6 +707,9 @@ impl Controller {
             }
         }
         state.enhance.tick(state);
+        if state.held.tick(now) {
+            state.enhance.refresh_overlay(state);
+        }
         match overlay::settled_placement(&state.app) {
             Ok(Some(placement)) => {
                 overlay::suppress_moves();
@@ -607,6 +823,13 @@ impl Controller {
             Action::AcceptCurrent(id) => {
                 if let Some(id) = id {
                     let _ = state.enhance.accept(state, Some(id));
+                }
+            }
+            Action::InsertHeld(id) => self.deliver_held(state, id, false)?,
+            Action::CopyHeld(id) => self.deliver_held(state, id, true)?,
+            Action::DiscardHeld(id) => {
+                if id.is_some_and(|id| state.held.discard(id)) {
+                    state.enhance.refresh_overlay(state);
                 }
             }
             Action::Reconfigure => {

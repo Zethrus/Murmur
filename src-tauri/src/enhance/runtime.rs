@@ -150,7 +150,8 @@ impl Runtime {
                 "acceptance_mode": if backend::compiled() { "clipboard" } else { "unavailable" },
                 "message": session.message.clone(),
                 "expires_at": if shown.is_some() { session.expires_at_unix_ms(now) } else { None },
-            }
+            },
+            "held": state.held.snapshot(now),
         })
     }
 
@@ -162,7 +163,7 @@ impl Runtime {
 
     fn sync_overlay(&self, state: &AppState) {
         let Ok(config) = state.config() else { return };
-        if self.holds_overlay() {
+        if state.overlay_held() {
             if let Err(error) = overlay::reveal(&state.app, &config.overlay) {
                 tracing::warn!(%error, "Reveal overlay for Enhance");
             }
@@ -174,6 +175,12 @@ impl Runtime {
     fn changed(&self, state: &AppState) {
         self.publish(state);
         self.sync_overlay(state);
+    }
+
+    /// Publish the overlay snapshot after a non-Enhance change (held text) and reveal or hide
+    /// the overlay to match.
+    pub fn refresh_overlay(&self, state: &AppState) {
+        self.changed(state);
     }
 
     pub fn set_partial(&self, state: &AppState, text: &str) {

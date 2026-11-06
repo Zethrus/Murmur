@@ -12,13 +12,17 @@ pub enum InjectionPath {
     ClipboardOnly,
     Skip,
 }
-pub fn choose_path(text: &str, cfg: &Injection, focused: &str, style: Style) -> InjectionPath {
+/// Murmur's own windows never receive a transcript.
+pub fn is_own_app(focused: &str) -> bool {
     let app = focused.to_lowercase();
-    if app == "murmur"
+    app == "murmur"
         || app == "murmur.exe"
         || app.starts_with("murmur settings")
         || app.starts_with("murmur overlay")
-    {
+}
+pub fn choose_path(text: &str, cfg: &Injection, focused: &str, style: Style) -> InjectionPath {
+    let app = focused.to_lowercase();
+    if is_own_app(&app) {
         return InjectionPath::Skip;
     }
     if cfg.clipboard_only
@@ -552,6 +556,19 @@ mod tests {
         assert_eq!(
             choose_path("text", &c, "Murmur Settings", Style::Prose),
             InjectionPath::Skip
+        );
+    }
+    #[test]
+    fn own_windows_and_terminal_destinations() {
+        for own in ["murmur", "Murmur.exe", "Murmur Settings", "murmur overlay"] {
+            assert!(is_own_app(own), "{own}");
+        }
+        assert!(!is_own_app("obsidian"));
+        // Held text inserted into a terminal is re-made safe for that destination.
+        assert_eq!(safe_text("echo one\nrm two", "kitty"), "echo one rm two");
+        assert_eq!(
+            safe_text("line one\nline two", "obsidian"),
+            "line one\nline two"
         );
     }
     #[test]

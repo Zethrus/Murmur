@@ -255,3 +255,41 @@ test("measured overlay size is reported once per change with increasing layout r
   assert.ok(sizes[0].layoutInstance);assert.equal(sizes[0].layoutInstance,sizes[1].layoutInstance);
   h.unload();assert.equal(h.observers.live.size,0);assert.equal([...h.events.values()].reduce((n,s)=>n+s.size,0),0);
 });
+// ---- Held transcript (focus changed during dictation) ----
+const NO_ENH = enh("none",{dictation_id:null,acceptance_mode:"unavailable"});
+const HELD = {kind:"held",id:"3",text:"Buy milk.",origin_app:"obsidian",message:null,expires_at:Date.now()+120000};
+test("held transcript shows review actions, overrides idle hiding and calls backend by id",async()=>{
+  const h=await overlay(),pill=h.root.querySelector(".pill"),panel=h.root.querySelector(".held");
+  h.emit("overlay-update",snap(1,NO_ENH,{held:HELD}));
+  assert.equal(panel.hidden,false);assert.equal(pill.hidden,false);assert.equal(h.root.dataset.held,"true");
+  assert.equal(h.root.querySelector(".held-text").textContent,"Buy milk.");assert.match(panel.textContent,/Started in obsidian/);
+  assert.equal(h.root.querySelector(".pill-label").textContent,"Focus changed");
+  h.timers.tick(5000);assert.equal(pill.hidden,false,"idle hiding waits while text is held");
+  for(const [cls,command] of [["held-insert","insert_held"],["held-copy","copy_held"],["held-discard","discard_held"]]){
+    await h.root.querySelector(`.${cls}`).dispatch("click");await settle();
+    assert.deepEqual(plain(h.calls.filter(c=>c.name===command).at(-1).args),{heldId:"3"});
+  }
+  h.emit("overlay-update",snap(2,NO_ENH,{held:null}));assert.equal(panel.hidden,true);assert.equal(pill.hidden,true);h.unload();
+});
+test("held panel hides while dictating, disables during delivery and shows backend messages",async()=>{
+  const h=await overlay(),panel=h.root.querySelector(".held");
+  h.emit("overlay-update",snap(1,NO_ENH,{held:HELD,dictation_state:"transcribing"}));assert.equal(panel.hidden,true);
+  h.emit("overlay-update",snap(2,NO_ENH,{held:HELD,delivery_busy:true}));assert.equal(panel.hidden,false);
+  assert.equal(h.root.querySelector(".held-insert").disabled,true);
+  h.emit("overlay-update",snap(3,NO_ENH,{held:{...HELD,message:"Focus the app you want, then insert."}}));
+  assert.equal(h.root.querySelector(".held-insert").disabled,false);assert.match(panel.textContent,/Focus the app you want/);
+  h.emit("overlay-update",snap(4,NO_ENH,{held:{...HELD,origin_app:null}}));assert.match(panel.textContent,/Started outside a known window/);h.unload();
+});
+test("held notice shows a message without actions, and command errors stay inline",async()=>{
+  const h=await overlay({insert_held:async()=>{throw new Error("Dictation controller stopped");}}),panel=h.root.querySelector(".held");
+  h.emit("overlay-update",snap(1,NO_ENH,{held:{kind:"notice",id:null,text:null,origin_app:null,message:"Copied to the clipboard.",expires_at:null}}));
+  assert.equal(panel.hidden,false);assert.equal(h.root.querySelector(".held-actions").hidden,true);assert.match(panel.textContent,/Copied to the clipboard/);
+  h.emit("overlay-update",snap(2,NO_ENH,{held:HELD}));await h.root.querySelector(".held-insert").dispatch("click");await settle();
+  assert.match(panel.textContent,/Dictation controller stopped/);h.unload();
+});
+test("behavior saves focus-change mode and the insert-held shortcut",async()=>{
+  const h=await behaviorPage(),mode=h.document.getElementById("field-when-focus-changes");
+  assert.equal(mode.value,"hold");mode.value="refocus";await mode.dispatch("change");assert.equal(h.config.injection.focus_change,"refocus");
+  const capture=h.document.getElementById("field-insert-held-text-shortcut");await capture.dispatch("click");
+  await capture.dispatch("keydown",{key:"I",code:"KeyI",ctrlKey:true,altKey:true});assert.equal(h.config.injection.insert_held_hotkey,"Ctrl+Alt+I");h.unload();
+});

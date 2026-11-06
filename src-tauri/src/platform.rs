@@ -145,16 +145,56 @@ pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<()> {
     }
     Ok(())
 }
-pub fn focused_app(app: &AppHandle) -> Result<String> {
-    for window in app.webview_windows().values() {
-        if window.is_focused().unwrap_or(false) {
-            return Ok("murmur".into());
+/// The window that has keyboard focus: one of Murmur's own windows, or a native window
+/// identified by its X11 window ID or Windows HWND.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Focus {
+    Own,
+    Window { id: u64, class: String },
+}
+impl Focus {
+    /// Application class used for style, exclusion and terminal decisions.
+    pub fn class(&self) -> &str {
+        match self {
+            Focus::Own => "murmur",
+            Focus::Window { class, .. } => class,
         }
     }
-    native_focus()
+}
+pub fn focused_target(app: &AppHandle) -> Result<Focus> {
+    for window in app.webview_windows().values() {
+        if window.is_focused().unwrap_or(false) {
+            return Ok(Focus::Own);
+        }
+    }
+    let (id, class) = native_focus()?;
+    if crate::inject::is_own_app(&class) {
+        return Ok(Focus::Own);
+    }
+    Ok(Focus::Window { id, class })
+}
+pub fn focused_app(app: &AppHandle) -> Result<String> {
+    focused_target(app).map(|focus| focus.class().to_owned())
+}
+/// Bring a previously focused window back to the foreground and confirm it took focus.
+/// Bounded at roughly 500 ms so a window manager that refuses activation cannot stall delivery.
+pub fn activate_window(id: u64) -> Result<()> {
+    native_activate(id)?;
+    for _ in 0..25 {
+        if native_focus().is_ok_and(|(focused, _)| focused == id) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    bail!("The original window did not regain focus")
 }
 #[cfg(target_os = "linux")]
-fn native_focus() -> Result<String> {
+fn parse_window_id(xprop: &str) -> Option<u64> {
+    let id = xprop.split_whitespace().last()?.strip_prefix("0x")?;
+    u64::from_str_radix(id, 16).ok().filter(|id| *id != 0)
+}
+#[cfg(target_os = "linux")]
+fn native_focus() -> Result<(u64, String)> {
     if env::var_os("DISPLAY").is_none() {
         bail!("Text injection requires X11; Wayland is untested");
     }
@@ -165,14 +205,10 @@ fn native_focus() -> Result<String> {
     if !output.status.success() {
         bail!("Cannot read active window; Wayland may restrict injection");
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let id = text
-        .split_whitespace()
-        .last()
-        .filter(|id| id.starts_with("0x") && *id != "0x0")
+    let id = parse_window_id(&String::from_utf8_lossy(&output.stdout))
         .context("No active X11 window")?;
     let output = Command::new("xprop")
-        .args(["-id", id, "WM_CLASS"])
+        .args(["-id", &id.to_string(), "WM_CLASS"])
         .output()
         .context("Read focused application class")?;
     if !output.status.success() {
@@ -184,10 +220,22 @@ fn native_focus() -> Result<String> {
         .nth(3)
         .or_else(|| text.split('"').nth(1))
         .context("Focused window has no WM_CLASS")?;
-    Ok(class.to_owned())
+    Ok((id, class.to_owned()))
+}
+#[cfg(target_os = "linux")]
+fn native_activate(id: u64) -> Result<()> {
+    // No --sync: it waits without a deadline when the window manager declines the request.
+    let status = Command::new("xdotool")
+        .args(["windowactivate", &id.to_string()])
+        .status()
+        .context("Run xdotool to refocus the original window")?;
+    if !status.success() {
+        bail!("xdotool windowactivate exited with status {status}");
+    }
+    Ok(())
 }
 #[cfg(windows)]
-fn native_focus() -> Result<String> {
+fn native_focus() -> Result<(u64, String)> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
         System::Threading::{
@@ -215,15 +263,35 @@ fn native_focus() -> Result<String> {
             return Err(error).context("Read focused process path");
         }
         let path = PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
-        Ok(path
+        let name = path
             .file_name()
             .context("Foreground executable has no name")?
             .to_string_lossy()
-            .into_owned())
+            .into_owned();
+        Ok((window as usize as u64, name))
     }
 }
+#[cfg(windows)]
+fn native_activate(id: u64) -> Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
+    let window = id as usize as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        if IsWindow(window) == 0 {
+            bail!("The original window was closed");
+        }
+        // Windows may refuse this under its foreground-lock rules; the caller then holds the text.
+        if SetForegroundWindow(window) == 0 {
+            bail!("Windows declined to refocus the original window");
+        }
+    }
+    Ok(())
+}
 #[cfg(not(any(windows, target_os = "linux")))]
-fn native_focus() -> Result<String> {
+fn native_focus() -> Result<(u64, String)> {
+    bail!("Unsupported platform")
+}
+#[cfg(not(any(windows, target_os = "linux")))]
+fn native_activate(_: u64) -> Result<()> {
     bail!("Unsupported platform")
 }
 pub fn open_path(path: &Path) -> Result<()> {
@@ -331,6 +399,22 @@ fn payload_safe_for_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod focus_tests {
+    use super::parse_window_id;
+    #[test]
+    fn active_window_id_parses_from_xprop() {
+        assert_eq!(
+            parse_window_id("_NET_ACTIVE_WINDOW(WINDOW): window id # 0x3a00007\n"),
+            Some(0x3a00007)
+        );
+        assert_eq!(
+            parse_window_id("_NET_ACTIVE_WINDOW(WINDOW): window id # 0x0"),
+            None
+        );
+        assert_eq!(parse_window_id("_NET_ACTIVE_WINDOW:  not found."), None);
+    }
+}
 #[cfg(test)]
 mod logging_tests {
     use super::*;
