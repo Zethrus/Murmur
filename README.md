@@ -85,7 +85,7 @@ unavailable, run `./murmur-portable/murmur --appimage-extract-and-run`.
 The host still provides glibc, the X11 desktop, audio services, and hardware drivers. On GNOME, enable a tray/AppIndicator extension if your
 shell does not show tray icons.
 
-1. Open **Settings** from the Murmur tray icon. Launching the app does not open a settings window.
+1. Launch Murmur to open **Settings**. Starting at login runs quietly in the tray.
 2. In **Engine**, install a speech model, then choose **Use model**. `distil-small.en` is a useful starting point for English.
 3. In **Audio**, select your microphone.
 4. Focus a text field. Hold **Ctrl+Alt+D**, speak, then release.

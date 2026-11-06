@@ -9,7 +9,7 @@ Use a regular user account, not sudo. Prerequisites must already be installed:
 - C/C++ build tools, CMake, Clang and libclang development libraries,
   pkg-config, WebKitGTK 4.1, libsoup 3, GTK3,
   Ayatana AppIndicator, librsvg, ALSA, X11 and XKB development libraries.
-- `patchelf`, `file`, `squashfs-tools` and librsvg tools for bundles; `xprop` for focused-window detection, `xdotool` for typing and paste, and a running D-Bus session for Bluetooth.
+- `patchelf`, `file`, `squashfs-tools` and librsvg tools for bundles; `xvfb`, `xauth` and `dbus-run-session` for startup tests; `xprop` for focused-window detection, `xdotool` for typing and paste, and a running D-Bus session for Bluetooth.
 - An X11 desktop, working microphone/audio stack and tray support. Native Wayland
   injection is unverified; use an X11 session if compositor restrictions interfere.
 
@@ -93,7 +93,10 @@ The final downloads are in `.cache/artifacts/linux`. AppImage creation is requir
 `scripts/bundle-linux-runtime.py` adds typing tools, missing client libraries and
 license notices to Tauri's AppImage, then produces the portable archive and Debian
 package from that runtime. `scripts/test-linux-bundle.py` checks the shipped tools,
-library resolution, engine, and Debian contents. Models download inside Settings.
+library resolution, engine, and Debian contents. `scripts/test-linux-startup.py`
+launches the AppImage on an isolated X11 display and D-Bus session to check manual
+startup, background startup, autostart migration, and manual reactivation.
+Models download inside Settings.
 
 These bundles still use the host's glibc, desktop services, and hardware drivers.
 Build on the oldest supported distribution; the current release baseline is
