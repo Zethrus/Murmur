@@ -10,7 +10,7 @@ export function fixture() {
     overlay:{enabled:true,position:"bottom-center",scale:1,show_preview:true,idle_hide:true}, sounds:{enabled:true,volume:0.6,muted:false},
     engine:{model:"distil-small.en",device:"auto",compute_type:"auto",beam_size:1,vad_filter:true,dictionary:["Tauri","TypeScript"]},
     audio:{device:"default",gain:1,silence_threshold:0.012,silence_timeout_ms:1200,max_utterance_s:90,min_utterance_ms:250},
-    injection:{method:"auto",clipboard_only:false,trailing_space:true,capitalize:true,remove_fillers:false,exclude_apps:[],prefer_paste:true},
+    injection:{method:"auto",clipboard_only:false,trailing_space:true,capitalize:true,remove_fillers:false,exclude_apps:[],prefer_paste:true,focus_change:"hold",insert_held_hotkey:""},
     postproc:{style:"auto",code_apps:["code","kitty"],spoken_punctuation:true,allow_newlines:false,replacements:{"mur mur":"Murmur"},fillers:["um","uh"]},
     privacy:{history_enabled:false,history_retention_days:7},
     enhance:{auto_rewrite:false,rewrite_hotkey:"",accept_hotkey:"",style:"concise",model:"qwen3-1.7b-q4_k_m",accept_mode:"clipboard",rewrite_code:false,threads:0,unload_after_s:120,load_timeout_ms:30000,timeout_ms:15000}

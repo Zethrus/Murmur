@@ -58,7 +58,9 @@ export interface Config {
   sounds: { enabled: boolean; volume: number; muted: boolean };
   engine: { model: string; device: "auto" | "cpu" | "cuda"; compute_type: string; beam_size: number; vad_filter: boolean; dictionary: string[] };
   audio: { device: string; gain: number; silence_threshold: number; silence_timeout_ms: number; max_utterance_s: number; min_utterance_ms: number };
-  injection: { prefer_paste: boolean; method: "auto" | "type" | "clipboard"; clipboard_only: boolean; trailing_space: boolean; capitalize: boolean; remove_fillers: boolean; exclude_apps: string[] };
+  injection: { prefer_paste: boolean; method: "auto" | "type" | "clipboard"; clipboard_only: boolean; trailing_space: boolean; capitalize: boolean; remove_fillers: boolean; exclude_apps: string[];
+    /** What happens when focus changes between the dictation hotkey and delivery. */
+    focus_change: FocusChange; insert_held_hotkey: string };
   postproc: { style: "prose" | "code" | "auto"; code_apps: string[]; spoken_punctuation: boolean; allow_newlines: boolean; replacements: Record<string, string>; fillers: string[]; remove_duplicate_words?: boolean };
   privacy: { history_enabled: boolean; history_retention_days: number };
   /** The Settings card tolerates a backend that omits this section (see cards/enhance.ts). */
@@ -101,8 +103,16 @@ export interface Enhancement {
   /** Unix epoch milliseconds. */
   expires_at: number | null;
 }
+export type FocusChange = "hold" | "refocus" | "copy" | "insert";
+/** Transcript held because focus changed during dictation, or a short notice. IDs are decimal strings. */
+export interface HeldView {
+  kind: "held" | "notice"; id: string | null; text: string | null; origin_app: string | null; message: string | null;
+  /** Unix epoch milliseconds. */
+  expires_at: number | null;
+}
 export interface OverlaySnapshot {
   revision: number; dictation_state: DictationState; delivery_busy: boolean; partial_text: string; enhancement: Enhancement;
+  held?: HeldView | null;
 }
 export type RewriteStatus = "queued" | "revealed" | "no_dictation" | "busy" | "already_running" | "model_missing" | "code_style" | "unavailable" | "expired";
 export interface RewriteReply { status: RewriteStatus; message?: string | null }
@@ -135,6 +145,7 @@ interface Commands {
   rewrite_last_dictation: [undefined, RewriteReply];
   accept_enhancement: [{ suggestionId: string }, AcceptReply];
   discard_enhancement: [{ suggestionId: string }, void];
+  insert_held: [{ heldId: string }, void]; copy_held: [{ heldId: string }, void]; discard_held: [{ heldId: string }, void];
   get_overlay_snapshot: [undefined, OverlaySnapshot];
   reset_overlay_position: [undefined, void];
   set_overlay_size: [{ width: number; height: number; layoutRevision: number; layoutInstance: string }, void];

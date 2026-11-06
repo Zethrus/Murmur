@@ -44,6 +44,8 @@ Linux user install explicitly enables autostart without changing the app default
 | `injection.remove_fillers` | `false` | Remove words listed in postproc.fillers |
 | `injection.exclude_apps` | `[]` | Focused-app matches receive clipboard-only output |
 | `injection.prefer_paste` | `true` | Prefer atomic paste for code style or long text |
+| `injection.focus_change` | `"hold"` | When the focused window at delivery differs from the one at the dictation shortcut: `hold` (review in the overlay), `refocus` (return to the original window, else hold), `copy` (clipboard only), `insert` (type into the current window) |
+| `injection.insert_held_hotkey` | `""` | Optional shortcut that types held text into the window focused when pressed |
 | `postproc.replacements` | `{ "mur mur" = "Murmur" }` | Case-insensitive whole-word corrections, longest phrase first |
 | `postproc.fillers` | `["um", "uh", "er", "hmm"]` | Filler list; no empty entries |
 | `postproc.style` | `"auto"` | `prose`, `code`, `auto` (resolve by focused app) |

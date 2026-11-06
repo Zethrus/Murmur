@@ -54,6 +54,7 @@ pub enum Purpose {
     Code,
     Rewrite,
     Accept,
+    InsertHeld,
 }
 /// Every nonempty shortcut in the configuration, validated together for collisions.
 pub fn bindings(config: &Config) -> Result<Vec<(Shortcut, Purpose)>> {
@@ -62,6 +63,11 @@ pub fn bindings(config: &Config) -> Result<Vec<(Shortcut, Purpose)>> {
         (&config.general.hotkey_code, Purpose::Code, "code"),
         (&config.enhance.rewrite_hotkey, Purpose::Rewrite, "rewrite"),
         (&config.enhance.accept_hotkey, Purpose::Accept, "accept"),
+        (
+            &config.injection.insert_held_hotkey,
+            Purpose::InsertHeld,
+            "insert held text",
+        ),
     ] {
         if accel.trim().is_empty() {
             continue;
@@ -110,7 +116,11 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
                 Some(Purpose::Accept) if down => {
                     Some(Action::AcceptCurrent(state.enhance.shortcut_suggestion()))
                 }
-                Some(Purpose::Rewrite | Purpose::Accept) => None,
+                // Press-only; the controller ignores it while dictating.
+                Some(Purpose::InsertHeld) if down => {
+                    Some(Action::InsertHeld(state.held.current_id()))
+                }
+                Some(Purpose::Rewrite | Purpose::Accept | Purpose::InsertHeld) => None,
                 Some(purpose) => {
                     if down && state.status().is_ok_and(|s| s.state == "transcribing") {
                         return;
@@ -261,6 +271,15 @@ mod tests {
             Some(Purpose::Dictate)
         );
         c.enhance.accept_hotkey = "Control+Alt+C".into();
+        assert!(bindings(&c).is_err());
+        c.enhance.accept_hotkey = "Ctrl+Alt+A".into();
+        c.injection.insert_held_hotkey = "Ctrl+Alt+I".into();
+        assert_eq!(bindings(&c)?.len(), 5);
+        assert_eq!(
+            purpose_of(&c, &parse("Control+Alt+I")?),
+            Some(Purpose::InsertHeld)
+        );
+        c.injection.insert_held_hotkey = "Ctrl+Alt+R".into();
         assert!(bindings(&c).is_err());
         Ok(())
     }
