@@ -15,7 +15,7 @@ Linux user install explicitly enables autostart without changing the app default
 | `general.hotkey_code` | `""` | Optional distinct accelerator forcing code style |
 | `general.language` | `"en"` | Language code; empty string enables autodetection |
 | `general.translate` | `false` | Translate speech to English; use a multilingual model |
-| `general.autostart` | `false` | Start on login; true in a fresh Linux installer-created config |
+| `general.autostart` | `false` | Start in the background on login; true in a fresh Linux installer-created config |
 | `general.theme` | `"auto"` | `auto`, `light`, `dark`; shared by settings and overlay |
 | `overlay.enabled` | `true` | Show overlay |
 | `overlay.position` | `"bottom-center"` | `bottom-center` or `top-center` |
@@ -96,3 +96,7 @@ fractional x/y position. Let the app write these fields. Zero monitor dimensions
 mean that no custom placement is saved.
 
 [Back to the README](../README.md)
+
+Manual launches open Settings. Login entries pass `--background` to keep the
+window hidden. Enabled login entries are refreshed when Murmur starts so that
+older registrations receive this argument.

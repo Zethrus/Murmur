@@ -2,23 +2,29 @@
 
 New desktop builds include pinned CUDA userspace libraries for compatible NVIDIA drivers. CPU-only machines continue to work. Engine Settings explains automatic GPU fallback, and Engine check runs real inference even on its silent probe.
 
-## Murmur 0.4.2
+## Murmur 0.4.3
 
-Murmur 0.4.2 bundles the Linux application runtime.
+Murmur 0.4.3 opens Settings when you launch the app.
 
-- AppImage, Debian, and portable downloads include the typing tools and client libraries.
-- Python and the CPU speech engine are included. No separate Python, WebKitGTK, xdotool, or xprop installation is needed.
-- The standalone `murmur` download is now the full AppImage too.
-- Debian installs the extracted runtime, so it does not need FUSE.
-- Models download from Settings when you choose Install. CUDA is not bundled in the published 0.4.2 assets.
+- Manual launches show Settings immediately, including when Murmur is already running.
+- Starting at login stays in the background. Login entries now pass `--background`.
+- Existing enabled login entries are refreshed when the app starts. Duplicate legacy entries are removed.
+- Linux login entries respect XDG_CONFIG_HOME and use the bundled launcher for Debian installs.
+- Release checks now launch the AppImage and verify window visibility for manual and background startup.
 
-Choose the AppImage for a portable download, or the `.deb` for Debian/Ubuntu.
-Make the AppImage executable and launch it. If FUSE is unavailable, add
-`--appimage-extract-and-run`. Verify downloads with `SHA256SUMS`.
+If an older copy is running, quit it from the tray before launching this version.
+Closing Settings keeps Murmur running; Quit in the tray exits the application.
 
-A Linux x86_64 X11 desktop, glibc 2.39 or newer, working audio services and hardware
-drivers are still required. The build baseline is Ubuntu 24.04. Packages are unsigned.
+Linux AppImage, Debian, and portable downloads include the CPU runtime and typing
+tools. Models download inside Settings. No separate Python, WebKitGTK, xdotool,
+or xprop installation is needed. The unreleased packaging changes above add optional
+CUDA userspace libraries to new desktop builds.
 
-The matching Flipper Zero `.fap` is included. Android is planned for November 6.
-Windows is deferred until November 6 or 7, depending on testing. Neither is part
-of this Linux release.
+Use the AppImage for a portable download, or the `.deb` for Debian/Ubuntu.
+If FUSE is unavailable, add `--appimage-extract-and-run` when launching the AppImage.
+Verify downloads against `SHA256SUMS`.
+
+The supported baseline is Linux x86_64, glibc 2.39 or newer, and an X11 desktop
+with working audio services and hardware drivers. Packages are unsigned.
+The matching Flipper Zero companion is included. Android is planned for November 6.
+Windows is deferred until November 6 or 7, depending on testing.

@@ -9,7 +9,7 @@ Use a regular user account, not sudo. Prerequisites must already be installed:
 - C/C++ build tools, CMake, Clang and libclang development libraries,
   pkg-config, WebKitGTK 4.1, libsoup 3, GTK3,
   Ayatana AppIndicator, librsvg, ALSA, X11 and XKB development libraries.
-- `patchelf`, `file`, `squashfs-tools` and librsvg tools for bundles; `xprop` for focused-window detection, `xdotool` for typing and paste, and a running D-Bus session for Bluetooth.
+- `patchelf`, `file`, `squashfs-tools` and librsvg tools for bundles; `xvfb`, `xauth` and `dbus-run-session` for startup tests; `xprop` for focused-window detection, `xdotool` for typing and paste, and a running D-Bus session for Bluetooth.
 - An X11 desktop, working microphone/audio stack and tray support. Native Wayland
   injection is unverified; use an X11 session if compositor restrictions interfere.
 
@@ -111,6 +111,10 @@ On the Ubuntu 24.04 validation build, the final AppImage and `murmur` were
 1,744.0 MiB, and the standalone engine 132.9 MiB. The Debian installed size
 was 2,645.4 MiB. These are local build measurements, not fixed sizes for
 later releases; the build rejects any release asset at or above 2 GiB.
+
+`scripts/test-linux-startup.py` launches the AppImage on an isolated X11 display
+and D-Bus session to check manual startup, background startup, autostart migration,
+and manual reactivation.
 
 These bundles still use the host's glibc, desktop services, and hardware drivers.
 Build on the oldest supported distribution; the current release baseline is

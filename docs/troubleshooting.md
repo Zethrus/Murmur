@@ -2,9 +2,13 @@
 
 ## The app launched but no window appeared
 
-Murmur starts in the system tray. Open Settings from its tray menu. On desktops
-without tray support, install or enable an AppIndicator extension. Closing
-Settings does not quit the app.
+From version 0.4.3, a manual launch opens Settings. Starting at login, or passing
+`--background`, keeps it in the tray. Launch Murmur again or open Settings from
+the tray menu to show the window. Closing Settings does not quit the app.
+
+An older running copy can receive the launch request instead of the downloaded
+version. Quit that copy through its tray menu, then launch the new download.
+Versions 0.4.2 and earlier start in the tray even when launched manually.
 
 ## No text arrives
 

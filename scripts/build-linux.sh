@@ -12,7 +12,7 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 # Baseline Rust + AVX2 llama.cpp, shared with CI so release artifacts cannot drift.
 . "$ROOT/scripts/cpu-baseline.sh"
 # bindgen needs libclang (checked below); the C/C++ compiler is g++, not the clang driver.
-for tool in cmake g++ xdotool xprop mksquashfs readelf; do
+for tool in cmake g++ xdotool xprop mksquashfs readelf xvfb-run xauth dbus-run-session; do
   command -v "$tool" >/dev/null || { printf 'Missing Enhance build prerequisite: %s\n' "$tool" >&2; exit 1; }
 done
 if ! compgen -G '/usr/lib/llvm-*/lib/libclang.so*' >/dev/null &&
@@ -34,3 +34,4 @@ engine/.release-venv/bin/python scripts/bundle-linux-runtime.py \
   --deb "$CARGO_TARGET_DIR"/release/bundle/deb/*.deb \
   --output "$ROOT/.cache/artifacts/linux"
 python3 scripts/test-linux-bundle.py "$ROOT/.cache/artifacts/linux"
+python3 scripts/test-linux-startup.py "$ROOT"/.cache/artifacts/linux/*.AppImage
