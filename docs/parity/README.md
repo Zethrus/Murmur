@@ -5,6 +5,10 @@ checks do not establish that a newly changed binary has passed hardware testing.
 Matched cross-platform screenshots and Windows hardware validation are pending. Do not mark a checklist item complete solely because a build or DOM test
 passes. Windows remains **unverified on real Windows hardware**.
 
+Overlay movement implementation and Linux native test instructions are recorded in
+[overlay-drag.md](overlay-drag.md). Linux results do not clear the Windows
+interaction or packaged-release gates below.
+
 ## Must match
 
 Use the same commit, model, language, theme, settings and test transcript on both

@@ -15,11 +15,11 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   const message = root.querySelector<HTMLElement>(".suggestion-message")!, accept = root.querySelector<HTMLButtonElement>(".accept-button")!, discard = root.querySelector<HTMLButtonElement>(".discard-button")!;
   const bars = [...root.querySelectorAll<HTMLElement>(".bars i")];
   let state: DictationState = "idle", config: Config | undefined, receivedState = false, receivedConfig = false, lastError = "Dictation unavailable", disposed = false;
-  let enhancement: Enhancement = NONE, revision = -1, busy = false, acting = false, localMessage = "";
+  let enhancement: Enhancement = NONE, revision = -1, busy = false, acting = false, dragging = false, localMessage = "";
   let timer: ReturnType<typeof setTimeout> | undefined, expiry: ReturnType<typeof setTimeout> | undefined, noticeTimer: ReturnType<typeof setTimeout> | undefined;
   const disposers: (()=>void)[] = [];
   panel.hidden = true;
-  const scheduleHide = (ms: number): void => { clearTimeout(timer); timer = setTimeout(()=>{ if (!active(enhancement)) pill.hidden = true; },ms); };
+  const scheduleHide = (ms: number): void => { clearTimeout(timer); timer = setTimeout(()=>{ if (!dragging && !active(enhancement)) pill.hidden = true; },ms); };
 
   const apply = (next: Config): void => {
     config = next; document.documentElement.dataset.theme = next.general.theme;
@@ -61,7 +61,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     if (next === "done") scheduleHide(900);
     else if (next === "error") scheduleHide(1600);
     else if (next === "idle" && config?.overlay.idle_hide) {
-      if (previous === "done" || previous === "error") pill.hidden = true; else scheduleHide(1500);
+      if (previous === "done" || previous === "error") { if (!dragging) pill.hidden = true; } else scheduleHide(1500);
     }
     if (next !== "listening") bars.forEach(bar=>bar.style.removeProperty("--level"));
   };
@@ -79,7 +79,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   /** After a suggestion closes, fall back to the ordinary idle presentation. */
   const settle = (): void => {
     renderEnhancement(); if (state === "listening" || state === "transcribing") return;
-    if (config?.overlay.idle_hide) pill.hidden = true; else render("idle");
+    if (config?.overlay.idle_hide) { if (!dragging) pill.hidden = true; } else render("idle");
   };
   const applySnapshot = (snapshot: OverlaySnapshot): void => {
     if (!isNewer(revision,snapshot.revision)) return; revision = snapshot.revision;
@@ -115,9 +115,22 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   };
   accept.addEventListener("click",()=>act("accept")); discard.addEventListener("click",()=>act("discard"));
   // Native drag from the dedicated handle only; text, buttons and scrollbars stay interactive and never start a move.
-  handle.addEventListener("pointerdown",(event: Event)=>{ const pointer = event as PointerEvent;
-    if (pointer.button !== 0 || busy) return;
-    void startOverlayDrag().catch(error=>{root.dataset.dragError = "true"; label.textContent = `Could not move overlay: ${String(error)}`; pill.hidden = false;}); });
+  // WebKitGTK can miss pointer-up during the compositor grab, suppressing the
+  // next pointerdown. Mouse down continues to arrive for successive native drags.
+  handle.addEventListener("mousedown",(event: Event)=>{ const pointer = event as MouseEvent;
+    if (pointer.button !== 0 || busy || dragging) return;
+    pointer.preventDefault();
+    dragging = true; root.dataset.dragging = "true"; delete root.dataset.dragError;
+    render(state); // clear any previous drag error and restart the normal hide timer
+    void startOverlayDrag().then(()=>{
+      if (disposed) return;
+      dragging = false; root.dataset.dragging = "false"; render(state); measure();
+    }).catch(error=>{
+      if (disposed) return;
+      dragging = false; root.dataset.dragging = "false"; root.dataset.dragError = "true";
+      label.textContent = `Could not move overlay: ${String(error)}`; pill.hidden = false;
+      scheduleHide(NOTICE_MS); measure();
+    }); });
 
   // Report the rendered surface size; Rust clamps it to the work area and keeps the placement anchor.
   const layoutInstance = `${Date.now()}-${Math.random()}`;

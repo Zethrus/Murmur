@@ -494,13 +494,8 @@ impl Controller {
             }
         }
         state.enhance.tick(state);
-        match overlay::settled_placement(&state.app) {
-            Ok(Some(placement)) => {
-                overlay::suppress_moves();
-                state.update(json!({"overlay":{"position":"custom","placement":placement}}))?;
-            }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(%error, "Overlay placement"),
+        if let Err(error) = state.save_overlay_placement() {
+            tracing::warn!(%error, "Save overlay placement; retrying");
         }
         if now >= self.prune_at {
             let days = state.config()?.privacy.history_retention_days;

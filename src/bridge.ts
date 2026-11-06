@@ -1,11 +1,10 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export const appVersion = (): Promise<string> => getVersion();
-/** Start an OS-driven move of the current (overlay) window. Requires the overlay-scoped start-dragging capability. */
-export const startOverlayDrag = (): Promise<void> => getCurrentWindow().startDragging();
+/** Native move; resolves after release/settling so the view can defer hiding. */
+export const startOverlayDrag = (): Promise<void> => invoke("start_overlay_drag");
 
 export type DictationState = "idle" | "listening" | "transcribing" | "done" | "error";
 export interface Status {

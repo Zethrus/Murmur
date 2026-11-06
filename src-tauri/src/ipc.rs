@@ -335,7 +335,7 @@ pub fn get_overlay_snapshot(state: State<'_, AppState>) -> Reply<Value> {
 #[tauri::command]
 pub async fn reset_overlay_position(app: AppHandle) -> Reply<()> {
     blocking(move || {
-        overlay::suppress_moves();
+        overlay::reset_placement();
         app.state::<AppState>().update(json!({"overlay":{
             "position":"bottom-center",
             "placement":{"monitor_name":"","monitor_x":0,"monitor_y":0,"monitor_width":0,
@@ -365,6 +365,16 @@ pub fn set_overlay_size(
         layout_revision,
         &layout_instance,
     )
+    .inspect_err(|error| tracing::warn!(%error, "overlay sizing failed"))
     .map_err(error)?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn start_overlay_drag(app: AppHandle, window: WebviewWindow) -> Reply<()> {
+    require_window(&window, "overlay")?;
+    overlay::drag(app)
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "overlay drag failed"))
+        .map_err(error)
 }

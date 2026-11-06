@@ -283,6 +283,13 @@ impl AppState {
     }
     fn apply_runtime(&self, old: &Config, new: &Config) -> Result<()> {
         hotkey::rebind(&self.app, old, new)?;
+        if old.overlay.position != new.overlay.position
+            || serde_json::to_value(&old.overlay.placement)?
+                != serde_json::to_value(&new.overlay.placement)?
+            || (old.overlay.enabled && !new.overlay.enabled)
+        {
+            overlay::reset_placement();
+        }
         if let Err(error) = platform::set_autostart(&self.app, new.general.autostart)
             .and_then(|_| overlay::apply(&self.app, &new.overlay))
         {
@@ -291,6 +298,27 @@ impl AppState {
             let _ = overlay::apply(&self.app, &old.overlay);
             return Err(error);
         }
+        Ok(())
+    }
+    /// Persist observed geometry without reapplying native placement, rebinding
+    /// hotkeys, or reconfiguring the engine. Settings transactions still serialize it.
+    pub fn save_overlay_placement(&self) -> Result<()> {
+        let _transaction = lock(&self.transaction)?;
+        let Some((generation, placement)) = overlay::pending_placement() else {
+            return Ok(());
+        };
+        let new = self
+            .config()?
+            .patched(json!({"overlay":{"position":"custom","placement":placement}}))?;
+        if let Err(error) = new.save(&self.paths.config) {
+            overlay::placement_saved(generation, false);
+            return Err(error);
+        }
+        *lock(&self.config)? = new.clone();
+        overlay::placement_saved(generation, true);
+        self.app
+            .emit("config", &new)
+            .context("Emit overlay placement")?;
         Ok(())
     }
     pub fn update(&self, patch: Value) -> Result<Config> {

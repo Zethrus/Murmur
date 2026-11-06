@@ -66,4 +66,4 @@ gtk = "0.18"
 gdkx11 = "0.18"
 # Atomic replacement of existing configuration files on Windows.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
