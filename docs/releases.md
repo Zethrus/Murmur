@@ -22,9 +22,11 @@ storage. Both builds must succeed. The Linux job bundles typing utilities and cl
 libraries, then verifies the AppImage and Debian runtime before uploading.
 
 The final job downloads every asset and runs `scripts/check-release.py`. It
-requires the app, engine, portable archive, `.deb`, AppImage, and version-matched
-`.fap`. It checks that the archive contains the same AppImage and standalone engine with execute
-permissions, generates `SHA256SUMS`, verifies it, uploads it, and publishes the
+requires exactly four packages: the portable archive, `.deb`, AppImage, and version-matched
+`.fap`. Loose `murmur` and `murmur-engine` files are not release assets. The Linux
+build checks that the portable archive contains the same AppImage and bundled
+engine, both executable. The final job checks the archive layout and AppImage match,
+generates `SHA256SUMS`, verifies it, uploads it, and publishes the
 draft as the latest release. Unexpected or missing files block publication.
 
 A failed build leaves a draft. Fix the failure and rerun the workflow while it is

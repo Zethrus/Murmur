@@ -5,6 +5,7 @@ Murmur 0.4.3 opens Settings when you launch the app.
 - Existing enabled login entries are refreshed when the app starts. Duplicate legacy entries are removed.
 - Linux login entries respect XDG_CONFIG_HOME and use the bundled launcher for Debian installs.
 - Release checks now launch the AppImage and verify window visibility for manual and background startup.
+- Downloads contain the AppImage, Debian package, portable archive, Flipper companion, and checksums. Loose app and engine files are no longer posted separately.
 
 If an older copy is running, quit it from the tray before launching this version.
 Closing Settings keeps Murmur running; Quit in the tray exits the application.

@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 
 # glibc must stay together with the host loader and NSS configuration.
@@ -51,6 +52,16 @@ def bundle_libraries(appdir, binaries):
     (notices / "packages.txt").write_text(run(
         "dpkg-query", "-W", "-f=${Package} ${Version}\n", *sorted(packages),
         capture_output=True).stdout)
+
+
+def package_portable(image, engine, output):
+    # Keep loose executables inside the portable archive, not as release assets.
+    with tarfile.open(output / "murmur-linux-x86_64.tar.gz", "w:gz", dereference=True) as archive:
+        archive.add(image, arcname="murmur")
+        archive.add(engine, arcname="murmur-engine")
+    # A reused output directory may contain assets staged by older scripts.
+    for name in ("murmur", "murmur-engine"):
+        (output / name).unlink(missing_ok=True)
 
 
 def package(image, deb, output):
@@ -111,11 +122,7 @@ exec "$APPDIR/AppRun.tauri" "$@"
             with squash.open("rb") as filesystem:
                 shutil.copyfileobj(filesystem, destination)
         packaged.chmod(0o755)
-        # The raw desktop download and tarball now carry the same full runtime.
-        shutil.copy2(packaged, output / "murmur")
-        shutil.copy2(appdir / "usr/bin/murmur-engine", output / "murmur-engine")
-        run("tar", "-C", str(output), "-czf", str(output / "murmur-linux-x86_64.tar.gz"),
-            "murmur", "murmur-engine")
+        package_portable(packaged, appdir / "usr/bin/murmur-engine", output)
         # Install the extracted runtime so Debian users need neither FUSE nor
         # extraction on every launch. Preserve Tauri's desktop integration.
         package_dir = work / "deb"
