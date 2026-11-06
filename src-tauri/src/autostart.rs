@@ -3,6 +3,7 @@ use anyhow::{bail, Context, Result};
 use std::{
     fs,
     io::Write,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -68,12 +69,29 @@ pub fn update(home: &Path, config: &Path, executable: &Path, enabled: bool) -> R
         let _ = fs::remove_file(&temporary);
         result.context("Write autostart entry")?;
     }
+    let active_directory = if enabled {
+        Some(fs::metadata(&directory).context("Read active autostart directory")?)
+    } else {
+        None
+    };
     // Older plugin versions wrote a capitalized filename under HOME/.config,
     // while the installer used lowercase and respected XDG_CONFIG_HOME.
     for root in [config.to_path_buf(), home.join(".config")] {
+        let candidate_directory = root.join("autostart");
+        // Paths can differ while naming the same directory through symlinks,
+        // '..' components, or bind mounts. Protect the active entry by identity.
+        let is_active_directory = if let Some(active) = &active_directory {
+            match fs::metadata(&candidate_directory) {
+                Ok(candidate) => candidate.dev() == active.dev() && candidate.ino() == active.ino(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error).context("Read legacy autostart directory"),
+            }
+        } else {
+            false
+        };
         for name in ["murmur.desktop", "Murmur.desktop"] {
-            let path = root.join("autostart").join(name);
-            if enabled && path == target {
+            let path = candidate_directory.join(name);
+            if is_active_directory && name == "murmur.desktop" {
                 continue;
             }
             match fs::remove_file(path) {
@@ -89,6 +107,63 @@ pub fn update(home: &Path, config: &Path, executable: &Path, enabled: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aliased_config_roots_preserve_enabled_registration() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random)?;
+        let root = std::env::temp_dir().join(format!(
+            "murmur-autostart-test-{:016x}",
+            u64::from_ne_bytes(random)
+        ));
+        for layout in ["home-symlink", "xdg-symlink", "dotdot", "distinct"] {
+            let base = root.join(layout);
+            let home = base.join("home");
+            fs::create_dir_all(&home)?;
+            let config = match layout {
+                "home-symlink" => {
+                    let config = base.join("config-store");
+                    fs::create_dir_all(&config)?;
+                    symlink(&config, home.join(".config"))?;
+                    config
+                }
+                "xdg-symlink" => {
+                    fs::create_dir_all(home.join(".config"))?;
+                    let config = base.join("config-alias");
+                    symlink(home.join(".config"), &config)?;
+                    config
+                }
+                "dotdot" => {
+                    fs::create_dir_all(home.join("intermediate"))?;
+                    home.join("intermediate/../.config")
+                }
+                _ => base.join("config-store"),
+            };
+            for directory in [config.join("autostart"), home.join(".config/autostart")] {
+                fs::create_dir_all(&directory)?;
+                fs::write(directory.join("murmur.desktop"), "old lowercase")?;
+                fs::write(directory.join("Murmur.desktop"), "old capitalized")?;
+            }
+            update(&home, &config, Path::new("/opt/murmur/AppRun"), true)?;
+            let entry = config.join("autostart/murmur.desktop");
+            assert!(
+                entry.is_file(),
+                "Cleanup removed the enabled entry: {layout}"
+            );
+            assert!(fs::read_to_string(&entry)?.contains(" --background"));
+            assert!(!config.join("autostart/Murmur.desktop").exists());
+            assert!(!home.join(".config/autostart/Murmur.desktop").exists());
+            if layout == "distinct" {
+                assert!(!home.join(".config/autostart/murmur.desktop").exists());
+            }
+            update(&home, &config, Path::new("/opt/murmur/AppRun"), false)?;
+            assert!(!entry.exists());
+            assert!(!home.join(".config/autostart/murmur.desktop").exists());
+        }
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn quotes_desktop_paths_and_rejects_control_characters() {
