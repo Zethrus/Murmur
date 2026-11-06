@@ -51,3 +51,7 @@ class ReleaseTests(unittest.TestCase):
     def test_unexpected_platform_blocks_release(self):
         (self.root / "companion.apk").write_bytes(b"unexpected")
         with self.assertRaises(ValueError): release.check_assets("v1.2.3", self.root)
+
+    def test_unbundled_desktop_blocks_release(self):
+        (self.root / "murmur").write_bytes(b"raw executable without runtime")
+        with self.assertRaises(ValueError): release.check_assets("v1.2.3", self.root)

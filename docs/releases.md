@@ -18,11 +18,12 @@ Do not reuse a published version or move its tag. Fixes need a new version.
 
 `release.yml` validates versions and creates a draft. Linux and Flipper builds
 upload directly to that draft, so publication does not depend on Actions artifact
-storage. Both builds must succeed.
+storage. Both builds must succeed. The Linux job bundles typing utilities and client
+libraries, then verifies the AppImage and Debian runtime before uploading.
 
 The final job downloads every asset and runs `scripts/check-release.py`. It
 requires the app, engine, portable archive, `.deb`, AppImage, and version-matched
-`.fap`. It checks that the archive contains the same executable pair with execute
+`.fap`. It checks that the archive contains the same AppImage and standalone engine with execute
 permissions, generates `SHA256SUMS`, verifies it, uploads it, and publishes the
 draft as the latest release. Unexpected or missing files block publication.
 

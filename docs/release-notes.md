@@ -1,29 +1,18 @@
-Murmur 0.4.1 prepares the Linux and Flipper release for public use.
+Murmur 0.4.2 bundles the Linux application runtime.
 
-Changes:
+- AppImage, Debian, and portable downloads include the typing tools and client libraries.
+- Python and the CPU speech engine are included. No separate Python, WebKitGTK, xdotool, or xprop installation is needed.
+- The standalone `murmur` download is now the full AppImage too.
+- Debian installs the extracted runtime, so it does not need FUSE.
+- Models download from Settings when you choose Install. CUDA remains optional and is not bundled.
 
-- Linux text injection now owns its helper process instead of trusting a stale PID file.
-- Temporary transcript files are private and removed after delivery.
-- Debian packages declare the typing and focused-window utilities they need.
-- Fork pull requests cannot execute the Flipper workflow on a configured self-hosted runner.
-- Releases stay in draft until Linux and Flipper downloads pass validation.
-- The README, install guides, platform schedule, and GPL version 3 license are included.
+Choose the AppImage for a portable download, or the `.deb` for Debian/Ubuntu.
+Make the AppImage executable and launch it. If FUSE is unavailable, add
+`--appimage-extract-and-run`. Verify downloads with `SHA256SUMS`.
 
-Linux x86_64 and the Flipper Zero companion are included in this release.
+A Linux x86_64 X11 desktop, glibc 2.39 or newer, working audio services and hardware
+drivers are still required. The build baseline is Ubuntu 24.04. Packages are unsigned.
 
-Download the `.deb`, AppImage, or portable `.tar.gz` for Linux. The portable archive
-contains both required executables. The matching `.fap` goes in `apps/Tools` on
-the Flipper's SD card. Check downloads against `SHA256SUMS` from this release.
-
-Linux downloads are built on Ubuntu 24.04 and require glibc 2.39 or newer.
-Build from source on older distributions. Use an X11 desktop with tray support,
-`xdotool`, and `xprop`. Open Settings from
-the tray, install a model in Engine, then select Use model. Hold Ctrl+Alt+D to
-dictate. Models and NVIDIA CUDA libraries are not bundled; CPU inference is the
-default path for these downloads. Packages are unsigned.
-
-The Android APK is deferred, with November 6, 2026 as the target. Windows builds
-are planned for later this week, tentatively November 6. Both depend on testing
-and are excluded from this release.
-
-See the README for installation and the roadmap for platform status.
+The matching Flipper Zero `.fap` is included. Android is planned for November 6.
+Windows is deferred until November 6 or 7, depending on testing. Neither is part
+of this Linux release.

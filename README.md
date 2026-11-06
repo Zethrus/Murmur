@@ -26,24 +26,23 @@ push-to-talk button and a screen for live text.
 ## What ships today
 
 **Linux x86_64 and the Flipper Zero companion.** Current prebuilt downloads use
-Ubuntu 24.04 as their build baseline and require **glibc 2.39 or newer**, plus the
-libraries listed below. On older distributions, build from source. Use an X11
+Ubuntu 24.04 as their build baseline and require **glibc 2.39 or newer**, a working Linux desktop, and hardware drivers. On older distributions, build from source. Use an X11
 desktop with a working microphone and system tray. Native Wayland input is not verified.
 
 | Download | Use it for |
 | --- | --- |
-| `.deb` | Debian/Ubuntu systems with compatible WebKitGTK 4.1 libraries |
-| `.AppImage` | Running without a package install; system graphics/audio libraries are still required |
+| `.deb` | Debian/Ubuntu installation with the application runtime included |
+| `.AppImage` | Recommended portable download, with runtime and typing tools included |
 | `murmur-linux-x86_64.tar.gz` | A portable directory containing the app and its engine |
 | `murmur-companion-vX.Y.Z.fap` | The Flipper Zero remote, matched to the desktop version |
 | `SHA256SUMS` | Checking that the downloaded files match the release |
 
 [Get the latest release](https://github.com/Zethrus/Murmur/releases/latest).
-The separate `murmur` and `murmur-engine` files are also available; keep them
-together. Most users should choose a package or the portable archive.
+The separate `murmur` download is the same AppImage. `murmur-engine` is also
+available for command-line integrations; the desktop already includes it.
 
 The Android APK is planned for **November 6, 2026**. Windows builds are deferred
-until later this week, tentatively **November 6**. These are targets, subject to
+until **November 6 or 7**. These are targets, subject to
 build and device testing. Neither platform is included in today's release.
 See [the roadmap](docs/roadmap.md).
 
@@ -55,10 +54,10 @@ Download a package and `SHA256SUMS` from the same release. In that directory:
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-For Debian/Ubuntu, install the downloaded `.deb` and the input utilities:
+For Debian/Ubuntu, install the downloaded `.deb`:
 
 ```sh
-sudo apt install ./Murmur_*_amd64.deb xdotool x11-utils
+sudo apt install ./Murmur_*_amd64.deb
 murmur
 ```
 
@@ -70,8 +69,8 @@ chmod +x Murmur_*_amd64.AppImage
 ```
 
 If FUSE is unavailable, try `./Murmur_*_amd64.AppImage --appimage-extract-and-run`.
-Install `xdotool` and `xprop` through your distribution's package manager. They
-handle typing, paste, and focused-window detection.
+`xdotool`, `xprop`, WebKitGTK, GTK, and the audio client libraries are bundled.
+No Python installation or separate typing utilities are needed.
 
 For the portable archive:
 
@@ -81,8 +80,9 @@ tar -xzf murmur-linux-x86_64.tar.gz -C murmur-portable
 ./murmur-portable/murmur
 ```
 
-The portable app needs WebKitGTK 4.1, GTK3, ALSA, X11, and AppIndicator support.
-It is not a static binary. On GNOME, enable a tray/AppIndicator extension if your
+The portable archive includes the same AppImage as `murmur`. If FUSE is
+unavailable, run `./murmur-portable/murmur --appimage-extract-and-run`.
+The host still provides glibc, the X11 desktop, audio services, and hardware drivers. On GNOME, enable a tray/AppIndicator extension if your
 shell does not show tray icons.
 
 1. Open **Settings** from the Murmur tray icon. Launching the app does not open a settings window.

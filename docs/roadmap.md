@@ -24,9 +24,9 @@ connection loss, background operation, and an APK installation on a real device.
 The signed APK and checksum will be attached to a release once those checks pass.
 See [the Android implementation plan](../companion/android-plan.md).
 
-## Later this week: Windows
+## November 6 or 7 target: Windows
 
-Windows builds are deferred, tentatively until November 6. Build scripts remain
+Windows builds are deferred until November 6 or 7, subject to testing. Build scripts remain
 in the repository for development. There is no supported Windows download in
 today's release.
 

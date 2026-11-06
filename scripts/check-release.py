@@ -48,6 +48,9 @@ def check_assets(tag, directory):
         p = directory / name
         if p.is_symlink() or not p.is_file() or p.stat().st_size == 0:
             raise ValueError(f"Missing, empty or unsafe asset: {name}")
+    with (directory / "murmur").open("rb") as desktop, (directory / f"Murmur_{version}_amd64.AppImage").open("rb") as image:
+        if hashlib.file_digest(desktop, "sha256").digest() != hashlib.file_digest(image, "sha256").digest():
+            raise ValueError("Standalone desktop must include the full AppImage runtime")
     with tarfile.open(directory / "murmur-linux-x86_64.tar.gz") as archive:
         members = archive.getmembers()
         if {m.name for m in members} != {"murmur", "murmur-engine"} or len(members) != 2:
