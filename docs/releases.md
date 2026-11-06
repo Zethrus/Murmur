@@ -34,10 +34,13 @@ requires the portable archive, `.deb`, AppImage, version-matched `.fap`, and
 The Linux build checks that the portable archive contains the same AppImage and
 bundled engine, both executable. The final job checks the archive layout,
 AppImage match, GPU evidence hashes, and 2 GiB per-asset limit. It generates and
-verifies `SHA256SUMS`, uploads it, and publishes the draft. Unexpected or missing
+verifies `SHA256SUMS`, uploads it, and leaves the release as a draft for testing. Unexpected or missing
 files block publication. Record three short deliveries for each terminal/editor
 and overlay on/off combination, with hotkey and companion triggers where
 available. Report the original X11 focus symptom separately if it recurs.
+
+After the workflow succeeds and manual checks pass, publish the validated draft
+from GitHub Releases, or run `gh release edit vMAJOR.MINOR.PATCH --draft=false --latest`.
 
 A failed build leaves a draft. Fix the failure and rerun the workflow while it is
 still a draft. A published release cannot be overwritten by the prepare job.
