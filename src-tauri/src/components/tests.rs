@@ -25,6 +25,10 @@ struct Fixture {
 fn now() -> u64 {
     NOW
 }
+/// After the test manifest's `expires_at` (2027-02-01).
+fn after_expiry() -> u64 {
+    1_802_000_000
+}
 
 fn sha(data: &[u8]) -> String {
     fetch::hex(&sha2::Sha256::digest(data))
@@ -89,6 +93,9 @@ impl Fixture {
         write_atomic(&files.signature, &signature).unwrap();
     }
     fn start(&self) -> Arc<Components> {
+        self.start_at(now)
+    }
+    fn start_at(&self, now: fn() -> u64) -> Arc<Components> {
         let free = self.free;
         let usage = self.usage.clone();
         let stops = self.stops.clone();
@@ -599,6 +606,232 @@ fn missing_trust_root_refuses_installs_but_runs() {
     assert_eq!(
         components.check_updates().unwrap_err().reason,
         Reason::TrustRootMissing
+    );
+    components.shutdown();
+}
+
+/// A directory where `active.json` belongs makes the final switch fail after a passing smoke
+/// test (the rename onto it fails), without relying on file permissions.
+fn block_activation(f: &Fixture, id: &str) -> PathBuf {
+    let blocker = f.data.join("components").join(id).join("active.json");
+    fs::create_dir_all(&blocker).unwrap();
+    blocker
+}
+
+#[test]
+fn failed_activation_restarts_the_stopped_engine() {
+    let f = Fixture::new("restart");
+    f.publish(vec![f.engine_zip("#!/bin/sh\nexit 0\n")]);
+    let components = f.start();
+    let blocker = block_activation(&f, "engine");
+    components.install(&["engine".into()]).unwrap();
+    let entry = wait(&components, "engine");
+    assert_eq!(entry["state"], "failed", "{entry}");
+    assert!(
+        f.stops.load(Ordering::Relaxed) >= 1,
+        "smoke test passed, engine stopped"
+    );
+    assert!(
+        f.changes.lock().unwrap().contains(&Kind::Engine),
+        "engine restart requested after the failed switch"
+    );
+    assert!(components.engine_dir().is_none());
+    fs::remove_dir_all(blocker).unwrap();
+    components.shutdown();
+}
+
+#[test]
+fn failed_activation_keeps_verified_downloads_for_retry() {
+    let f = Fixture::new("keep-downloads");
+    f.publish(vec![f.model("speech-tiny.en", &MODEL_FILES)]);
+    let components = f.start();
+    let blocker = block_activation(&f, "speech-tiny.en");
+    components.install(&["speech-tiny.en".into()]).unwrap();
+    assert_eq!(wait(&components, "speech-tiny.en")["state"], "failed");
+    let fetched = f.server.requests.lock().unwrap().len();
+    assert_eq!(fetched, MODEL_FILES.len());
+    let kept = f.data.join("components/downloads/speech-tiny.en-1.0.0");
+    for (name, body) in MODEL_FILES {
+        assert_eq!(fs::read(kept.join(name)).unwrap(), body, "{name} kept");
+    }
+    // Retry after the cause is fixed: hashed again, no network fetch.
+    fs::remove_dir_all(blocker).unwrap();
+    components.resume("speech-tiny.en").unwrap();
+    assert_eq!(wait(&components, "speech-tiny.en")["state"], "installed");
+    assert_eq!(f.server.requests.lock().unwrap().len(), fetched);
+    assert!(!kept.exists(), "downloads are cleaned up after activation");
+    // A file changed while it waited (same size, so only the hash can tell) is not reused.
+    components.remove("speech-tiny.en").unwrap();
+    let blocker = block_activation(&f, "speech-tiny.en");
+    components.install(&["speech-tiny.en".into()]).unwrap();
+    assert_eq!(wait(&components, "speech-tiny.en")["state"], "failed");
+    fs::write(kept.join("model.bin"), b"WEIGHTS").unwrap();
+    fs::remove_dir_all(blocker).unwrap();
+    components.resume("speech-tiny.en").unwrap();
+    let entry = wait(&components, "speech-tiny.en");
+    assert_eq!(entry["job"]["reason"], "checksum_mismatch", "{entry}");
+    components.shutdown();
+}
+
+#[test]
+fn unsafe_ids_never_reach_store_paths() {
+    let f = Fixture::new("ids");
+    let mut cuda = component("cuda", "cuda");
+    cuda["depends"] = json!(["engine"]);
+    f.publish(vec![f.engine_zip("#!/bin/sh\nexit 0\n"), cuda]);
+    let components = f.start();
+    components.install(&["engine".into()]).unwrap();
+    assert_eq!(wait(&components, "engine")["state"], "active");
+    fs::create_dir_all(f.data.join("components/cuda/1.0.0")).unwrap();
+    components
+        .store
+        .write_active(
+            "cuda",
+            &store::Active {
+                version: "1.0.0".into(),
+                kind: Kind::Cuda,
+                model: None,
+                location: None,
+                migrated: false,
+                installed_at: 0,
+            },
+        )
+        .unwrap();
+    // `<root>/engine/1.0.0/..` would be the engine's own folder: bypassing the dependency
+    // check and deleting the engine under the CUDA add-on.
+    let id = "engine/1.0.0/..";
+    assert_eq!(components.remove(id).unwrap_err().reason, Reason::NotFound);
+    assert!(components.verify(id).is_err());
+    assert!(components.stop(id, false).is_err());
+    assert!(components.resume(id).is_err());
+    assert!(components.discard(id).is_err());
+    assert!(components.install(&[id.into()]).is_err());
+    assert!(components.store.component_dir(id).is_err());
+    assert!(components.store.remove(id).is_err());
+    assert!(components.engine_dir().is_some(), "engine untouched");
+    assert_eq!(
+        f.stops.load(Ordering::Relaxed),
+        1,
+        "only the install stopped it"
+    );
+    components.shutdown();
+}
+
+#[test]
+fn expired_manifest_keeps_a_stale_catalog() {
+    let f = Fixture::new("stale");
+    let mut cuda = component("cuda", "cuda");
+    cuda["depends"] = json!(["engine"]);
+    cuda["display_name"] = json!("GPU add-on");
+    f.publish(vec![
+        f.engine_zip("#!/bin/sh\nexit 0\n"),
+        cuda,
+        f.model("speech-tiny.en", &MODEL_FILES),
+    ]);
+    let components = f.start();
+    assert_eq!(components.snapshot()["stale"], false);
+    components.install(&["engine".into()]).unwrap();
+    assert_eq!(wait(&components, "engine")["state"], "active");
+    components.shutdown();
+    // A paused job from before, then the manifest expires while Murmur is offline.
+    let record = Record {
+        id: "speech-tiny.en".into(),
+        version: "1.0.0".into(),
+        phase: Phase::Paused,
+        bytes_done: 0,
+        bytes_total: 17,
+        error: None,
+        reason: None,
+        replace: true,
+    };
+    jobs::save(
+        &f.data.join("components/jobs.json"),
+        &BTreeMap::from([(record.id.clone(), record)]),
+    )
+    .unwrap();
+    fs::create_dir_all(f.data.join("components/cuda/1.0.0")).unwrap();
+    let components = f.start_at(after_expiry);
+    let snapshot = components.snapshot();
+    assert_eq!(snapshot["stale"], true);
+    assert_eq!(snapshot["manifest"]["stale"], true);
+    assert_eq!(snapshot["trust"]["ok"], true);
+    let listed: Vec<&str> = snapshot["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, ["engine", "cuda", "speech-tiny.en"], "still listed");
+    let requests = f.server.requests.lock().unwrap().len();
+    // Nothing new is fetched or activated ...
+    assert_eq!(
+        components
+            .install(&["speech-tiny.en".into()])
+            .unwrap_err()
+            .reason,
+        Reason::Expired
+    );
+    assert_eq!(
+        components.resume("speech-tiny.en").unwrap_err().reason,
+        Reason::Expired
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(f.server.requests.lock().unwrap().len(), requests);
+    // ... while verify, the manifest's dependency rules and remove keep working.
+    assert_eq!(components.verify("engine").unwrap(), Verdict::Verified);
+    components
+        .store
+        .write_active(
+            "cuda",
+            &store::Active {
+                version: "1.0.0".into(),
+                kind: Kind::Cuda,
+                model: None,
+                location: None,
+                migrated: false,
+                installed_at: 0,
+            },
+        )
+        .unwrap();
+    let error = components.remove("engine").unwrap_err();
+    assert!(error.message.contains("GPU add-on"), "{error:?}");
+    components.remove("cuda").unwrap();
+    components.discard("speech-tiny.en").unwrap();
+    components.remove("engine").unwrap();
+    assert!(components.engine_dir().is_none());
+    components.shutdown();
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_removal_restarts_the_stopped_engine() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("remove-restart");
+    f.publish(vec![f.engine_zip("#!/bin/sh\nexit 0\n")]);
+    let components = f.start();
+    components.install(&["engine".into()]).unwrap();
+    assert_eq!(wait(&components, "engine")["state"], "active");
+    f.changes.lock().unwrap().clear();
+    // A read-only store root: the engine folder cannot be deleted.
+    let root = f.data.join("components");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = components.remove("engine");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    if result.is_ok() {
+        // Running as root: permissions are not enforced, nothing to observe.
+        components.shutdown();
+        return;
+    }
+    assert_eq!(result.unwrap_err().reason, Reason::Io);
+    assert_eq!(
+        f.stops.load(Ordering::Relaxed),
+        2,
+        "install and removal stopped it"
+    );
+    assert_eq!(
+        f.changes.lock().unwrap().as_slice(),
+        [Kind::Engine],
+        "restart requested after the failed removal"
     );
     components.shutdown();
 }
