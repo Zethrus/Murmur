@@ -95,14 +95,32 @@ gpg --armor --export-secret-subkeys "$SUB"! > murmur-signing-subkey.asc
 Replace the `MURMUR_SIGNING_SUBKEY` secret, commit the new certificate to
 `src-tauri/trust/` and attach it to the next release as `murmur-release.asc`.
 Installed apps accept the newer certificate because the same primary certifies it
-and it is strictly newer. Optionally revoke the old subkey
-(`gpg --quick-revoke-sig` / `gpg --edit-key … revkey`) with reason "superseded".
+and it is strictly newer. Optionally revoke the old subkey with reason
+"superseded" (`--quick-revoke-sig` revokes *signatures*, not subkeys; do not use
+it here):
+
+```sh
+gpg --edit-key "$FPR"      # on the offline machine
+gpg> key N                 # N = position of the old subkey in the listing
+gpg> revkey                # pick reason 3 "Key is superseded" (2 for compromised)
+gpg> save
+gpg --armor --export "$FPR" > murmur-release.asc
+```
+
+or with Sequoia, `sq key subkey revoke` (flags differ between `sq` versions; see
+its `--help`), then export the certificate.
 
 ## Compromise and revocation
 
 - **Subkey compromised**: revoke it with reason "key compromised" on the
-  offline machine, create a new subkey as above, publish the updated certificate
-  with the next manifest. Apps reject every signature from a revoked subkey.
+  offline machine (`revkey` above, reason 2), create a new subkey as above,
+  publish the updated certificate with the next manifest. Apps reject every
+  signature from a revoked subkey, including on manifests they already cached.
+  If no new subkey is ready yet, publish the revocation-only certificate anyway:
+  apps store any acceptable, strictly newer certificate as soon as they fetch it,
+  even when the manifest next to it no longer verifies, so the revocation takes
+  effect at once. An app never replaces a stored certificate with an older one,
+  so an attacker cannot undo the revocation by serving the previous certificate.
 - **Primary compromised or lost**: publish the revocation certificate as
   `murmur-release.asc` with a new release. Apps that fetch it refuse all
   component installs permanently and tell the user to update Murmur. A new

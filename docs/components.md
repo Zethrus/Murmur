@@ -44,14 +44,22 @@ detached signature over the exact manifest bytes.
   from a *subkey* that is bound with a valid binding signature and back-signature,
   is not revoked, and was valid when the manifest was issued (`issued_at`).
 - **Certificate updates** (`murmur-release.asc` fetched next to the manifest)
-  are accepted only for the same primary fingerprint, only if strictly newer
-  (newest self-signature), with an unrevoked primary and a usable signing subkey
-  at `issued_at`. Updates are merged, never replacing the pinned certificate's
-  revocations. The accepted update is stored in `components/trust/`.
+  are judged against the certificate in force (the pinned root merged with the
+  stored update) and accepted only for the same primary fingerprint, only if
+  strictly newer (newest self-signature) and valid under the policy, with an
+  unrevoked primary. They do **not** need a usable signing subkey: an update that
+  only revokes the sole subkey must take effect; whether a subkey may sign a given
+  manifest is decided at verification (bound, alive and unrevoked at its
+  `issued_at`). Updates are merged, so signatures (revocations included) are only
+  ever added. The merged certificate is stored in `components/trust/` as soon as
+  it is accepted, even if the manifest fetched with it is refused, and a stored
+  certificate is never replaced by one that is not strictly newer — an older
+  certificate cannot undo a subkey revocation.
 - **Revoked primary**: installs are refused permanently with a message to
   update Murmur; the refusal is recorded in `state.json`.
-- Manifest, signature and certificate are fetched together. Any failure means
-  nothing from that fetch is used or stored.
+- Manifest, signature and certificate are fetched together. The manifest is
+  trusted all or nothing: any failure means no manifest from that fetch is used
+  or stored (only an acceptable certificate update is kept, as above).
 
 ### Development trust roots
 
@@ -104,9 +112,20 @@ set, and then log a warning on every start. Tests, CI and
 the manifest seen with it, plus the newest `issued_at` seen:
 
 - lower serial → refused; same serial with different bytes → refused;
-- `expires_at` in the past → refused ("Check for updates");
 - system clock earlier than the newest `issued_at` seen (or than the manifest's
-  own `issued_at`) → refused with **"Clock error likely"**.
+  own `issued_at`) → refused with **"Clock error likely"**. The manifest built
+  into the binary is allowed 24 hours of slack here, so a computer whose clock is
+  slightly behind does not report a clock error on first run; fetched and cached
+  manifests keep the strict rule;
+- `expires_at` in the past (checked after the rules above) → the manifest is kept
+  as a **stale** catalog: components stay listed, dependency rules still apply,
+  Verify and Remove work, but nothing is downloaded or activated (Install,
+  Update, Resume and Retry are refused) until Check for updates fetches a fresh
+  list. The UI shows "Component list expired — Check for updates"; first-run
+  setup still opens but its install button is disabled with the same
+  explanation. Embedded manifests expire 180 days after the build, so every
+  release binary reaches this state offline eventually. The status payload
+  carries `stale`.
 
 Release builds embed a signed manifest so the setup shows real sizes offline; it
 is verified on every load like a downloaded one. The higher serial of the
@@ -139,7 +158,9 @@ could already replace Murmur itself.
 ## Archives (`archive.rs`)
 
 Zip only (deflate or LZMA; zip64 allowed). Refused: absolute paths, `..`,
-backslashes, drive letters, `:` (alternate data streams), symlinks, device and
+backslashes, drive letters, any `:` in a name (to rule out alternate data
+streams; this also refuses names that are legitimate on Unix, which component
+archives never need), symlinks, device and
 other special entries, duplicate or case-colliding names, a file used as a
 directory, Windows reserved names (`CON`, `PRN`, `AUX`, `NUL`, `COM1–9`,
 `LPT1–9`), names ending in a dot or space, paths over 240 characters, more than
@@ -177,8 +198,19 @@ files (GGUF magic for Enhance). A failed smoke test leaves the previous version
 active and untouched. The previous version is deleted only after the new one is
 active, and only for updates. Before the engine or CUDA add-on is switched or
 removed, the engine process is stopped; afterwards it is restarted, so a newly
-installed engine works without restarting Murmur. On Windows, renames retry with
-backoff on sharing violations (not tested on Windows yet).
+installed engine works without restarting Murmur. If anything fails after the
+engine was stopped (activation, removal), the engine is restarted with the files
+still in place instead of staying held. A file component's verified downloads
+are moved into staging and moved back to `downloads/` when the smoke test,
+activation or a pause fails, so Retry does not download them again (they are
+hashed again first). On Windows, renames retry with backoff on sharing
+violations (not tested on Windows yet).
+
+Component ids and versions become paths, so every entry point checks them
+(`safe_id`, `safe_version`) and `Store::component_dir` refuses unsafe ones too.
+`active.json` is unsigned: a record whose `version` is unsafe, or whose
+`location` (a migrated model verified in place) is not an absolute path inside
+the component's folder or a pre-0.5 model folder, is treated as absent.
 
 Removal is refused, with the reason shown, when another installed component
 depends on it (the CUDA add-on needs the engine), when it is the selected speech
@@ -226,6 +258,9 @@ packaged `../lib/murmur/engine` (source installs). CUDA: active `cuda` component
 `murmur --install-component <zip|model folder> --manifest <json>
 --manifest-sig <sig> [--trust-root <asc>]` installs from local files through the
 same verification (used by `scripts/test-linux-*.py` and
-`scripts/test-clean-install.sh`).
+`scripts/test-clean-install.sh`). It is a test and packaging tool: it runs
+without the app, passes no `before_activate` hook and does not stop a running
+engine, so reinstalling the active engine version there moves its folder aside
+while it may still run. The app always stops the engine before switching.
 
 [Back to the README](../README.md)
