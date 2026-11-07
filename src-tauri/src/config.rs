@@ -140,6 +140,10 @@ impl CompanionButtons {
         ]
     }
 }
+// First-run component setup. `postponed` = the user chose "Set up later" (or closed it).
+section!(Setup {
+    postponed: bool = false
+});
 section!(Config {
     general: General = General::default(),
     overlay: Overlay = Overlay::default(),
@@ -150,7 +154,8 @@ section!(Config {
     postproc: Postproc = Postproc::default(),
     privacy: Privacy = Privacy::default(),
     enhance: Enhance = Enhance::default(),
-    companion: Companion = Companion::default()
+    companion: Companion = Companion::default(),
+    setup: Setup = Setup::default()
 });
 
 fn merge(target: &mut toml::Value, patch: toml::Value) {

@@ -20,7 +20,19 @@ struct Request {
 }
 enum Message {
     Request(Request),
+    /// Stop the process and do not respawn until `Restart` (component files are changing).
+    Stop(mpsc::Sender<()>),
+    /// Forget earlier failures and a missing engine; spawn again with the current files.
+    Restart,
     Quit,
+}
+
+/// Component-store lookups the engine needs (implemented by `components::Components`).
+pub trait Locate: Send + Sync {
+    fn engine_dir(&self) -> Option<PathBuf>;
+    fn cuda_dir(&self) -> Option<PathBuf>;
+    /// Verified directory of a speech model; None when absent or unverified.
+    fn model_dir(&self, model: &str) -> Option<PathBuf>;
 }
 struct Process {
     child: Child,
@@ -30,8 +42,8 @@ struct Process {
     next_id: u64,
 }
 impl Process {
-    fn spawn(models: &Path) -> Result<Self> {
-        let mut command = sidecar_command()?;
+    fn spawn(models: &Path, locate: &dyn Locate) -> Result<Self> {
+        let mut command = sidecar_command(locate)?;
         command
             .args(["--models-dir"])
             .arg(models)
@@ -204,12 +216,13 @@ const ENGINE_FILE: &str = if cfg!(windows) {
     "murmur-engine"
 };
 
-/// No usable engine executable. Not retried: restarting cannot make it appear.
+/// No usable engine executable. Not retried until a component install restarts the engine.
 #[derive(Debug)]
 struct EngineMissing(Option<PathBuf>);
+pub const MISSING_MESSAGE: &str = "Speech engine not installed — open Settings";
 impl std::fmt::Display for EngineMissing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Speech engine is not installed")?;
+        f.write_str(MISSING_MESSAGE)?;
         match &self.0 {
             Some(path) => write!(f, " ({ENGINE_ENV}={} has no {ENGINE_FILE})", path.display()),
             None => Ok(()),
@@ -237,12 +250,14 @@ fn packaged_engine(executable_dir: &Path) -> PathBuf {
     }
 }
 
-/// Resolution order: `MURMUR_ENGINE`, then the development venv (debug builds),
-/// then the packaged onedir engine.
+/// Resolution order: `MURMUR_ENGINE`, then the development venv (debug builds), then the
+/// active engine component (`<data>/components/engine/<version>`), then a packaged onedir
+/// engine (source installs; release packages no longer ship one).
 fn resolve_engine(
     override_path: Option<PathBuf>,
     executable_dir: &Path,
     development: bool,
+    store: Option<PathBuf>,
 ) -> std::result::Result<EngineSource, EngineMissing> {
     if let Some(path) = override_path.filter(|path| !path.as_os_str().is_empty()) {
         let candidate = if path.is_dir() {
@@ -258,6 +273,9 @@ fn resolve_engine(
     }
     if development {
         return Ok(EngineSource::Development);
+    }
+    if let Some(engine) = store.map(|dir| dir.join(ENGINE_FILE)).filter(|p| p.is_file()) {
+        return Ok(EngineSource::Executable(engine));
     }
     let packaged = packaged_engine(executable_dir);
     if packaged.is_file() {
@@ -280,28 +298,37 @@ fn development_command() -> Command {
     }
 }
 
-fn sidecar_command() -> Result<Command> {
+fn sidecar_command(locate: &dyn Locate) -> Result<Command> {
     let executable = std::env::current_exe().context("Locate Murmur executable")?;
     let parent = executable.parent().context("Executable has no parent")?;
     let override_path = std::env::var_os(ENGINE_ENV).map(PathBuf::from);
-    match resolve_engine(override_path, parent, cfg!(debug_assertions))? {
+    match resolve_engine(override_path, parent, cfg!(debug_assertions), locate.engine_dir())? {
         EngineSource::Development => Ok(development_command()),
         EngineSource::Executable(path) => {
             let mut command = Command::new(path);
             #[cfg(target_os = "linux")]
-            configure_linux_cuda(&mut command, parent)?;
+            configure_linux_cuda(&mut command, parent, locate.cuda_dir())?;
+            // The Windows engine adds this directory with os.add_dll_directory.
+            #[cfg(windows)]
+            if let Some(cuda) = locate.cuda_dir() {
+                command.env("MURMUR_CUDA_DIR", cuda);
+            }
             Ok(command)
         }
     }
 }
 
+/// CUDA libraries: the active GPU add-on component, else a packaged `lib/murmur/cuda`.
 #[cfg(target_os = "linux")]
-fn configure_linux_cuda(command: &mut Command, executable_dir: &Path) -> Result<()> {
+fn configure_linux_cuda(command: &mut Command, executable_dir: &Path, store: Option<PathBuf>) -> Result<()> {
     use std::{collections::HashSet, env, ffi::OsString};
-    let cuda = executable_dir
-        .parent()
-        .context("Executable has no runtime parent")?
-        .join("lib/murmur/cuda");
+    let cuda = match store.filter(|dir| dir.is_dir()) {
+        Some(dir) => dir,
+        None => executable_dir
+            .parent()
+            .context("Executable has no runtime parent")?
+            .join("lib/murmur/cuda"),
+    };
     if !cuda.is_dir() {
         return Ok(());
     }
@@ -340,7 +367,7 @@ mod cuda_launch_tests {
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&cuda).unwrap();
         let mut command = Command::new(bin.join("murmur-engine"));
-        configure_linux_cuda(&mut command, &bin).unwrap();
+        configure_linux_cuda(&mut command, &bin, None).unwrap();
         let value = command
             .get_envs()
             .find(|(name, _)| *name == "LD_LIBRARY_PATH")
@@ -354,10 +381,28 @@ mod cuda_launch_tests {
     fn absent_cuda_keeps_cpu_launch() {
         let root = root();
         let mut command = Command::new("murmur-engine");
-        configure_linux_cuda(&mut command, &root).unwrap();
+        configure_linux_cuda(&mut command, &root, None).unwrap();
         assert!(command
             .get_envs()
             .all(|(name, _)| name != "LD_LIBRARY_PATH"));
+    }
+
+    #[test]
+    fn cuda_component_wins_over_packaged_runtime() {
+        let root = root().with_extension("component");
+        let bin = root.join("usr/bin");
+        let packaged = root.join("usr/lib/murmur/cuda");
+        let component = root.join("data/components/cuda/0.5.0");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&packaged).unwrap();
+        fs::create_dir_all(&component).unwrap();
+        let mut command = Command::new(bin.join("murmur-engine"));
+        configure_linux_cuda(&mut command, &bin, Some(component.clone())).unwrap();
+        let value = command.get_envs().find(|(n, _)| *n == "LD_LIBRARY_PATH").and_then(|(_, v)| v).unwrap();
+        let paths: Vec<_> = std::env::split_paths(value).collect();
+        assert_eq!(paths[0], component);
+        assert!(!paths.contains(&packaged), "only one CUDA runtime on the loader path");
+        fs::remove_dir_all(root).unwrap();
     }
 }
 #[cfg(test)]
@@ -402,7 +447,7 @@ mod resolution_tests {
         fs::write(&custom, b"engine").unwrap();
         for development in [true, false] {
             assert_eq!(
-                resolve_engine(Some(custom.clone()), &layout.bin(), development).unwrap(),
+                resolve_engine(Some(custom.clone()), &layout.bin(), development, None).unwrap(),
                 EngineSource::Executable(custom.clone())
             );
         }
@@ -415,7 +460,7 @@ mod resolution_tests {
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join(ENGINE_FILE), b"engine").unwrap();
         assert_eq!(
-            resolve_engine(Some(directory.clone()), &layout.bin(), false).unwrap(),
+            resolve_engine(Some(directory.clone()), &layout.bin(), false, None).unwrap(),
             EngineSource::Executable(directory.join(ENGINE_FILE))
         );
     }
@@ -425,10 +470,8 @@ mod resolution_tests {
         let layout = Layout::new("override-missing");
         layout.install_packaged();
         let missing = layout.0.join("nowhere");
-        let error = resolve_engine(Some(missing.clone()), &layout.bin(), false).unwrap_err();
-        assert!(error
-            .to_string()
-            .starts_with("Speech engine is not installed"));
+        let error = resolve_engine(Some(missing.clone()), &layout.bin(), false, None).unwrap_err();
+        assert!(error.to_string().starts_with(super::MISSING_MESSAGE));
         assert!(error.to_string().contains(&missing.display().to_string()));
     }
 
@@ -436,7 +479,7 @@ mod resolution_tests {
     fn empty_override_is_ignored() {
         let layout = Layout::new("override-empty");
         assert_eq!(
-            resolve_engine(Some(PathBuf::new()), &layout.bin(), true).unwrap(),
+            resolve_engine(Some(PathBuf::new()), &layout.bin(), true, None).unwrap(),
             EngineSource::Development
         );
     }
@@ -446,7 +489,7 @@ mod resolution_tests {
         let layout = Layout::new("development");
         layout.install_packaged();
         assert_eq!(
-            resolve_engine(None, &layout.bin(), true).unwrap(),
+            resolve_engine(None, &layout.bin(), true, None).unwrap(),
             EngineSource::Development
         );
     }
@@ -461,7 +504,7 @@ mod resolution_tests {
             assert!(engine.ends_with("usr/bin/../lib/murmur/engine/murmur-engine"));
         }
         assert_eq!(
-            resolve_engine(None, &layout.bin(), false).unwrap(),
+            resolve_engine(None, &layout.bin(), false, None).unwrap(),
             EngineSource::Executable(engine)
         );
     }
@@ -469,21 +512,35 @@ mod resolution_tests {
     #[test]
     fn missing_engine_is_classified_as_permanent() {
         let absent = anyhow::Error::new(EngineMissing(None));
-        assert_eq!(
-            missing_engine(&absent).as_deref(),
-            Some("Speech engine is not installed")
-        );
+        assert_eq!(missing_engine(&absent).as_deref(), Some(super::MISSING_MESSAGE));
         assert_eq!(missing_engine(&anyhow::anyhow!("spawn failed")), None);
     }
 
     #[test]
     fn release_without_engine_reports_missing() {
         let layout = Layout::new("absent");
-        let error = resolve_engine(None, &layout.bin(), false).unwrap_err();
-        assert_eq!(error.to_string(), "Speech engine is not installed");
+        let error = resolve_engine(None, &layout.bin(), false, None).unwrap_err();
+        assert_eq!(error.to_string(), "Speech engine not installed — open Settings");
+    }
+
+    #[test]
+    fn component_engine_wins_over_packaged_but_not_override_or_venv() {
+        let layout = Layout::new("component");
+        let packaged = layout.install_packaged();
+        let store = layout.0.join("data/components/engine/0.5.0");
+        fs::create_dir_all(&store).unwrap();
+        // An engine directory without the executable is ignored.
+        assert_eq!(resolve_engine(None, &layout.bin(), false, Some(store.clone())).unwrap(), EngineSource::Executable(packaged));
+        fs::write(store.join(ENGINE_FILE), b"engine").unwrap();
+        assert_eq!(resolve_engine(None, &layout.bin(), false, Some(store.clone())).unwrap(), EngineSource::Executable(store.join(ENGINE_FILE)));
+        assert_eq!(resolve_engine(None, &layout.bin(), true, Some(store.clone())).unwrap(), EngineSource::Development);
+        let custom = layout.0.join("custom-engine");
+        fs::write(&custom, b"engine").unwrap();
+        assert_eq!(resolve_engine(Some(custom.clone()), &layout.bin(), false, Some(store)).unwrap(), EngineSource::Executable(custom));
     }
 }
 pub struct Engine {
+    locate: Arc<dyn Locate>,
     sender: mpsc::Sender<Message>,
     job: Mutex<Option<JoinHandle<()>>>,
     alive: Arc<AtomicBool>,
@@ -491,8 +548,9 @@ pub struct Engine {
     failure: Arc<Mutex<Option<String>>>,
 }
 impl Engine {
-    pub fn new(models: PathBuf, app: AppHandle) -> Result<Self> {
+    pub fn new(models: PathBuf, app: AppHandle, locate: Arc<dyn Locate>) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
+        let lookup = locate.clone();
         let alive = Arc::new(AtomicBool::new(false));
         let live = alive.clone();
         let stopping = Arc::new(AtomicBool::new(false));
@@ -504,14 +562,17 @@ impl Engine {
             .spawn(move || {
                 let mut process: Option<Process> = None;
                 let mut failures = 0;
-                // Set when no engine executable exists; spawning again cannot help.
+                // Set when no engine executable exists; cleared when a component install
+                // restarts the engine.
                 let mut missing: Option<String> = None;
+                // Engine files are being replaced: do not spawn until Restart.
+                let mut held = false;
                 loop {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
-                    if process.is_none() && failures < 2 && missing.is_none() {
-                        match Process::spawn(&models) {
+                    if process.is_none() && failures < 2 && missing.is_none() && !held {
+                        match Process::spawn(&models, lookup.as_ref()) {
                             Ok(p) => {
                                 process = Some(p);
                                 live.store(true, Ordering::Release);
@@ -533,9 +594,30 @@ impl Engine {
                     }
                     match receiver.recv_timeout(Duration::from_millis(200)) {
                         Ok(Message::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Ok(Message::Stop(done)) => {
+                            held = true;
+                            if let Some(mut p) = process.take() {
+                                shutdown_process(&mut p, &app);
+                            }
+                            live.store(false, Ordering::Release);
+                            let _ = done.send(());
+                        }
+                        Ok(Message::Restart) => {
+                            held = false;
+                            failures = 0;
+                            missing = None;
+                            if let Some(mut p) = process.take() {
+                                shutdown_process(&mut p, &app);
+                            }
+                            live.store(false, Ordering::Release);
+                            if let Ok(mut error) = errors.lock() {
+                                *error = None;
+                            }
+                        }
                         Ok(Message::Request(request)) => {
                             let result = match process.as_mut() {
                                 Some(p) => p.call(&request, &app, &stop),
+                                None if held => Err(anyhow::anyhow!("The speech engine is being updated")),
                                 None => {
                                     Err(anyhow::anyhow!(missing.clone().unwrap_or_else(|| {
                                         "Engine unavailable after two failures; restart Murmur"
@@ -565,23 +647,14 @@ impl Engine {
                     }
                 }
                 if let Some(p) = &mut process {
-                    let (reply, _) = mpsc::channel();
-                    let _ = p.call(
-                        &Request {
-                            method: "shutdown".into(),
-                            params: json!({}),
-                            timeout: Duration::from_secs(2),
-                            reply,
-                        },
-                        &app,
-                        &AtomicBool::new(false),
-                    );
+                    shutdown_process(p, &app);
                 }
                 drop(process);
                 live.store(false, Ordering::Release);
             })
             .context("Start engine supervisor")?;
         Ok(Self {
+            locate,
             sender,
             job: Mutex::new(Some(job)),
             alive,
@@ -589,10 +662,22 @@ impl Engine {
             failure,
         })
     }
-    pub fn request(&self, method: &str, params: Value) -> Result<Value> {
+    /// Stop the engine and keep it stopped until `restart` (blocking, bounded).
+    pub fn stop_and_wait(&self) {
+        let (done, wait) = mpsc::channel();
+        if self.sender.send(Message::Stop(done)).is_ok() {
+            let _ = wait.recv_timeout(Duration::from_secs(20));
+        }
+    }
+    /// Spawn again with the current files: the reset path after a component change.
+    pub fn restart(&self) {
+        let _ = self.sender.send(Message::Restart);
+    }
+    pub fn request(&self, method: &str, mut params: Value) -> Result<Value> {
         if self.stopping.load(Ordering::Acquire) {
             bail!("Engine is shutting down");
         }
+        attach_model_path(self.locate.as_ref(), method, &mut params);
         let timeout = Duration::from_secs(if method == "models.install" {
             1800
         } else {
@@ -632,6 +717,57 @@ impl Engine {
                 let _ = job.join();
             }
         }
+    }
+}
+/// Requests that name a model carry the verified directory (or null) from the store.
+fn attach_model_path(locate: &dyn Locate, method: &str, params: &mut Value) {
+    if !matches!(method, "status" | "warm" | "transcribe" | "partial") {
+        return;
+    }
+    if let Some(model) = params.get("model").and_then(Value::as_str).map(str::to_owned) {
+        params["model_path"] = match locate.model_dir(&model) {
+            Some(dir) => json!(dir.to_string_lossy()),
+            None => Value::Null,
+        };
+    }
+}
+fn shutdown_process(process: &mut Process, app: &AppHandle) {
+    let (reply, _) = mpsc::channel();
+    let _ = process.call(
+        &Request {
+            method: "shutdown".into(),
+            params: json!({}),
+            timeout: Duration::from_secs(2),
+            reply,
+        },
+        app,
+        &AtomicBool::new(false),
+    );
+}
+#[cfg(test)]
+mod model_path_tests {
+    use super::{attach_model_path, Locate};
+    use serde_json::json;
+    use std::path::PathBuf;
+    struct Fixed;
+    impl Locate for Fixed {
+        fn engine_dir(&self) -> Option<PathBuf> { None }
+        fn cuda_dir(&self) -> Option<PathBuf> { None }
+        fn model_dir(&self, model: &str) -> Option<PathBuf> {
+            (model == "tiny.en").then(|| PathBuf::from("/data/components/speech-tiny.en/abc"))
+        }
+    }
+    #[test]
+    fn model_requests_carry_verified_path_or_null() {
+        let mut params = json!({"model": "tiny.en"});
+        attach_model_path(&Fixed, "transcribe", &mut params);
+        assert_eq!(params["model_path"], "/data/components/speech-tiny.en/abc");
+        let mut params = json!({"model": "base.en"});
+        attach_model_path(&Fixed, "warm", &mut params);
+        assert!(params["model_path"].is_null(), "unverified or absent: never a guessed path");
+        let mut params = json!({"name": "tiny.en"});
+        attach_model_path(&Fixed, "models.list", &mut params);
+        assert!(params.get("model_path").is_none());
     }
 }
 fn missing_engine(error: &anyhow::Error) -> Option<String> {

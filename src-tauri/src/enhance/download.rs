@@ -41,28 +41,9 @@ pub trait Transport: Send + Sync {
     ) -> Result<(Option<u64>, Box<dyn Read + Send>), EnhanceError>;
 }
 
-/// Hosts the model download may reach: the catalog host and Hugging Face's download CDNs.
-pub fn allowed_host(host: &str) -> bool {
-    matches!(
-        host.to_ascii_lowercase().as_str(),
-        "huggingface.co"
-            | "cdn-lfs.huggingface.co"
-            | "cdn-lfs-us-1.hf.co"
-            | "cas-bridge.xethub.hf.co"
-            | "cas-server.xethub.hf.co"
-    )
-}
-
+/// The component manager's allowlist (exact hosts, HTTPS on 443, no IP literals or user info).
 pub fn allowed_url(url: &reqwest::Url) -> bool {
-    #[cfg(test)]
-    if url.scheme() == "http" && url.host_str() == Some("127.0.0.1") {
-        return true;
-    }
-    url.scheme() == "https"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.host_str().is_some_and(allowed_host)
-        && url.port().is_none_or(|p| p == 443)
+    crate::components::fetch::allowed_url(url)
 }
 
 pub struct Https {

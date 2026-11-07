@@ -77,10 +77,10 @@ pub(super) fn accept_with(
 }
 
 impl Runtime {
-    pub fn new(app: &AppHandle, root: PathBuf, config: &Config) -> Result<Self> {
+    pub fn new(app: &AppHandle, root: PathBuf, config: &Config, store: Arc<dyn super::ModelStore>) -> Result<Self> {
         let emitter = app.clone();
         let worker_app = app.clone();
-        let service = Enhance::new(
+        let service = Enhance::with_store(
             root,
             &config.enhance.model,
             config.enhance.threads,
@@ -93,6 +93,7 @@ impl Runtime {
                     state.enhance.on_worker(&state, event);
                 }
             }),
+            store,
         )?;
         let (delivery_owner, receiver) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
         std::thread::Builder::new()

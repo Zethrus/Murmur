@@ -112,6 +112,46 @@ pub struct Status {
 
 pub type Emit = Arc<dyn Fn(&str, Value) + Send + Sync>;
 
+/// Where Enhance models live. The app uses the component manager (signed manifest, pinned
+/// hashes, `<data>/components`); `LegacyStore` is the self-contained downloader kept for tests.
+pub trait ModelStore: Send + Sync {
+    fn state(&self, entry: &Entry) -> InstallState;
+    fn model_path(&self, entry: &Entry) -> Option<PathBuf>;
+    /// Blocking install; `progress(phase, received, total)`.
+    fn install(&self, entry: &'static Entry, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(download::Phase, u64, u64)) -> Result<(), EnhanceError>;
+    fn remove(&self, entry: &Entry) -> Result<(), EnhanceError>;
+}
+
+pub struct LegacyStore {
+    pub root: PathBuf,
+    space: fn(&Path) -> Option<u64>,
+    transport: Arc<dyn Fn() -> Result<Box<dyn download::Transport>, EnhanceError> + Send + Sync>,
+}
+impl LegacyStore {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            space: crate::platform::available_space,
+            transport: Arc::new(|| download::Https::new().map(|t| Box::new(t) as Box<dyn download::Transport>)),
+        }
+    }
+}
+impl ModelStore for LegacyStore {
+    fn state(&self, entry: &Entry) -> InstallState {
+        catalog::local_state(entry, &self.root)
+    }
+    fn model_path(&self, entry: &Entry) -> Option<PathBuf> {
+        Some(entry.model_path(&self.root))
+    }
+    fn install(&self, entry: &'static Entry, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(download::Phase, u64, u64)) -> Result<(), EnhanceError> {
+        let space = (self.space)(&self.root);
+        (self.transport)().and_then(|transport| download::install(entry, &self.root, transport.as_ref(), cancel, space, progress))
+    }
+    fn remove(&self, entry: &Entry) -> Result<(), EnhanceError> {
+        download::remove(entry, &self.root)
+    }
+}
+
 struct Operation {
     id: u64,
     cancel: Arc<AtomicBool>,
@@ -167,8 +207,7 @@ pub struct Enhance {
     removing: AtomicBool,
     /// Operation ID authorised to enable auto-rewrite on success (0 = none).
     enable_intent: AtomicU64,
-    space: fn(&Path) -> Option<u64>,
-    transport: Arc<dyn Fn() -> Result<Box<dyn download::Transport>, EnhanceError> + Send + Sync>,
+    store: Arc<dyn ModelStore>,
 }
 
 pub struct InstallHooks {
@@ -184,6 +223,18 @@ impl Enhance {
         backend: Box<dyn backend::Backend + Send>,
         emit: Emit,
         on_worker: Arc<dyn Fn(worker::WorkerEvent) + Send + Sync>,
+    ) -> std::io::Result<Self> {
+        let store = Arc::new(LegacyStore::new(root.clone()));
+        Self::with_store(root, model_id, threads, backend, emit, on_worker, store)
+    }
+    pub fn with_store(
+        root: PathBuf,
+        model_id: &str,
+        threads: u32,
+        backend: Box<dyn backend::Backend + Send>,
+        emit: Emit,
+        on_worker: Arc<dyn Fn(worker::WorkerEvent) + Send + Sync>,
+        store: Arc<dyn ModelStore>,
     ) -> std::io::Result<Self> {
         let shared = Arc::new(Shared {
             status: Mutex::new(Status {
@@ -252,10 +303,7 @@ impl Enhance {
             operation: Mutex::new(None),
             removing: AtomicBool::new(false),
             enable_intent: AtomicU64::new(0),
-            space: crate::platform::available_space,
-            transport: Arc::new(|| {
-                download::Https::new().map(|t| Box::new(t) as Box<dyn download::Transport>)
-            }),
+            store,
         };
         service.refresh(model_id);
         Ok(service)
@@ -267,7 +315,7 @@ impl Enhance {
     pub fn refresh(&self, model_id: &str) {
         let state = match catalog::find(model_id) {
             None => InstallState::UnavailableModel,
-            Some(entry) => catalog::local_state(entry, &self.root),
+            Some(entry) => self.store.state(entry),
         };
         self.shared.update(|s| {
             s.model_id = model_id.into();
@@ -305,14 +353,14 @@ impl Enhance {
                 "filename": e.filename,
                 "size_bytes": e.size_bytes,
                 "sha256": e.sha256,
-                "installed": catalog::local_state(e, &self.root) == InstallState::Installed,
+                "installed": self.store.state(e) == InstallState::Installed,
                 "configured": e.id == model_id,
             }),
             None => Value::Null,
         }
     }
     pub fn job_entry(&self, model_id: &str) -> Option<(&'static Entry, PathBuf)> {
-        catalog::find(model_id).map(|e| (e, e.model_path(&self.root)))
+        catalog::find(model_id).and_then(|e| self.store.model_path(e).map(|p| (e, p)))
     }
     /// A user choice about auto-rewrite supersedes a pending "enable after install".
     pub fn clear_enable_intent(&self) {
@@ -403,14 +451,10 @@ impl Enhance {
             error_code: None,
             message: None,
         };
-        let space = (self.space)(&self.root);
-        let result = (self.transport)().and_then(|transport| {
-            download::install(
+        let result = {
+            self.store.install(
                 entry,
-                &self.root,
-                transport.as_ref(),
                 &cancel,
-                space,
                 &mut |phase, received, total| {
                     info.phase = match phase {
                         download::Phase::Starting => "starting",
@@ -430,8 +474,8 @@ impl Enhance {
                     });
                 },
             )
-        });
-        let local = catalog::local_state(entry, &self.root);
+        };
+        let local = self.store.state(entry);
         match &result {
             Ok(()) => info.phase = "complete",
             Err(e) if e.code == ErrorCode::Cancelled => info.phase = "cancelled",
@@ -572,7 +616,7 @@ impl Enhance {
                         "The model download did not stop in time",
                     );
                     self.shared.update(|s| {
-                        s.install = catalog::local_state(entry, &self.root);
+                        s.install = self.store.state(entry);
                         s.error = Some(error.clone());
                     });
                     // Restore the handle before exposing the timeout; no competing
@@ -592,14 +636,14 @@ impl Enhance {
                 "The Enhance engine did not stop in time",
             );
             self.shared.update(|s| {
-                s.install = catalog::local_state(entry, &self.root);
+                s.install = self.store.state(entry);
                 s.error = Some(error.clone());
             });
             return Err(error);
         }
-        let result = download::remove(entry, &self.root);
+        let result = self.store.remove(entry);
         self.shared.update(|s| {
-            s.install = catalog::local_state(entry, &self.root);
+            s.install = self.store.state(entry);
             s.load = LoadState::Unloaded;
             s.download = None;
             s.error = result.as_ref().err().cloned();

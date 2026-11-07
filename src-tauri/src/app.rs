@@ -1,4 +1,5 @@
 use crate::{
+    components::{self, Components},
     config::{Config, Engine as EngineConfig, Placement},
     controller::{self, Action},
     engine::Engine,
@@ -93,6 +94,7 @@ pub struct AppState {
     pub app: AppHandle,
     pub paths: Paths,
     pub engine: Arc<Engine>,
+    pub components: Arc<Components>,
     pub enhance: enhance::runtime::Runtime,
     pub companion: crate::companion::Companion,
     pub companion_network: crate::companion::network::Network,
@@ -142,9 +144,18 @@ impl AppState {
             mode = %config.general.hotkey_mode,
             "murmur starting"
         );
-        let engine = Arc::new(Engine::new(paths.models.clone(), app.clone())?);
-        let enhance = enhance::runtime::Runtime::new(&app, paths.enhance_models.clone(), &config)
-            .context("Start Enhance worker")?;
+        let components = Components::new(
+            components::Options::production(paths.data.clone(), paths.models.clone(), paths.enhance_models.clone()),
+            component_host(&app),
+        );
+        let engine = Arc::new(Engine::new(paths.models.clone(), app.clone(), components.clone())?);
+        let enhance = enhance::runtime::Runtime::new(
+            &app,
+            paths.enhance_models.clone(),
+            &config,
+            Arc::new(components::adapters::EnhanceStore(components.clone())),
+        )
+        .context("Start Enhance worker")?;
         let (sender, receiver) = mpsc::channel();
         let status = Status {
             state: "idle".into(),
@@ -162,6 +173,7 @@ impl AppState {
             app: app.clone(),
             paths,
             engine,
+            components,
             enhance,
             companion: crate::companion::Companion::new(app),
             companion_network,
@@ -184,6 +196,16 @@ impl AppState {
     pub fn cancel_enhance_download(&self, operation_id: u64) -> Result<bool> {
         let _transaction = lock(&self.transaction)?;
         Ok(self.enhance.service.cancel_download(operation_id))
+    }
+    /// Setup is pending while no engine is installed and the user has not postponed it.
+    pub fn postpone_setup_if_pending(&self) {
+        let pending = self.components.engine_dir().is_none()
+            && self.config().map(|c| !c.setup.postponed).unwrap_or(false);
+        if pending {
+            if let Err(error) = self.update(json!({"setup":{"postponed":true}})) {
+                tracing::warn!(%error, "Postpone setup");
+            }
+        }
     }
     pub fn config(&self) -> Result<Config> {
         Ok(lock(&self.config)?.clone())
@@ -472,6 +494,7 @@ impl AppState {
             watcher.take();
         }
         let _ = self.sender.send(Action::Quit);
+        self.components.shutdown();
         self.engine.interrupt();
         if let Ok(mut guard) = self.controller.lock() {
             if let Some(job) = guard.take() {
@@ -490,6 +513,40 @@ impl AppState {
                 let _ = job.join();
             }
         }
+    }
+}
+
+/// The component manager's callbacks. `AppState` is looked up lazily: jobs and migration
+/// run on their own threads and may finish before or after Settings opens.
+fn component_host(app: &AppHandle) -> components::Host {
+    let emitter = app.clone();
+    let stopper = app.clone();
+    let notifier = app.clone();
+    let reader = app.clone();
+    components::Host {
+        emit: Arc::new(move |name, value| {
+            let _ = emitter.emit(name, value);
+        }),
+        stop_engine: Box::new(move || {
+            if let Some(state) = stopper.try_state::<AppState>() {
+                state.engine.stop_and_wait();
+            }
+        }),
+        changed: Box::new(move |kind| {
+            if let Some(state) = notifier.try_state::<AppState>() {
+                let _ = state.send(Action::ComponentsChanged(kind));
+            }
+        }),
+        usage: Box::new(move || {
+            reader
+                .try_state::<AppState>()
+                .and_then(|state| state.config().ok())
+                .map(|config| components::Usage {
+                    speech_model: config.engine.model.clone(),
+                    enhance_model: config.enhance.auto_rewrite.then(|| config.enhance.model.clone()),
+                })
+                .unwrap_or_default()
+        }),
     }
 }
 

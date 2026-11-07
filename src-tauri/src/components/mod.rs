@@ -1,6 +1,7 @@
 //! Component manager: the speech engine, the CUDA add-on, speech models and the Enhance model
 //! are downloaded only on request, verified against a PGP-signed manifest, staged, smoke
 //! tested and atomically activated under `<data>/components`. See docs/components.md.
+pub mod adapters;
 pub mod archive;
 pub mod catalog;
 pub mod detect;
@@ -312,6 +313,9 @@ impl Components {
     }
     pub fn manifest(&self) -> Option<Manifest> {
         lock(&self.inner).catalog.as_ref().map(|c| c.manifest.clone())
+    }
+    pub fn job(&self, id: &str) -> Option<Record> {
+        lock(&self.inner).jobs.get(id).map(|j| j.record.clone())
     }
     pub fn job_running(&self, id: &str) -> bool {
         lock(&self.inner).jobs.get(id).is_some_and(|j| !matches!(j.record.phase, Phase::Paused | Phase::Failed))
