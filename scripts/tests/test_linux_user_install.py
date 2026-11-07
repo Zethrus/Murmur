@@ -60,7 +60,8 @@ class UserFiles(unittest.TestCase):
         prefix = self.home / ".local"
         app = prefix / "share/murmur"
         self.assertEqual((app / "bin/murmur").read_bytes(), self.binary.read_bytes())
-        self.assertEqual((app / "bin/murmur-engine").read_bytes(), self.sidecar.read_bytes())
+        self.assertEqual((app / "lib/murmur/engine/murmur-engine").read_bytes(), self.sidecar.read_bytes())
+        self.assertFalse((app / "bin/murmur-engine").exists())
         result = subprocess.run([str(prefix / "bin/murmur"), "one argument", "$literal"],
                                 check=True, capture_output=True, text=True)
         self.assertEqual(result.stdout, "one argument\n$literal\n")

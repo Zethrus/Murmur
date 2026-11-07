@@ -169,7 +169,7 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
-            // PyInstaller onefile bootloaders have a child; terminate that tree too.
+            // Debug launchers run Python as a child; terminate the whole process group.
             #[cfg(unix)]
             {
                 let _ = Command::new("/bin/kill")
@@ -196,32 +196,102 @@ impl Drop for Process {
         }
     }
 }
+/// Environment override naming the engine executable or the directory that holds it.
+const ENGINE_ENV: &str = "MURMUR_ENGINE";
+const ENGINE_FILE: &str = if cfg!(windows) {
+    "murmur-engine.exe"
+} else {
+    "murmur-engine"
+};
+
+/// No usable engine executable. Not retried: restarting cannot make it appear.
+#[derive(Debug)]
+struct EngineMissing(Option<PathBuf>);
+impl std::fmt::Display for EngineMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Speech engine is not installed")?;
+        match &self.0 {
+            Some(path) => write!(f, " ({ENGINE_ENV}={} has no {ENGINE_FILE})", path.display()),
+            None => Ok(()),
+        }
+    }
+}
+impl std::error::Error for EngineMissing {}
+
+#[derive(Debug, PartialEq)]
+enum EngineSource {
+    /// Debug builds run the checkout's Python engine.
+    Development,
+    Executable(PathBuf),
+}
+
+/// Onedir engine shipped with the app: `usr/lib/murmur/engine` beside `usr/bin` on Linux
+/// (AppImage and .deb), `engine\` beside `murmur.exe` on Windows.
+fn packaged_engine(executable_dir: &Path) -> PathBuf {
+    if cfg!(windows) {
+        executable_dir.join("engine").join(ENGINE_FILE)
+    } else {
+        executable_dir
+            .join("../lib/murmur/engine")
+            .join(ENGINE_FILE)
+    }
+}
+
+/// Resolution order: `MURMUR_ENGINE`, then the development venv (debug builds),
+/// then the packaged onedir engine.
+fn resolve_engine(
+    override_path: Option<PathBuf>,
+    executable_dir: &Path,
+    development: bool,
+) -> std::result::Result<EngineSource, EngineMissing> {
+    if let Some(path) = override_path.filter(|path| !path.as_os_str().is_empty()) {
+        let candidate = if path.is_dir() {
+            path.join(ENGINE_FILE)
+        } else {
+            path.clone()
+        };
+        return if candidate.is_file() {
+            Ok(EngineSource::Executable(candidate))
+        } else {
+            Err(EngineMissing(Some(path)))
+        };
+    }
+    if development {
+        return Ok(EngineSource::Development);
+    }
+    let packaged = packaged_engine(executable_dir);
+    if packaged.is_file() {
+        Ok(EngineSource::Executable(packaged))
+    } else {
+        Err(EngineMissing(None))
+    }
+}
+
+fn development_command() -> Command {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    if cfg!(windows) {
+        let mut command = Command::new(root.join("engine/.venv/Scripts/python.exe"));
+        command
+            .current_dir(root.join("engine"))
+            .args(["-m", "murmur_engine"]);
+        command
+    } else {
+        Command::new(root.join("scripts/engine-sidecar.sh"))
+    }
+}
+
 fn sidecar_command() -> Result<Command> {
-    if cfg!(debug_assertions) {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        #[cfg(windows)]
-        {
-            let mut command = Command::new(root.join("engine/.venv/Scripts/python.exe"));
-            command
-                .current_dir(root.join("engine"))
-                .args(["-m", "murmur_engine"]);
+    let executable = std::env::current_exe().context("Locate Murmur executable")?;
+    let parent = executable.parent().context("Executable has no parent")?;
+    let override_path = std::env::var_os(ENGINE_ENV).map(PathBuf::from);
+    match resolve_engine(override_path, parent, cfg!(debug_assertions))? {
+        EngineSource::Development => Ok(development_command()),
+        EngineSource::Executable(path) => {
+            let mut command = Command::new(path);
+            #[cfg(target_os = "linux")]
+            configure_linux_cuda(&mut command, parent)?;
             Ok(command)
         }
-        #[cfg(not(windows))]
-        {
-            Ok(Command::new(root.join("scripts/engine-sidecar.sh")))
-        }
-    } else {
-        let executable = std::env::current_exe().context("Locate Murmur executable")?;
-        let parent = executable.parent().context("Executable has no parent")?;
-        let mut command = Command::new(parent.join(if cfg!(windows) {
-            "murmur-engine.exe"
-        } else {
-            "murmur-engine"
-        }));
-        #[cfg(target_os = "linux")]
-        configure_linux_cuda(&mut command, parent)?;
-        Ok(command)
     }
 }
 
@@ -290,6 +360,129 @@ mod cuda_launch_tests {
             .all(|(name, _)| name != "LD_LIBRARY_PATH"));
     }
 }
+#[cfg(test)]
+mod resolution_tests {
+    use super::{
+        missing_engine, packaged_engine, resolve_engine, EngineMissing, EngineSource, ENGINE_FILE,
+    };
+    use std::{fs, path::PathBuf};
+
+    struct Layout(PathBuf);
+    impl Layout {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "murmur engine resolution {name} {}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(root.join("usr/bin")).unwrap();
+            Self(root)
+        }
+        fn bin(&self) -> PathBuf {
+            self.0.join("usr/bin")
+        }
+        fn install_packaged(&self) -> PathBuf {
+            let engine = packaged_engine(&self.bin());
+            fs::create_dir_all(engine.parent().unwrap()).unwrap();
+            fs::write(&engine, b"engine").unwrap();
+            engine
+        }
+    }
+    impl Drop for Layout {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn override_file_wins_over_development_and_packaged() {
+        let layout = Layout::new("override-file");
+        layout.install_packaged();
+        let custom = layout.0.join("custom-engine");
+        fs::write(&custom, b"engine").unwrap();
+        for development in [true, false] {
+            assert_eq!(
+                resolve_engine(Some(custom.clone()), &layout.bin(), development).unwrap(),
+                EngineSource::Executable(custom.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn override_directory_names_its_engine() {
+        let layout = Layout::new("override-dir");
+        let directory = layout.0.join("engine-dir");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(ENGINE_FILE), b"engine").unwrap();
+        assert_eq!(
+            resolve_engine(Some(directory.clone()), &layout.bin(), false).unwrap(),
+            EngineSource::Executable(directory.join(ENGINE_FILE))
+        );
+    }
+
+    #[test]
+    fn broken_override_is_reported_not_skipped() {
+        let layout = Layout::new("override-missing");
+        layout.install_packaged();
+        let missing = layout.0.join("nowhere");
+        let error = resolve_engine(Some(missing.clone()), &layout.bin(), false).unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("Speech engine is not installed"));
+        assert!(error.to_string().contains(&missing.display().to_string()));
+    }
+
+    #[test]
+    fn empty_override_is_ignored() {
+        let layout = Layout::new("override-empty");
+        assert_eq!(
+            resolve_engine(Some(PathBuf::new()), &layout.bin(), true).unwrap(),
+            EngineSource::Development
+        );
+    }
+
+    #[test]
+    fn development_builds_use_the_checkout_engine() {
+        let layout = Layout::new("development");
+        layout.install_packaged();
+        assert_eq!(
+            resolve_engine(None, &layout.bin(), true).unwrap(),
+            EngineSource::Development
+        );
+    }
+
+    #[test]
+    fn release_builds_use_the_packaged_onedir_engine() {
+        let layout = Layout::new("packaged");
+        let engine = layout.install_packaged();
+        if cfg!(windows) {
+            assert!(engine.ends_with("usr/bin/engine/murmur-engine.exe"));
+        } else {
+            assert!(engine.ends_with("usr/bin/../lib/murmur/engine/murmur-engine"));
+        }
+        assert_eq!(
+            resolve_engine(None, &layout.bin(), false).unwrap(),
+            EngineSource::Executable(engine)
+        );
+    }
+
+    #[test]
+    fn missing_engine_is_classified_as_permanent() {
+        let absent = anyhow::Error::new(EngineMissing(None));
+        assert_eq!(
+            missing_engine(&absent).as_deref(),
+            Some("Speech engine is not installed")
+        );
+        assert_eq!(missing_engine(&anyhow::anyhow!("spawn failed")), None);
+    }
+
+    #[test]
+    fn release_without_engine_reports_missing() {
+        let layout = Layout::new("absent");
+        let error = resolve_engine(None, &layout.bin(), false).unwrap_err();
+        assert_eq!(error.to_string(), "Speech engine is not installed");
+    }
+}
 pub struct Engine {
     sender: mpsc::Sender<Message>,
     job: Mutex<Option<JoinHandle<()>>>,
@@ -311,11 +504,13 @@ impl Engine {
             .spawn(move || {
                 let mut process: Option<Process> = None;
                 let mut failures = 0;
+                // Set when no engine executable exists; spawning again cannot help.
+                let mut missing: Option<String> = None;
                 loop {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
-                    if process.is_none() && failures < 2 {
+                    if process.is_none() && failures < 2 && missing.is_none() {
                         match Process::spawn(&models) {
                             Ok(p) => {
                                 process = Some(p);
@@ -324,10 +519,16 @@ impl Engine {
                                     *error = None;
                                 }
                             }
-                            Err(error) => {
-                                failures += 1;
-                                report(&app, &errors, &format!("{error:#}"), failures);
-                            }
+                            Err(error) => match missing_engine(&error) {
+                                Some(message) => {
+                                    report_missing(&app, &errors, &message);
+                                    missing = Some(message);
+                                }
+                                None => {
+                                    failures += 1;
+                                    report(&app, &errors, &format!("{error:#}"), failures);
+                                }
+                            },
                         }
                     }
                     match receiver.recv_timeout(Duration::from_millis(200)) {
@@ -335,9 +536,12 @@ impl Engine {
                         Ok(Message::Request(request)) => {
                             let result = match process.as_mut() {
                                 Some(p) => p.call(&request, &app, &stop),
-                                None => Err(anyhow::anyhow!(
-                                    "Engine unavailable after two failures; restart Murmur"
-                                )),
+                                None => {
+                                    Err(anyhow::anyhow!(missing.clone().unwrap_or_else(|| {
+                                        "Engine unavailable after two failures; restart Murmur"
+                                            .into()
+                                    })))
+                                }
                             };
                             if result.is_err() && process.is_some() {
                                 process = None;
@@ -429,6 +633,18 @@ impl Engine {
             }
         }
     }
+}
+fn missing_engine(error: &anyhow::Error) -> Option<String> {
+    error
+        .downcast_ref::<EngineMissing>()
+        .map(ToString::to_string)
+}
+fn report_missing(app: &AppHandle, error: &Mutex<Option<String>>, message: &str) {
+    tracing::warn!(target: "murmur::engine", "{message}");
+    if let Ok(mut error) = error.lock() {
+        *error = Some(message.to_owned());
+    }
+    let _ = app.emit("error", json!({"message": message, "persistent": true}));
 }
 fn report(app: &AppHandle, error: &Mutex<Option<String>>, message: &str, failures: u32) {
     let message = if failures >= 2 {

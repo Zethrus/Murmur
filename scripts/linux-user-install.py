@@ -119,8 +119,10 @@ def install(binary, sidecar):
             raise ValueError(f"Missing or empty build input: {source}")
     if not all(os.access(path, os.X_OK) for path in (binary, sidecar)):
         raise ValueError("App and sidecar must be executable")
+    # The app finds its engine at <exe dir>/../lib/murmur/engine (src-tauri/src/engine.rs).
+    engine = app / "lib/murmur/engine/murmur-engine"
     # Validate every destination before writing anything.
-    targets = [app / "bin/murmur", app / "bin/murmur-engine", launcher,
+    targets = [app / "bin/murmur", engine, app / "bin/murmur-engine", launcher,
                data / "applications/murmur.desktop", config / "autostart/murmur.desktop",
                config / "murmur/config.toml"]
     for size in ICONS:
@@ -129,7 +131,9 @@ def install(binary, sidecar):
     for target in targets:
         safe(target)
     put(app / "bin/murmur", source=binary, mode=0o755)
-    put(app / "bin/murmur-engine", source=sidecar, mode=0o755)
+    put(engine, source=sidecar, mode=0o755)
+    # Launcher location used by 0.4.x source installs; the app no longer looks there.
+    (app / "bin/murmur-engine").unlink(missing_ok=True)
     put(launcher, text=f'#!/bin/sh\nexec {shlex.quote(str(app / "bin/murmur"))} "$@"\n', mode=0o755)
     for size, name in ICONS.items():
         source = ROOT / "src-tauri/icons" / name
@@ -157,7 +161,7 @@ def uninstall(purge):
     for base in {config, home / ".config"}:
         files += [base / "autostart" / name for name in ("murmur.desktop", "Murmur.desktop")]
     files += list((prefix / "share/icons/hicolor").glob("*/apps/murmur.png"))
-    directories = [app / "bin", app / "icons"]
+    directories = [app / "bin", app / "lib", app / "icons"]
     if purge:
         directories = list({app, data / "murmur", config / "murmur", home / ".config/murmur"})
     for path in files + directories:
