@@ -18,6 +18,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Builds and tests everything with a THROWAWAY signing key. On tags this job only validates;
+  # the `release` job below rebuilds with the real key and uploads.
   build:
     # Fork PRs must never execute on a self-hosted runner; keep them on hosted or skip.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || vars.LINUX_RUNNER == ''
@@ -124,6 +126,22 @@ jobs:
           headless cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
       - name: Test speech sidecar
         run: engine/.release-venv/bin/python -m pip install pytest && engine/.release-venv/bin/python -m pytest engine/tests -q
+      - name: Build engine and CUDA add-on components, manifest signed with a throwaway key
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          components=.cache/artifacts/components
+          rm -rf "$components"
+          engine/.release-venv/bin/python scripts/bundle-linux-runtime.py components \
+            --engine engine/dist/murmur-engine --version "$version" --output "$components"
+          python3 scripts/components/make-manifest.py --components "$components" --version "$version" \
+            --output "$components/components-manifest.json"
+          key="$RUNNER_TEMP/murmur-throwaway-key"
+          rm -rf "$key"
+          scripts/components/dev-key.sh "$key" >/dev/null
+          GNUPGHOME="$key" scripts/components/sign-manifest.sh "$components/components-manifest.json" "$components/murmur-release.asc"
+          gpgconf --homedir "$key" --kill all || true
+          rm -rf "$key"
       - name: Build app, deb and AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
@@ -132,6 +150,7 @@ jobs:
           # Same baseline Rust + AVX2 llama.cpp contract the release script uses; the audit below
           # fails closed if the generated llama.cpp flags drift from it.
           source scripts/cpu-baseline.sh
+          export MURMUR_EMBED_MANIFEST="$PWD/.cache/artifacts/components/components-manifest.json"
           npx tauri build
       - name: Audit generated llama.cpp CPU flags
         run: python scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release" --artifact "$CARGO_TARGET_DIR/release/murmur"
@@ -141,19 +160,104 @@ jobs:
           release="$CARGO_TARGET_DIR/release"
           test -s "$release/murmur"
           mkdir -p .cache/artifacts/linux
-          engine/.release-venv/bin/python scripts/bundle-linux-runtime.py \
+          engine/.release-venv/bin/python scripts/bundle-linux-runtime.py package \
             --appimage "$release"/bundle/appimage/*.AppImage \
             --deb "$release"/bundle/deb/*.deb \
-            --engine engine/dist/murmur-engine \
             --output .cache/artifacts/linux
-          python3 scripts/test-linux-bundle.py .cache/artifacts/linux
-          python3 scripts/test-linux-startup.py .cache/artifacts/linux/*.AppImage
-          python3 scripts/check-release.py sizes .cache/artifacts/linux/* engine/dist/murmur-engine >> "$GITHUB_STEP_SUMMARY"
-      - name: GPU hardware validation skipped for PR or manual build
+          python3 scripts/test-linux-bundle.py .cache/artifacts/linux .cache/artifacts/components
+          python3 scripts/test-linux-startup.py .cache/artifacts/linux/*.AppImage --components .cache/artifacts/components
+          python3 scripts/check-release.py sizes .cache/artifacts/linux/* .cache/artifacts/components/*.zip engine/dist/murmur-engine >> "$GITHUB_STEP_SUMMARY"
+      - name: Clean offline install in Docker (when available)
+        env:
+          MURMUR_CLEAN_TEST_MODEL: ${{ vars.MURMUR_CLEAN_TEST_MODEL }}
+        run: |
+          if command -v docker >/dev/null && docker info >/dev/null 2>&1 && test -n "$MURMUR_CLEAN_TEST_MODEL"; then
+            scripts/test-clean-install.sh .cache/artifacts/linux .cache/artifacts/components "$MURMUR_CLEAN_TEST_MODEL"
+          else
+            echo 'Docker or MURMUR_CLEAN_TEST_MODEL unavailable; clean offline install not run.' | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: GPU validation of components on trusted hardware (when available)
+        env:
+          MURMUR_GPU_TEST_MODELS: ${{ vars.MURMUR_GPU_TEST_MODELS }}
+        run: |
+          if command -v nvidia-smi >/dev/null && test -n "$MURMUR_GPU_TEST_MODELS"; then
+            python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux \
+              --components .cache/artifacts/components --models-dir "$MURMUR_GPU_TEST_MODELS"
+          else
+            echo 'GPU inference skipped: no NVIDIA runner or MURMUR_GPU_TEST_MODELS.' | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Mark throwaway-signed artifacts
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        run: echo 'GPU inference skipped; trusted hardware validation is required before release.'
+        run: |
+          set -euo pipefail
+          out=.cache/artifacts/untrusted-dev-signed
+          rm -rf "$out" && mkdir -p "$out"
+          for file in .cache/artifacts/linux/*.AppImage .cache/artifacts/linux/*.deb \
+                      .cache/artifacts/components/components-manifest.json*; do
+            name="$(basename "$file")"
+            cp "$file" "$out/${name%%.*}-untrusted-dev-signed.${name#*.}"
+          done
+          ls -la "$out"
+      - name: Upload throwaway-signed build artifacts (best effort, never released)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: murmur-linux-x86_64-untrusted-dev-signed
+          path: .cache/artifacts/untrusted-dev-signed/*
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  # Tags only, and only once the owner has created the release key (docs/signing.md): rebuild
+  # with the real signing subkey from the protected environment, validate on the GPU runner
+  # and attach everything to the draft release. Without the key, nothing is uploaded.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') && vars.MURMUR_RELEASE_TRUST_FINGERPRINT != ''
+    environment: release-signing
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 120
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+      TMPDIR: ${{ github.workspace }}/.cache/tmp
+      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Isolate the CI Rust toolchain
+        run: |
+          root="${RUNNER_TOOL_CACHE:-$HOME/.cache}/murmur-ci"
+          printf 'RUSTUP_HOME=%s\nCARGO_HOME=%s\n' "$root/rustup" "$root/cargo" >> "$GITHUB_ENV"
+          printf '%s\n' "$root/cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: The committed trust root must be the configured release key
+        env:
+          EXPECTED: ${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          grep -q "RELEASE_PRIMARY_FINGERPRINT: &str = \"$EXPECTED\"" src-tauri/src/components/trust.rs
+          actual="$(gpg --batch --with-colons --show-keys src-tauri/trust/murmur-release.asc | awk -F: '/^fpr/ {print $10; exit}')"
+          test "$actual" = "$EXPECTED"
+      - name: Build, sign with the release subkey and test
+        env:
+          MURMUR_SIGNING_SUBKEY: ${{ secrets.MURMUR_SIGNING_SUBKEY }}
+          MURMUR_SIGNING_PASSPHRASE: ${{ secrets.MURMUR_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$MURMUR_SIGNING_SUBKEY" || { echo 'MURMUR_SIGNING_SUBKEY is not set in the release-signing environment' >&2; exit 1; }
+          scripts/build-linux.sh
+          python3 scripts/check-release.py signature .cache/artifacts/components "${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}"
       - name: Validate final Linux assets on trusted GPU hardware
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           MURMUR_GPU_TEST_MODELS: ${{ vars.MURMUR_GPU_TEST_MODELS }}
         run: |
@@ -161,9 +265,8 @@ jobs:
           test -n "$MURMUR_GPU_TEST_MODELS" || { echo 'Set MURMUR_GPU_TEST_MODELS to an offline staged model directory on the trusted runner.' >&2; exit 1; }
           command -v nvidia-smi >/dev/null || { echo 'Trusted NVIDIA GPU runner required for release.' >&2; exit 1; }
           python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux \
-            --models-dir "$MURMUR_GPU_TEST_MODELS"
-      - name: Attach Linux assets to the draft (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
+            --components .cache/artifacts/components --models-dir "$MURMUR_GPU_TEST_MODELS"
+      - name: Attach Linux assets and components to the draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -171,17 +274,8 @@ jobs:
             .cache/artifacts/linux/*.AppImage \
             .cache/artifacts/linux/*.deb \
             .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
-            .cache/artifacts/linux/GPU-VALIDATION.json --clobber
-      - name: Upload build artifacts (best effort)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: murmur-linux-x86_64
-          path: |
-            .cache/artifacts/linux/*.AppImage
-            .cache/artifacts/linux/*.deb
-            .cache/artifacts/linux/murmur-linux-x86_64.tar.gz
-          if-no-files-found: error
-          retention-days: 3
-          compression-level: 0
+            .cache/artifacts/linux/GPU-VALIDATION.json \
+            .cache/artifacts/components/*.zip \
+            .cache/artifacts/components/components-manifest.json \
+            .cache/artifacts/components/components-manifest.json.sig \
+            .cache/artifacts/components/murmur-release.asc --clobber

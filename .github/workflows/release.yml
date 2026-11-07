@@ -58,5 +58,8 @@ jobs:
           mkdir -p release-assets
           gh release download "$GITHUB_REF_NAME" --dir release-assets
           python3 scripts/check-release.py assets "$GITHUB_REF_NAME" release-assets
+          # The manifest must be signed by the release key the app pins.
+          test -n "${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}"
+          python3 scripts/check-release.py signature release-assets "${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}"
           (cd release-assets && sha256sum --check SHA256SUMS)
           gh release upload "$GITHUB_REF_NAME" release-assets/SHA256SUMS --clobber
