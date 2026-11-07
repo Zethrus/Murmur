@@ -20,9 +20,11 @@ Do not reuse a published version or move its tag. Fixes need a new version.
 
 `release.yml` validates versions and creates a draft. Linux and Flipper builds
 upload directly to that draft, so publication does not depend on Actions artifact
-storage. Both builds must succeed. The Linux job bundles typing utilities,
-client libraries, and pinned CUDA userspace, then verifies AppImage and Debian
-runtime parity. Tag builds require a trusted compatible NVIDIA GPU and an offline
+storage. Both builds must succeed. The Linux job freezes the onedir engine, fails if it
+references cuDNN or NVRTC, bundles typing utilities, client libraries, the engine
+and pinned cuBLAS, then verifies the AppImage, the `.deb` (system dependencies
+plus engine and cuBLAS) and the size budgets, and writes a size table to the job
+summary. Tag builds require a trusted compatible NVIDIA GPU and an offline
 staged `distil-small.en` model at `MURMUR_GPU_TEST_MODELS`. Real VAD-disabled
 inference produces `GPU-VALIDATION.json` tied to final Linux asset hashes. Missing
 hardware or model fails the tag job before upload. Pull request and manual jobs
@@ -31,9 +33,10 @@ explicitly report the GPU gate skipped.
 The final job downloads every asset and runs `scripts/check-release.py`. It
 requires the portable archive, `.deb`, AppImage, version-matched `.fap`, and
 `GPU-VALIDATION.json`. Loose app and engine files are not release assets.
-The Linux build checks that the portable archive contains the same AppImage and
-bundled engine, both executable. The final job checks the archive layout,
-AppImage match, GPU evidence hashes, and 2 GiB per-asset limit. It generates and
+The Linux build checks that the portable archive contains only the AppImage,
+executable, as `murmur`. The final job checks the archive layout, AppImage
+match, GPU evidence hashes, and per-asset size budgets (AppImage
+700 MiB and `.deb` 550 MiB, tar.gz 710 MiB, while the engine and cuBLAS are still bundled). It generates and
 verifies `SHA256SUMS`, uploads it, and leaves the release as a draft for testing. Unexpected or missing
 files block publication. Record three short deliveries for each terminal/editor
 and overlay on/off combination, with hotkey and companion triggers where
