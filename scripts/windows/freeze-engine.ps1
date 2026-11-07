@@ -31,7 +31,7 @@ try {
     Push-Location (Join-Path $Root 'engine')
     try {
         # Onedir: no per-start unpack into %TEMP%. CUDA comes from the GPU add-on through
-        # MURMUR_CUDA_DIR (murmur_engine/runtime.py -> os.add_dll_directory).
+        # MURMUR_CUDA_DIR (murmur_engine/runtime.py prepends it to PATH and os.add_dll_directory).
         Invoke-Native $VenvPython @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir',
             '--name', 'murmur-engine', '--paths', '.', '--exclude-module', 'nvidia',
             '--exclude-module', 'av', '--exclude-module', 'hf_xet',

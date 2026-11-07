@@ -316,7 +316,8 @@ fn sidecar_command(locate: &dyn Locate) -> Result<Command> {
             let mut command = Command::new(path);
             #[cfg(target_os = "linux")]
             configure_linux_cuda(&mut command, parent, locate.cuda_dir())?;
-            // The Windows engine adds this directory with os.add_dll_directory.
+            // The Windows engine prepends this directory to PATH (plain LoadLibrary of cuBLAS) and
+            // registers it with os.add_dll_directory (murmur_engine/runtime.py).
             #[cfg(windows)]
             if let Some(cuda) = locate.cuda_dir() {
                 command.env("MURMUR_CUDA_DIR", cuda);
