@@ -333,6 +333,23 @@ fn interrupted_job_persists_as_paused_and_never_auto_resumes() {
         &BTreeMap::from([(record.id.clone(), record)]),
     )
     .unwrap();
+    // A tampered record whose version would escape the downloads folder is dropped on load.
+    let mut records = jobs::load(&f.data.join("components/jobs.json"));
+    records.insert(
+        "speech-tiny.en".into(),
+        Record {
+            id: "speech-tiny.en".into(),
+            version: "../../../outside".into(),
+            phase: Phase::Paused,
+            bytes_done: 0,
+            bytes_total: 1,
+            error: None,
+            reason: None,
+            replace: true,
+        },
+    );
+    jobs::save(&f.data.join("components/jobs.json"), &records).unwrap();
+    assert_eq!(jobs::load(&f.data.join("components/jobs.json")).len(), 1);
     let components = f.start();
     std::thread::sleep(Duration::from_millis(200));
     let entry = wait(&components, "speech-base.en");

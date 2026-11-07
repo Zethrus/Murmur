@@ -63,7 +63,12 @@ pub fn load(path: &Path) -> BTreeMap<String, Record> {
         .unwrap_or_default();
     file.jobs
         .into_iter()
-        .filter(|(id, record)| super::manifest::safe_id(id) && *id == record.id)
+        // jobs.json is unsigned: IDs and versions become paths, so check them again.
+        .filter(|(id, record)| {
+            super::manifest::safe_id(id)
+                && *id == record.id
+                && super::manifest::safe_version(&record.version)
+        })
         .map(|(id, mut record)| {
             if record.phase != Phase::Failed {
                 record.phase = Phase::Paused;

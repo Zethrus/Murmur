@@ -124,7 +124,9 @@ impl Store {
     }
     pub fn active(&self, id: &str) -> Option<Active> {
         let bytes = fs::read(self.component_dir(id).join("active.json")).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        let active: Active = serde_json::from_slice(&bytes).ok()?;
+        // Unsigned: the version becomes a path, so a record naming `..` is treated as absent.
+        super::manifest::safe_version(&active.version).then_some(active)
     }
     /// Directory holding the active version's files, if it exists.
     pub fn active_dir(&self, id: &str) -> Option<PathBuf> {
@@ -541,6 +543,13 @@ mod tests {
         // A corrupt record means "not active", never a crash or a guess.
         fs::write(dir.join("active.json"), b"{garbage").unwrap();
         assert!(s.active("speech-y").is_none());
+        // A version that would leave the component folder is refused.
+        fs::write(
+            dir.join("active.json"),
+            br#"{"version":"../../x","kind":"speech-model","installed_at":0}"#,
+        )
+        .unwrap();
+        assert!(s.active("speech-y").is_none() && s.active_dir("speech-y").is_none());
         let _ = fs::remove_dir_all(&s.root);
     }
 

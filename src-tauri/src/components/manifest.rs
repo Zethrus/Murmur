@@ -124,7 +124,8 @@ pub fn safe_id(value: &str) -> bool {
         })
 }
 
-fn safe_version(value: &str) -> bool {
+/// Version strings become path segments too: `[A-Za-z0-9][A-Za-z0-9._+-]{0,63}`, no `..`.
+pub fn safe_version(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value.as_bytes()[0].is_ascii_alphanumeric()
