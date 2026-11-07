@@ -1,3 +1,14 @@
+# Unreleased
+
+## Always know where the overlay is
+
+- Between dictations the overlay now shrinks to a small, translucent copy of
+  the app icon instead of disappearing. Drag the icon anywhere to move the
+  overlay; dictation, suggestions and held text still use the full pill.
+- General → When idle offers Small app icon (default), Full pill, or Nothing.
+  It replaces the Hide when idle switch. Existing installs that turned hiding
+  off keep the full pill.
+
 # Murmur 0.4.7
 
 Everything new since Murmur 0.4.5: dictation that stays in the window you
