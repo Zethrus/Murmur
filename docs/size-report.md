@@ -94,7 +94,10 @@ Performance on the same machine (`scripts/test-linux-inference.py`,
 (earlier onefile build, as recorded in `docs/building.md` before this change:
 65.0 ms), engine launch through first reply 1.27 s (earlier: 2.59 s). All four GPU precisions, with VAD on and off, ran with only
 the shipped cuBLAS directory on the loader path; no cuDNN or NVRTC library was
-loaded.
+loaded. The same matrix passed with `large-v3-turbo`, and `large-v3` ran at
+`int8_float16`, `float16` and `int8` (its `float32` weights do not fit the test
+GPU's 8 GB). `libcublasLt.so.12` contains the string `libnvrtc`; none of these
+runs loaded it. Evidence: `docs/parity/evidence/`.
 
 ### Interim budget versus the plan
 

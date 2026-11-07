@@ -30,7 +30,7 @@ parity: fixing one does not by itself establish parity.
 
 | Id | Bug | Status |
 | --- | --- | --- |
-| B1 | Linux packages shipped cuDNN 9 and two NVRTC copies (≈1.55 GB unpacked) that inference never loads. CTranslate2 4.6.3's Linux wheel has no cuDNN or NVRTC references and runs the Whisper encoder's two Conv1D layers via im2col + cuBLAS GEMM. This is version-specific. | Fixed in PR-A: cuBLAS only; `scripts/check-engine-imports.py` fails the build if a future CTranslate2 references cuDNN/NVRTC. Windows wheel not yet inspected. |
+| B1 | Linux packages shipped cuDNN 9 and two NVRTC copies (≈1.55 GB unpacked) that inference never loads. CTranslate2 4.6.3's Linux wheel has no cuDNN or NVRTC references and runs the Whisper encoder's two Conv1D layers via im2col + cuBLAS GEMM. This is version-specific. | Fixed in PR-A: cuBLAS only; `scripts/check-engine-imports.py` fails the build if a future CTranslate2 references cuDNN/NVRTC. Verified on an RTX 4060 with `distil-small.en`, `large-v3-turbo` (full precision × VAD matrix) and `large-v3`. Windows wheel not yet inspected. |
 | B2 | `murmur` binary shipped unstripped (≈10 MB of symbols). | Fixed in PR-A (`[profile.release] strip = true`). |
 | B3 | The same shared library copied 2–3 times instead of symlinked (≈20 MB unpacked). | Fixed in PR-A (`dedupe_libraries`). |
 | B4 | Speech models download the latest Hugging Face revision with no pinned revision and no hash check, and an install cannot be cancelled; the `.complete` marker is the only integrity signal (`engine/murmur_engine/models.py`). `hf_hub_download` does resume. `large-v3-turbo` comes from a third-party repository (`dropbox-dash`), which a provenance field must record. | Open; PR-B. |
