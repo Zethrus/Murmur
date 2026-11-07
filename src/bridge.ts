@@ -13,6 +13,7 @@ export interface Status {
   sidecar_alive: boolean; model_available: boolean; fallback_reason: string | null; error: string | null;
 }
 export type OverlayPosition = "top-center" | "bottom-center" | "custom";
+export type IdleView = "icon" | "pill" | "hidden";
 export interface OverlayPlacement {
   monitor_name: string; monitor_x: number; monitor_y: number; monitor_width: number; monitor_height: number;
   x_fraction: number; y_fraction: number;
@@ -53,7 +54,7 @@ export interface EnhanceConfig {
 export interface Config {
   general: { hotkey_code: string; hotkey: string; hotkey_mode: "hold" | "toggle"; language: string; translate: boolean;
     autostart: boolean; theme: "light" | "dark" | "auto" };
-  overlay: { enabled: boolean; position: OverlayPosition; scale: number; show_preview: boolean; idle_hide: boolean; placement?: OverlayPlacement };
+  overlay: { enabled: boolean; position: OverlayPosition; scale: number; show_preview: boolean; idle_view: IdleView; placement?: OverlayPlacement };
   sounds: { enabled: boolean; volume: number; muted: boolean };
   engine: { model: string; device: "auto" | "cpu" | "cuda"; compute_type: string; beam_size: number; vad_filter: boolean; dictionary: string[] };
   audio: { device: string; gain: number; silence_threshold: number; silence_timeout_ms: number; max_utterance_s: number; min_utterance_ms: number };

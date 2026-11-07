@@ -189,7 +189,7 @@ impl AppState {
         Ok(lock(&self.config)?.clone())
     }
     /// A pending or ready Enhance suggestion, or a held transcript, keeps the overlay visible
-    /// regardless of idle_hide.
+    /// even when the idle view is hidden.
     pub fn overlay_held(&self) -> bool {
         self.enhance.holds_overlay() || self.held.holds_overlay()
     }

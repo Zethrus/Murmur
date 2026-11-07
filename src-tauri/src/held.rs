@@ -151,7 +151,7 @@ impl HeldStore {
         expired
     }
 
-    /// Held text and notices keep the overlay visible regardless of idle_hide.
+    /// Held text and notices keep the overlay visible even when the idle view is hidden.
     pub fn holds_overlay(&self) -> bool {
         !matches!(self.lock().slot, Slot::Empty)
     }

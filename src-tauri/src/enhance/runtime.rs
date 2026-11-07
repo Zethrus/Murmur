@@ -167,7 +167,9 @@ impl Runtime {
             if let Err(error) = overlay::reveal(&state.app, &config.overlay) {
                 tracing::warn!(%error, "Reveal overlay for Enhance");
             }
-        } else if config.overlay.idle_hide && state.status().is_ok_and(|s| s.state == "idle") {
+        } else if config.overlay.hides_when_idle()
+            && state.status().is_ok_and(|s| s.state == "idle")
+        {
             let _ = overlay::hide(&state.app);
         }
     }
