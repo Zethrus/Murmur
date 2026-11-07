@@ -58,6 +58,35 @@ class EngineImportGateTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cudnn64_9.dll"):
                 gate.check(self.engine, platform="win32")
 
+    def test_site_packages_python_source_is_scanned(self):
+        site = Path(self.tmp.name) / "site-packages"
+        (site / "ctranslate2").mkdir(parents=True)
+        (site / "ctranslate2/__init__.py").write_text("import os\n")
+        (site / "ctranslate2/__pycache__").mkdir()
+        (site / "ctranslate2/__pycache__/x.cpython-312.pyc").write_bytes(b"libcudnn.so.9")  # stale cache, ignored
+        (site / "unrelated").mkdir()
+        (site / "unrelated/loader.py").write_text('ctypes.CDLL("libcudnn.so.9")\n')
+        self.assertGreater(gate.check(self.engine, platform="test", site_packages=site), 3)
+        (site / "ctranslate2/_loader.py").write_text('ctypes.CDLL("libcudnn.so.9")\n')
+        with self.assertRaisesRegex(RuntimeError, "packages reference cuDNN/NVRTC"):
+            gate.check(self.engine, platform="test", site_packages=site)
+
+    def test_onnxruntime_preload_table_is_benign_only_without_cuda_provider(self):
+        site = Path(self.tmp.name) / "site-ort"
+        (site / "ctranslate2").mkdir(parents=True)
+        (site / "onnxruntime/capi").mkdir(parents=True)
+        (site / "onnxruntime/__init__.py").write_text('("nvidia", "cudnn", "lib", "libcudnn.so.9")\n')
+        gate.check(self.engine, platform="test", site_packages=site)
+        (site / "onnxruntime/capi/libonnxruntime_providers_cuda.so").write_bytes(b"\x7fELF")
+        with self.assertRaisesRegex(RuntimeError, "CUDA provider"):
+            gate.check(self.engine, platform="test", site_packages=site)
+
+    def test_site_packages_without_ctranslate2_is_rejected(self):
+        empty = Path(self.tmp.name) / "site-empty"
+        empty.mkdir()
+        with self.assertRaisesRegex(RuntimeError, "No ctranslate2 package"):
+            gate.check(self.engine, platform="test", site_packages=empty)
+
     def test_directory_without_ctranslate2_is_rejected(self):
         empty = Path(self.tmp.name) / "empty"
         empty.mkdir()

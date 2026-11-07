@@ -99,7 +99,9 @@ jobs:
           scripts/engine-sidecar.sh --build "$PWD/engine/.release-venv/bin/python"
           test -x engine/dist/murmur-engine/murmur-engine
       - name: cuDNN/NVRTC gate (Murmur ships cuBLAS only)
-        run: python3 scripts/check-engine-imports.py engine/dist/murmur-engine
+        run: |
+          python3 scripts/check-engine-imports.py engine/dist/murmur-engine \
+            --site-packages "$(engine/.release-venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
       - run: npm ci
       - run: npm run build
       - run: npm run test:ui

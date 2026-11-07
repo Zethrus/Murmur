@@ -88,6 +88,14 @@ jobs:
           } finally { Pop-Location }
           & engine/dist/murmur-engine/murmur-engine.exe --help
           if ($LASTEXITCODE -ne 0) { throw 'frozen engine did not start' }
+      - name: Fail if the frozen engine could load cuDNN or NVRTC
+        shell: pwsh
+        run: |
+          $Python = (Resolve-Path 'engine/.venv/Scripts/python.exe').Path
+          & $Python -m pip install pefile
+          & $Python scripts/check-engine-imports.py engine/dist/murmur-engine `
+            --site-packages engine/.venv/Lib/site-packages
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen engine references cuDNN/NVRTC' }
 
       - run: npm ci
 
@@ -156,7 +164,9 @@ jobs:
             Unsigned builds. Windows runtime and GPU behavior remain unverified on real Windows hardware.
             The portable zip includes the engine folder beside murmur.exe; keep them together.
             Models are not bundled: install a model explicitly in Settings → Engine.
-          files: .cache/artifacts/windows/*
+          # The NSIS installer has no engine until the component manager (PR-B/PR-C)
+          # ships; only the portable zip, which carries the engine folder, is a release asset.
+          files: .cache/artifacts/windows/murmur-windows-x86_64.zip
           fail_on_unmatched_files: true
       - name: Upload build artifacts (best effort)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}

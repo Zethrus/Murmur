@@ -74,6 +74,9 @@ try {
     $Frozen = Join-Path $FrozenDir 'murmur-engine.exe'
     Assert-Artifact $Frozen
     Invoke-Native $Python @('-c', "import subprocess, sys; subprocess.run([sys.argv[1], '--help'], check=True, timeout=120)", $Frozen)
+    Invoke-Native $Python @('-m', 'pip', 'install', 'pefile')
+    Invoke-Native $Python @((Join-Path $PSScriptRoot 'check-engine-imports.py'), $FrozenDir,
+        '--site-packages', (Join-Path $Root 'engine\.venv\Lib\site-packages'))
 
     Write-Host '[3/5] Installing frontend dependencies and building UI...'
     Invoke-Native 'npm' @('ci')

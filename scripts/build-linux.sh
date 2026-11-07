@@ -26,7 +26,8 @@ npm ci
 npm run build
 scripts/engine-sidecar.sh --build "$ROOT/engine/.release-venv/bin/python"
 # Murmur ships cuBLAS only; stop if the frozen engine could load cuDNN or NVRTC.
-python3 scripts/check-engine-imports.py "$ROOT/engine/dist/murmur-engine"
+python3 scripts/check-engine-imports.py "$ROOT/engine/dist/murmur-engine" \
+  --site-packages "$("$ROOT/engine/.release-venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 # Use the project-pinned Tauri CLI; no global cargo-tauri install required.
 npx tauri build --bundles deb
 python3 scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release" --artifact "$CARGO_TARGET_DIR/release/murmur"

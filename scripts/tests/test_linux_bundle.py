@@ -46,7 +46,7 @@ class DedupeTests(unittest.TestCase):
             for name in ("libfoo.so", "libfoo.so.0", "libfoo.so.0.8000.0"):
                 (lib / name).write_bytes(b"same library")
             (lib / "libbar.so.1").write_bytes(b"different")
-            (lib / "libbaz.so.1").write_bytes(b"different")  # same bytes, other library name group
+            (lib / "libbaz.so.1").write_bytes(b"different")  # same bytes as libbar, different library
             (lib / "notes.txt").write_bytes(b"same library")
             with patch.object(bundle, "_soname", return_value=None):
                 replaced = bundle.dedupe_libraries(lib)
@@ -55,7 +55,9 @@ class DedupeTests(unittest.TestCase):
             for name in ("libfoo.so", "libfoo.so.0.8000.0"):
                 self.assertEqual((lib / name).readlink(), Path("libfoo.so.0"))
                 self.assertEqual((lib / name).read_bytes(), b"same library")
-            self.assertEqual({p.name for p in replaced}, {"libfoo.so", "libfoo.so.0.8000.0", "libbaz.so.1"})
+            self.assertEqual({p.name for p in replaced}, {"libfoo.so", "libfoo.so.0.8000.0"})
+            # Identical bytes under a different library name stay a real file.
+            self.assertTrue((lib / "libbaz.so.1").is_file() and not (lib / "libbaz.so.1").is_symlink())
             self.assertFalse((lib / "notes.txt").is_symlink())
 
     def test_soname_is_kept_as_the_real_file(self):

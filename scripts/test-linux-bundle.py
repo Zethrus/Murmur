@@ -105,7 +105,7 @@ def check_deb(deb, root, manifest, work):
             assert digest(root / relative / file) == digest(package / relative / file), file
     assert verify_cuda(package) == manifest
     # Extraction runs as the owner, so check modes rather than access.
-    for directory in (p for p in (package / 'usr/lib/murmur').rglob('*') if p.is_dir() and not p.is_symlink()):
+    for directory in (p for base in ('usr/lib/murmur', 'usr/share/doc/murmur') for p in (package / base).rglob('*') if p.is_dir() and not p.is_symlink()):
         assert directory.stat().st_mode & 0o777 == 0o755, f'{directory}: {directory.stat().st_mode & 0o777:o}'
     depends = run('dpkg-deb', '-f', str(deb), 'Depends', capture_output=True).stdout
     for needed in ('libwebkit2gtk-4.1-0', 'xdotool', 'x11-utils', 'libayatana-appindicator3-1'):

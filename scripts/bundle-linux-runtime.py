@@ -90,9 +90,11 @@ def dedupe_libraries(root):
     groups = {}
     for path in sorted(root.rglob("*")):
         if path.is_file() and not path.is_symlink() and SHARED_LIBRARY.match(path.name):
-            groups.setdefault((path.parent, path.stat().st_size, _digest(path)), []).append(path)
+            # Key on the library stem too: identical bytes under unrelated names stay separate files.
+            stem = path.name.split(".so", 1)[0]
+            groups.setdefault((path.parent, stem, path.stat().st_size, _digest(path)), []).append(path)
     replaced = []
-    for (directory, _, _), copies in groups.items():
+    for copies in groups.values():
         if len(copies) < 2:
             continue
         names = {path.name: path for path in copies}
