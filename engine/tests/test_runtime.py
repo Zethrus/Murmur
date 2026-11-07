@@ -13,32 +13,54 @@ def test_environment_is_offline_and_skips_xet() -> None:
 
 def test_windows_registers_cuda_directory(tmp_path: Path) -> None:
     add = Mock(return_value="handle")
-    found = runtime.add_cuda_directory({runtime.CUDA_ENV: str(tmp_path)}, "nt", add)
+    environ = {runtime.CUDA_ENV: str(tmp_path), "PATH": r"C:\Windows\system32;C:\Windows"}
+    found = runtime.add_cuda_directory(environ, "nt", add)
     assert found == tmp_path
     add.assert_called_once_with(str(tmp_path))
     assert "handle" in runtime._DLL_DIRECTORIES
+    # Plain LoadLibrary (CTranslate2's cublas64_12.dll load) ignores add_dll_directory; PATH works.
+    assert environ["PATH"] == str(tmp_path) + r";C:\Windows\system32;C:\Windows"
+
+
+def test_cuda_directory_is_first_on_path_exactly_once(tmp_path: Path) -> None:
+    environ = {runtime.CUDA_ENV: str(tmp_path), "PATH": rf"C:\Windows;{tmp_path}\;;C:\Tools"}
+    runtime.add_cuda_directory(environ, "nt", Mock())
+    runtime.add_cuda_directory(environ, "nt", Mock())
+    assert environ["PATH"] == rf"{tmp_path};C:\Windows;C:\Tools"
+
+
+def test_cuda_directory_on_path_without_existing_path(tmp_path: Path) -> None:
+    environ = {runtime.CUDA_ENV: str(tmp_path)}
+    runtime.add_cuda_directory(environ, "nt", Mock())
+    assert environ["PATH"] == str(tmp_path)
 
 
 def test_linux_leaves_cuda_to_loader_path(tmp_path: Path) -> None:
     add = Mock()
-    assert runtime.add_cuda_directory({runtime.CUDA_ENV: str(tmp_path)}, "posix", add) is None
+    environ = {runtime.CUDA_ENV: str(tmp_path), "PATH": "/usr/bin"}
+    assert runtime.add_cuda_directory(environ, "posix", add) is None
     add.assert_not_called()
+    assert environ["PATH"] == "/usr/bin"
 
 
 @pytest.mark.parametrize("value", ["", "   ", "relative/cuda", "/nonexistent/murmur-cuda"])
 def test_invalid_cuda_directory_is_ignored(value: str) -> None:
     add = Mock()
-    assert runtime.add_cuda_directory({runtime.CUDA_ENV: value}, "nt", add) is None
+    environ = {runtime.CUDA_ENV: value, "PATH": r"C:\Windows"}
+    assert runtime.add_cuda_directory(environ, "nt", add) is None
     add.assert_not_called()
+    assert environ["PATH"] == r"C:\Windows"
 
 
 def test_unset_cuda_directory_is_ignored() -> None:
     assert runtime.cuda_directory({}) is None
 
 
-def test_loader_refusal_is_not_fatal(tmp_path: Path) -> None:
+def test_loader_refusal_is_not_fatal_and_path_still_applies(tmp_path: Path) -> None:
     add = Mock(side_effect=OSError("refused"))
-    assert runtime.add_cuda_directory({runtime.CUDA_ENV: str(tmp_path)}, "nt", add) is None
+    environ = {runtime.CUDA_ENV: str(tmp_path), "PATH": r"C:\Windows"}
+    assert runtime.add_cuda_directory(environ, "nt", add) == tmp_path
+    assert environ["PATH"] == str(tmp_path) + r";C:\Windows"
 
 
 def test_av_stub_only_when_pyav_is_absent() -> None:

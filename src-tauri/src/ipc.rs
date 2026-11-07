@@ -190,6 +190,15 @@ mod engine_probe_tests {
 pub async fn list_devices() -> Reply<Vec<audio::DeviceInfo>> {
     blocking(audio::list_devices).await
 }
+/// Windows microphone privacy state for the Audio page (never blocked elsewhere).
+#[tauri::command]
+pub async fn microphone_access() -> Reply<platform::MicrophoneAccess> {
+    blocking(|| Ok(platform::microphone_access())).await
+}
+#[tauri::command]
+pub async fn open_microphone_settings() -> Reply<()> {
+    blocking(platform::open_microphone_settings).await
+}
 #[tauri::command]
 pub async fn set_hotkey(app: AppHandle, accel: String) -> Reply<Config> {
     blocking(move || {

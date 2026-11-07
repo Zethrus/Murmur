@@ -96,7 +96,7 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
     app.global_shortcut()
         .on_shortcut(shortcut, move |app, shortcut, event| {
             let down = event.state == ShortcutState::Pressed;
-            if pressed.swap(down, Ordering::Relaxed) == down {
+            if !edge(&pressed, down) {
                 return;
             }
             let state = app.state::<AppState>();
@@ -122,7 +122,10 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
                 }
                 Some(Purpose::Rewrite | Purpose::Accept | Purpose::InsertHeld) => None,
                 Some(purpose) => {
-                    if down && state.status().is_ok_and(|s| s.state == "transcribing") {
+                    if state
+                        .status()
+                        .is_ok_and(|s| ignore_dictation_press(down, &s.state))
+                    {
                         return;
                     }
                     action_for(&config.general.hotkey_mode, down, purpose == Purpose::Code)
@@ -142,6 +145,21 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
             )
         })?;
     Ok(())
+}
+/// Only state changes count: a repeated Pressed or Released for the same shortcut is dropped.
+///
+/// Windows: global-hotkey registers with MOD_NOREPEAT (no auto-repeat Pressed) and reports
+/// Released by polling GetAsyncKeyState for the non-modifier key every 50 ms, so Released can
+/// arrive while Control/Alt are still down. Typing then waits for the modifiers
+/// (`inject::wait_for_modifiers_released`, B8).
+fn edge(pressed: &AtomicBool, down: bool) -> bool {
+    pressed.swap(down, Ordering::Relaxed) != down
+}
+/// A dictation press while the previous transcript is still being transcribed or delivered is
+/// ignored. This also stops synthetic keystrokes from re-triggering the hotkey: on Windows a typed
+/// letter that matches the hotkey while its modifiers are physically held fires WM_HOTKEY again.
+fn ignore_dictation_press(down: bool, state: &str) -> bool {
+    down && state == "transcribing"
 }
 fn action_for(mode: &str, down: bool, code: bool) -> Option<Action> {
     match (mode, down) {
@@ -238,6 +256,25 @@ mod tests {
             action_for("toggle", true, false),
             Some(Action::Toggle)
         ));
+    }
+    #[test]
+    fn only_press_release_edges_are_acted_on() {
+        let pressed = AtomicBool::new(false);
+        assert!(edge(&pressed, true));
+        // A second Pressed without a Released in between (key repeat, duplicate event).
+        assert!(!edge(&pressed, true));
+        assert!(edge(&pressed, false));
+        assert!(!edge(&pressed, false));
+        assert!(edge(&pressed, true));
+    }
+    #[test]
+    fn presses_during_delivery_do_not_restart_dictation() {
+        assert!(ignore_dictation_press(true, "transcribing"));
+        // The hold-mode release still stops the recording.
+        assert!(!ignore_dictation_press(false, "transcribing"));
+        for state in ["idle", "listening", "done", "error"] {
+            assert!(!ignore_dictation_press(true, state));
+        }
     }
     #[test]
     fn accelerator_roundtrip() -> Result<()> {

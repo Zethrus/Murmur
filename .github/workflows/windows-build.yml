@@ -1,25 +1,37 @@
 name: Windows build
 
+# Runs on vars.WINDOWS_RUNNER (the self-hosted "Edison" machine: self-hosted, Windows, X64, gpu,
+# nvidia), falling back to windows-latest once hosted billing is unlocked. Nothing here has run
+# yet: the workflow was written without a Windows machine (see docs/ci-windows.md).
+#
+# Pull requests and manual runs build, test and upload throwaway-signed artifacts (never a
+# release). Release tags arrive through release.yml (workflow_call): the Windows assets go to the
+# draft release only, and the component inputs are handed to the Linux signing job.
 on:
-  # Releases build on v* tags through release.yml. Branch pushes do not trigger a full build:
-  # one self-hosted runner means every push would queue a 20-minute job, and Actions artifact
-  # storage on this account is small.
   pull_request:
   workflow_dispatch:
+    inputs:
+      gpu:
+        description: Also run the GPU inference matrix on the NVIDIA runner (needs vars.WINDOWS_GPU_TEST_MODELS)
+        type: boolean
+        default: false
   workflow_call:
+    outputs:
+      windows_inputs:
+        description: components-windows-inputs.json (sizes and SHA-256 of the Windows component zips)
+        value: ${{ jobs.build.outputs.windows_inputs }}
 
 permissions:
   contents: write
 
 concurrency:
   group: windows-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
-    # Fork PRs must never execute on a self-hosted runner; keep them on hosted or skip.
-    # Fork PRs never run here. Tag builds wait for a real Windows runner instead of failing
-    # against a billing-locked hosted runner.
+    # Fork pull requests never reach a self-hosted runner: they run only when WINDOWS_RUNNER is
+    # unset (hosted). Tags need the real runner; they never fall back to a billing-locked host.
     if: >-
       vars.ENABLE_WINDOWS == 'true' &&
       (github.event_name != 'pull_request' ||
@@ -27,7 +39,9 @@ jobs:
        vars.WINDOWS_RUNNER == '') &&
       (vars.WINDOWS_RUNNER != '' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
-    timeout-minutes: 90
+    timeout-minutes: 150
+    outputs:
+      windows_inputs: ${{ steps.inputs.outputs.json }}
     env:
       HF_HUB_OFFLINE: '1'
       HF_HUB_DISABLE_TELEMETRY: '1'
@@ -36,15 +50,16 @@ jobs:
       PYINSTALLER_CONFIG_DIR: ${{ github.workspace }}/.cache/pyinstaller
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       CARGO_BUILD_JOBS: '2'
+      PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           architecture: x64
-          cache: pip
-          cache-dependency-path: engine/requirements.txt
 
       - uses: actions/setup-node@v4
         with:
@@ -67,51 +82,55 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Freeze the engine sidecar
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          python -m venv engine/.venv
-          $Python = (Resolve-Path 'engine/.venv/Scripts/python.exe').Path
-          & $Python -m pip install --upgrade pip
-          & $Python -m pip install -r engine/requirements.txt pyinstaller
-          if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
-          Push-Location engine
-          try {
-            # Onedir engine; CUDA DLLs are found through MURMUR_CUDA_DIR (murmur_engine/runtime.py).
-            & $Python -m PyInstaller --noconfirm --clean --onedir --name murmur-engine `
-              --paths . --exclude-module av --exclude-module hf_xet `
-              --collect-all faster_whisper --collect-all ctranslate2 `
-              --collect-all tokenizers --collect-binaries onnxruntime --collect-data onnxruntime `
-              --hidden-import onnxruntime.capi._pybind_state murmur_engine/__main__.py
-            if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
-          } finally { Pop-Location }
-          & engine/dist/murmur-engine/murmur-engine.exe --help
-          if ($LASTEXITCODE -ne 0) { throw 'frozen engine did not start' }
-      - name: Fail if the frozen engine could load cuDNN or NVRTC
-        shell: pwsh
-        run: |
-          $Python = (Resolve-Path 'engine/.venv/Scripts/python.exe').Path
-          & $Python -m pip install pefile
-          & $Python scripts/check-engine-imports.py engine/dist/murmur-engine `
-            --site-packages engine/.venv/Lib/site-packages
-          if ($LASTEXITCODE -ne 0) { throw 'Frozen engine references cuDNN/NVRTC' }
-
-      - run: npm ci
-
-      - run: npm run build
-      - run: npm run test:ui
-      - name: Provision and initialize Windows native toolchain
+      - name: Provision and initialize the Windows native toolchain
         shell: pwsh
         run: . ./scripts/prepare-windows-native.ps1
-      - name: Test Rust including unavailable Enhance backend
+
+      - name: Freeze the engine (hash-locked wheels) and run the cuDNN/NVRTC gate (pefile + site-packages)
+        shell: pwsh
+        run: ./scripts/windows/freeze-engine.ps1
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:ui
+
+      - name: Script tests (release checks, PE gate, Windows components, inference core)
+        shell: pwsh
+        run: |
+          # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
+          Push-Location scripts/tests
+          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci
+          $Code = $LASTEXITCODE
+          Pop-Location
+          if ($Code -ne 0) { throw 'Script tests failed' }
+
+      - name: Engine tests
+        shell: pwsh
+        run: |
+          engine/.release-venv/Scripts/python.exe -m pip install pytest
+          engine/.release-venv/Scripts/python.exe -m pytest engine/tests -q
+          if ($LASTEXITCODE -ne 0) { throw 'Engine tests failed' }
+
+      - name: Rust tests (with and without the Enhance backend)
         shell: pwsh
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
           cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests without Enhance backend failed' }
-      - name: Build the app and NSIS installer
+
+      # Release tags only: pull-request and manual builds never receive the certificate secrets,
+      # never hold the key in the runner's certificate store and never produce signed artifacts.
+      - name: Import the Authenticode certificate (tags only; dormant until the secrets exist)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: ./scripts/windows/authenticode.ps1 -Import
+
+      - name: Build murmur.exe and the per-user NSIS installer
+        shell: pwsh
         env:
           RUSTFLAGS: -C target-cpu=x86-64
           GGML_NATIVE: 'OFF'
@@ -123,7 +142,25 @@ jobs:
           GGML_BMI2: 'ON'
           GGML_SSE42: 'ON'
           GGML_CPU_ALL_VARIANTS: 'OFF'
-        run: npx tauri build --target x86_64-pc-windows-msvc
+        run: |
+          $TauriArgs = @('tauri', 'build', '--target', 'x86_64-pc-windows-msvc')
+          if ($env:MURMUR_SIGN_THUMBPRINT -and $env:GITHUB_REF -like 'refs/tags/*') {
+            $Config = Join-Path $env:RUNNER_TEMP 'tauri.sign.conf.json'
+            $Command = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PWD\scripts\windows\authenticode.ps1`" -Sign %1"
+            @{ bundle = @{ windows = @{ signCommand = $Command } } } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 $Config
+            $TauriArgs += @('--config', $Config)
+            Write-Host 'Signing murmur.exe and the installer with the imported Authenticode certificate.'
+          } else {
+            Write-Host 'Unsigned build: no Authenticode certificate configured.'
+            '**Unsigned**: no Authenticode certificate configured.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          npx @TauriArgs
+          if ($LASTEXITCODE -ne 0) { throw 'tauri build failed' }
+
+      - name: Remove the Authenticode certificate
+        if: always()
+        shell: pwsh
+        run: ./scripts/windows/authenticode.ps1 -Remove
 
       - name: Audit linked native CPU baseline
         shell: pwsh
@@ -131,50 +168,121 @@ jobs:
           python scripts/audit-llama-cpu.py src-tauri/target/x86_64-pc-windows-msvc/release
           if ($LASTEXITCODE -ne 0) { throw 'Unsupported native CPU baseline' }
 
-      - name: Verify and stage unsigned artifacts
+      - name: Package installer, portable zip and component zips; enforce size budgets
+        shell: pwsh
+        run: |
+          ./scripts/windows/package.ps1 -Release src-tauri/target/x86_64-pc-windows-msvc/release |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Startup smoke test (--version, --help)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $Release = 'src-tauri/target/x86_64-pc-windows-msvc/release'
-          $Destination = '.cache/artifacts/windows'
-          New-Item -ItemType Directory -Force $Destination | Out-Null
-          # Portable layout the app resolves: murmur.exe + engine\murmur-engine.exe (onedir).
-          $File = Join-Path $Release 'murmur.exe'
-          if (-not (Test-Path $File) -or (Get-Item $File).Length -eq 0) {
-            throw "Missing or empty portable artifact: $File"
-          }
-          $Portable = Join-Path $Destination 'portable'
-          New-Item -ItemType Directory -Force $Portable | Out-Null
-          Copy-Item $File $Portable -Force
-          Copy-Item engine/dist/murmur-engine (Join-Path $Portable 'engine') -Recurse -Force
-          # The NSIS installer does not include the engine yet (PR-B/PR-C components).
-          $Installers = @(Get-ChildItem "$Release/bundle/nsis/*.exe" -File)
-          if ($Installers.Count -eq 0) { throw 'Missing NSIS installer' }
-          $Installers | Copy-Item -Destination $Destination
-          Compress-Archive -Path "$Portable/*" -DestinationPath "$Destination/murmur-windows-x86_64.zip" -Force
-          Remove-Item $Portable -Recurse -Force
+          $Work = Join-Path $env:RUNNER_TEMP 'murmur-smoke-cli'
+          if (Test-Path $Work) { Remove-Item -Recurse -Force $Work }
+          Expand-Archive .cache/artifacts/windows/murmur-windows-x86_64.zip $Work
+          $App = Join-Path $Work 'murmur.exe'
+          # GUI-subsystem binary: piping makes PowerShell wait and capture stdout.
+          $Version = (& $App --version | Out-String).Trim()
+          $Expected = "murmur $((Get-Content -Raw package.json | ConvertFrom-Json).version)"
+          if ($Version -ne $Expected) { throw "--version printed '$Version', expected '$Expected'" }
+          $Help = & $App --help | Out-String
+          if ($Help -notmatch '--background') { throw '--help output is incomplete' }
+          Write-Host '--version and --help OK.'
 
-      - name: Publish Windows assets to the release (tags only)
+      # Hosted runners only: the self-hosted runner is a Windows service (session 0), where the
+      # tray (Shell_NotifyIcon needs a shell) and WebView2 are unavailable, so a launch there
+      # would fail for reasons unrelated to Murmur. On Edison the launch is covered by the
+      # interactive checklist in the logged-in session (docs/ci-windows.md).
+      - name: Startup smoke test (launch without an engine; hosted runners only)
+        if: vars.WINDOWS_RUNNER == ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Work = Join-Path $env:RUNNER_TEMP "murmur-smoke-$([guid]::NewGuid())"
+          Expand-Archive .cache/artifacts/windows/murmur-windows-x86_64.zip $Work
+          $App = Join-Path $Work 'murmur.exe'
+          # Throwaway profile; the runner's own profile is never touched.
+          $env:APPDATA = Join-Path $Work 'Roaming'
+          $env:LOCALAPPDATA = Join-Path $Work 'Local'
+          New-Item -ItemType Directory -Force $env:APPDATA, $env:LOCALAPPDATA | Out-Null
+          $Process = Start-Process $App -ArgumentList '--background' -PassThru
+          $Exited = $Process.WaitForExit(10000)
+          $Log = Join-Path $env:LOCALAPPDATA 'Murmur\murmur.log'
+          if (Test-Path $Log) { Get-Content $Log -Tail 40 }
+          if ($Exited -and $Process.ExitCode -ne 0) { throw "murmur.exe exited with $($Process.ExitCode) within 10 s" }
+          if (-not $Exited) { Stop-Process -Id $Process.Id -Force }
+          if (-not (Test-Path (Join-Path $env:APPDATA 'Murmur\config.toml'))) { throw 'No config written: the app did not start' }
+          if (Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Murmur') -Recurse -Filter 'murmur-engine.exe' -ErrorAction SilentlyContinue) {
+            throw 'An engine appeared without an explicit install'
+          }
+          Write-Host 'murmur.exe started without an engine and did not crash within 10 s.'
+
+      - name: Throwaway-signed Windows manifest (pull requests and manual runs; never released)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          components=.cache/artifacts/components-windows
+          key="$RUNNER_TEMP/murmur-throwaway-key"
+          rm -rf "$key"
+          scripts/components/dev-key.sh "$key" >/dev/null
+          sleep 1
+          python scripts/components/make-manifest.py --components "$components" --version "$version" --os windows \
+            --windows-inputs "$components/components-windows-inputs.json" \
+            --output "$components/components-manifest.json"
+          GNUPGHOME="$key" scripts/components/sign-manifest.sh "$components/components-manifest.json" "$components/murmur-release.asc"
+          gpgconf --homedir "$key" --kill all || true
+          rm -rf "$key"
+
+      - name: GPU validation on the NVIDIA runner (manual runs with gpu=true)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu }}
+        shell: pwsh
+        env:
+          WINDOWS_GPU_TEST_MODELS: ${{ vars.WINDOWS_GPU_TEST_MODELS }}
+        run: |
+          if (-not $env:WINDOWS_GPU_TEST_MODELS) { throw 'Set vars.WINDOWS_GPU_TEST_MODELS (staged offline models) first.' }
+          if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) { throw 'nvidia-smi not found: NVIDIA runner required.' }
+          nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+          python scripts/test-windows-inference.py --artifacts .cache/artifacts/windows `
+            --components .cache/artifacts/components-windows --models-dir $env:WINDOWS_GPU_TEST_MODELS
+          if ($LASTEXITCODE -ne 0) { throw 'Windows GPU validation failed' }
+
+      - name: Hand the component inputs to the release
+        id: inputs
+        shell: pwsh
+        run: |
+          $Json = Get-Content -Raw .cache/artifacts/components-windows/components-windows-inputs.json | ConvertFrom-Json | ConvertTo-Json -Depth 8 -Compress
+          "json=$Json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Attach Windows assets to the draft release (tags only)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-          body: |
-            Unsigned builds. Windows runtime and GPU behavior remain unverified on real Windows hardware.
-            The portable zip includes the engine folder beside murmur.exe; keep them together.
-            Models are not bundled: install a model explicitly in Settings → Engine.
-          # The NSIS installer has no engine until the component manager (PR-B/PR-C)
-          # ships; only the portable zip, which carries the engine folder, is a release asset.
-          files: .cache/artifacts/windows/murmur-windows-x86_64.zip
-          fail_on_unmatched_files: true
-      - name: Upload build artifacts (best effort)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $Draft = gh release view $env:GITHUB_REF_NAME --json isDraft | ConvertFrom-Json
+          if (-not $Draft.isDraft) { throw 'Published releases are immutable; never upload to them' }
+          $Version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          gh release upload $env:GITHUB_REF_NAME `
+            ".cache/artifacts/windows/Murmur_${Version}_x64-setup.exe" `
+            .cache/artifacts/windows/murmur-windows-x86_64.zip `
+            ".cache/artifacts/components-windows/murmur-engine-windows-x86_64-$Version.zip" `
+            ".cache/artifacts/components-windows/murmur-cuda-windows-x86_64-$Version.zip" --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Upload to the draft release failed' }
+
+      - name: Upload throwaway-signed build artifacts (best effort, never released)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: murmur-windows-x86_64
-          path: .cache/artifacts/windows/*
+          name: murmur-windows-x86_64-untrusted-dev-signed
+          path: |
+            .cache/artifacts/windows/*
+            .cache/artifacts/components-windows/components-manifest.json*
+            .cache/artifacts/components-windows/murmur-release.asc
+            .cache/artifacts/components-windows/components-windows-inputs.json
           if-no-files-found: error
           retention-days: 3
           compression-level: 0

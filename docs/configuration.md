@@ -4,6 +4,20 @@ Linux: `${XDG_CONFIG_HOME:-~/.config}/murmur/config.toml`, data/history/logs and
 installed components (`components/`, see [components](components.md))
 under `${XDG_DATA_HOME:-~/.local/share}/murmur`. Windows:
 `%APPDATA%\Murmur\config.toml` and `%LOCALAPPDATA%\Murmur` for data.
+
+| What | Linux | Windows (verified in source, not run on hardware) |
+| --- | --- | --- |
+| Settings | `~/.config/murmur/config.toml` | `%APPDATA%\Murmur\config.toml` (roams with the profile) |
+| Engine, GPU add-on, models | `~/.local/share/murmur/components/` | `%LOCALAPPDATA%\Murmur\components\` |
+| Pre-0.5 models, Enhance store | `~/.local/share/murmur/models/`, `…/enhance/models/` | `%LOCALAPPDATA%\Murmur\models\`, `…\enhance\models\` |
+| Log (2 MB, two rotations) | `~/.local/share/murmur/murmur.log` | `%LOCALAPPDATA%\Murmur\murmur.log` |
+| History (opt-in) | `~/.local/share/murmur/history.sqlite` | `%LOCALAPPDATA%\Murmur\history.sqlite` |
+| Autostart | `~/.config/autostart/murmur.desktop` | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
+| App (installer) | package manager / AppImage location | per-user NSIS install (no administrator rights) |
+
+Large data stays in `%LOCALAPPDATA%` so roaming profiles do not copy gigabytes of
+models. Settings → Privacy → Open folder opens these locations. Nothing is
+written outside them; Murmur never edits `PATH` or machine-wide settings.
 Use Settings or edit TOML; writes are atomic, unknown keys are preserved, and
 invalid edits report errors while retaining the last valid configuration.
 The tables below cover user settings. Unknown keys are preserved for compatibility. Defaults are application defaults; a fresh

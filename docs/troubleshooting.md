@@ -84,6 +84,46 @@ For Bluetooth, enable Bluetooth on both devices and keep the Flipper app open.
 Try USB first to separate pairing issues from a protocol mismatch. A firmware API
 mismatch needs a rebuilt `.fap`; see [the companion guide](../companion/README.md).
 
+## Windows
+
+Windows support has **not been tested on Windows hardware yet**; these answers
+follow the code. Please report what actually happens.
+
+**SmartScreen: "Windows protected your PC".** Murmur's Windows builds are not
+code-signed (no Authenticode certificate yet), so SmartScreen warns about every
+new download. Check the file first: in PowerShell,
+`Get-FileHash .\Murmur_<ver>_x64-setup.exe` must equal the line in `SHA256SUMS`
+from the same GitHub release. Only then choose *More info → Run anyway*. Do not
+turn SmartScreen off.
+
+**No microphone, or the level meter never moves.** Windows can block desktop
+apps from the microphone without any error. Settings → Audio says which switch is
+off and **Open Windows privacy settings** opens *Privacy & security →
+Microphone*. Turn on *Microphone access*, *Let apps access your microphone* and
+*Let desktop apps access your microphone*, then press **Refresh** in Audio.
+
+**Text was held: "the window runs as administrator".** Windows does not let a
+normal app type into an app started with *Run as administrator* (UIPI), and it
+drops the keystrokes silently. Murmur detects this and holds the text: use
+**Copy** and paste it yourself, or run the target app normally. Running Murmur
+itself as administrator also works but is not recommended.
+
+**Text was held: "a Windows security prompt or the lock screen had focus".**
+A UAC prompt, the lock screen or Ctrl+Alt+Del was showing when the transcript
+was ready. Dismiss it, focus your app and choose **Insert here**.
+
+**"Return to the original window" did not switch back.** Windows decides when an
+app may bring another window to the front; Murmur asks once
+(`SetForegroundWindow`) and holds the text if Windows says no.
+
+**WebView2.** Settings and the overlay need the Microsoft Edge WebView2 Runtime.
+Windows 11 has it; the installer adds it on older Windows 10 (with an internet
+connection). The portable zip cannot install it: get the *Evergreen Bootstrapper*
+from Microsoft.
+
+**Where are the files?** `%APPDATA%\Murmur\config.toml` and everything else under
+`%LOCALAPPDATA%\Murmur` (log: `murmur.log`). See [configuration](configuration.md).
+
 ## Reporting a problem
 
 Logs are under the Murmur data directory described in [configuration](configuration.md).

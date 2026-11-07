@@ -178,42 +178,67 @@ fixture is a three-second excerpt of [OpenAI Whisper's `tests/jfk.flac`](https:/
 a known working manual-path engine. The first inference is recorded separately.
 Timings for the current build are recorded in [the size report](size-report.md).
 
-## Windows development build (deferred)
+## Windows build
 
-Windows downloads are not part of the Linux launch. See [the release schedule](roadmap.md).
-
-**Unverified on real Windows hardware.** Use x64 Windows 10/11 with Python 3.12
-(recommended), Node 22, Rust stable with the MSVC toolchain, Visual Studio C++ Build
-Tools/Windows SDK, CMake, LLVM libclang (set `LIBCLANG_PATH` if needed),
-and WebView2. Those prerequisites must already be available;
-the script itself requires no administrator rights. Use a developer PowerShell
-if the linker/SDK is not discoverable from a normal shell.
+**Not yet run on Windows hardware**: the scripts were written and reviewed without
+a Windows machine; the Edison runner ([ci-windows.md](ci-windows.md)) will be the
+first to execute them. Use x64 Windows 10/11 with Python 3.12 x64 (the engine lock
+is for CPython 3.12), Node 22, Rust stable with the MSVC toolchain, Visual Studio
+2022 C++ Build Tools and Windows SDK, CMake, LLVM (libclang; set `LIBCLANG_PATH`
+if needed), NSIS and WebView2. No administrator rights are needed for the build.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
-This process-scoped execution-policy override does not change the machine policy.
-The script creates `engine\.venv`, installs requirements + PyInstaller, freezes
-the onedir engine into `engine\dist\murmur-engine\` (no CUDA inside; set
-`MURMUR_CUDA_DIR` to a folder with the CUDA DLLs), runs `npm ci`,
-`npm run build`, installs the Cargo Tauri CLI matching the locked npm CLI version,
-and runs `cargo tauri build --target x86_64-pc-windows-msvc`. The existing
-`tauri.windows.conf.json` selects NSIS automatically. It then copies the engine
-folder to `engine\` beside `murmur.exe`, where the app looks for it.
+The process-scoped execution-policy override does not change the machine policy.
+The script:
 
-Printed outputs are under `src-tauri\target\x86_64-pc-windows-msvc\release`:
+1. `scripts\windows\freeze-engine.ps1`: creates `engine\.release-venv`, installs
+   `engine\requirements-windows-release.txt` with `--require-hashes` (win_amd64
+   wheels for the same versions as the Linux lock), freezes the onedir engine into
+   `engine\dist\murmur-engine\`, removes CTranslate2's unused `cudnn64_9.dll`
+   shim, runs `murmur-engine.exe --help`, and the cuDNN/NVRTC gate
+   (`scripts\check-engine-imports.py`, with pefile and the unfrozen
+   site-packages).
+2. `npm ci` and `npm run build`.
+3. `npx tauri build --target x86_64-pc-windows-msvc`; `tauri.windows.conf.json`
+   selects the per-user NSIS installer with the embedded WebView2 bootstrapper.
+   With `WINDOWS_CERT_PFX_BASE64`/`WINDOWS_CERT_PASSWORD` set, `murmur.exe` and the
+   installer are Authenticode-signed (`scripts\windows\authenticode.ps1`);
+   otherwise they stay unsigned. Then the llama.cpp CPU-flag audit.
+4. `scripts\windows\package.ps1` writes:
+   - `.cache\artifacts\windows\Murmur_<ver>_x64-setup.exe`: the app only;
+   - `.cache\artifacts\windows\murmur-windows-x86_64.zip`: `murmur.exe` and
+     `README.txt` (no engine folder);
+   - `.cache\artifacts\components-windows\murmur-engine-windows-x86_64-<ver>.zip`
+     and `murmur-cuda-windows-x86_64-<ver>.zip` (cublas64_12.dll,
+     cublasLt64_12.dll, NVIDIA's licence and a provenance file, from the
+     `nvidia-cublas-cu12` 12.9.2.10 win_amd64 wheel pinned in
+     `engine\requirements-windows-cuda.txt`; no cuDNN, no NVRTC);
+   - `components-windows-inputs.json` for the signing job,
+   and enforces the size budgets. `-SkipComponents` builds only the app.
 
-- `murmur.exe` and `engine\murmur-engine.exe`: portable layout; keep the `engine`
-  folder beside `murmur.exe`.
-- `bundle\nsis\*-setup.exe`: unsigned NSIS installer (per-user default). It does
-  not include the engine yet.
+Python is not required on the destination PC. The app downloads the engine on
+first run, verified against the signed manifest; a development build accepts a
+throwaway manifest only with `MURMUR_DEV_TRUST_ROOT` (+ acknowledgement in release
+builds), as on Linux. To try a local engine without the component manager, point
+`MURMUR_ENGINE` at `engine\dist\murmur-engine` and, for CUDA, `MURMUR_CUDA_DIR`
+at a folder with the two cuBLAS DLLs.
 
-Python is not required on the destination PC. Models are not bundled. WebView2
-and compatible NVIDIA drivers (for CUDA) remain runtime prerequisites. Unsigned
-builds may trigger SmartScreen; inspect the build source rather than disabling
-system protections. Run Murmur and its target apps at the same privilege level;
-Windows can block injection into elevated windows.
+Cross-checking Windows code from Linux (what this repository's CI cannot run on
+Windows yet):
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo check --manifest-path src-tauri/Cargo.toml --no-default-features --target x86_64-pc-windows-gnu
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --target x86_64-pc-windows-gnu --no-run
+```
+
+This type-checks every `cfg(windows)` path with the GNU target (MSVC linking and
+the default Enhance backend are not covered: llama.cpp does not build against
+older mingw-w64 headers). Nothing runs; Windows behaviour still needs
+[the Windows checklist](parity/windows-checklist.md).
 
 ## Checks before a pull request
 

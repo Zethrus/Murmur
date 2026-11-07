@@ -434,6 +434,14 @@ impl Controller {
             }
             Decision::Hold => {
                 held = self.hold(state, text, duration);
+                // Say why when the window could not take typing at all (elevated, secure desktop)
+                // or could not be read (for example Wayland), instead of "focus changed".
+                if let (true, Some(reason)) = (held, hold_reason(&current)) {
+                    if let Some(id) = state.held.current_id() {
+                        state.held.set_message(id, &reason);
+                        state.enhance.refresh_overlay(state);
+                    }
+                }
                 None
             }
         };
@@ -531,7 +539,7 @@ impl Controller {
             .into_iter()
             .flatten()
             .find_map(|focus| match focus {
-                Focus::Window { class, .. } => Some(class.clone()),
+                Focus::Window { class, .. } | Focus::Blocked { class, .. } => Some(class.clone()),
                 Focus::Own => None,
             })
             .unwrap_or_default()
@@ -540,7 +548,7 @@ impl Controller {
     fn hold(&self, state: &AppState, raw: &str, duration: u64) -> bool {
         let origin = self.origin.as_ref().map(|focus| match focus {
             Focus::Own => "Murmur".to_owned(),
-            Focus::Window { class, .. } => class.clone(),
+            Focus::Window { class, .. } | Focus::Blocked { class, .. } => class.clone(),
         });
         let class = origin.as_deref().unwrap_or_default();
         let style = postproc::resolve_style(&self.config, class, self.force_code);
@@ -595,6 +603,10 @@ impl Controller {
         } else {
             match current {
                 Ok(Focus::Window { class, .. }) => class,
+                Ok(Focus::Blocked { reason, .. }) => {
+                    self.held_message(state, held.id, reason.message());
+                    return Ok(());
+                }
                 Ok(Focus::Own) => {
                     self.held_message(state, held.id, FOCUS_TARGET_FIRST);
                     return Ok(());
@@ -910,6 +922,17 @@ fn delivery_target<F: FnMut(bool) -> Result<()>, T>(
     Ok((guard, focused()))
 }
 
+/// The message for a held transcript when the current window, not a focus change, is the reason:
+/// a blocked target says why, and an unreadable focus shows the platform error (as Insert here
+/// does). `None` keeps the default "focus changed" text.
+fn hold_reason(current: &Result<Focus>) -> Option<String> {
+    match current {
+        Ok(Focus::Blocked { reason, .. }) => Some(reason.message().to_owned()),
+        Ok(Focus::Window { .. } | Focus::Own) => None,
+        Err(error) => Some(format!("{error:#}")),
+    }
+}
+
 fn set_delivery_busy(state: &AppState, busy: bool) -> Result<()> {
     let result = overlay::set_busy(&state.app, busy);
     state.enhance.publish(state);
@@ -965,6 +988,42 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn held_text_says_why_when_focus_is_unreadable_or_blocked() {
+        use crate::platform::{Blocked, Focus};
+        // Wayland in insert (or hold) mode: the real reason, not "focus changed".
+        let wayland: anyhow::Result<Focus> = Err(anyhow::anyhow!(
+            "Text injection requires X11; Wayland is untested"
+        ));
+        assert_eq!(
+            super::hold_reason(&wayland).as_deref(),
+            Some("Text injection requires X11; Wayland is untested")
+        );
+        let context: anyhow::Result<Focus> =
+            Err(anyhow::Error::msg("No such file").context("Read active X11 window (xprop)"));
+        assert_eq!(
+            super::hold_reason(&context).as_deref(),
+            Some("Read active X11 window (xprop): No such file")
+        );
+        let elevated = Ok(Focus::Blocked {
+            reason: Blocked::Elevated,
+            class: "notepad.exe".into(),
+        });
+        assert_eq!(
+            super::hold_reason(&elevated).as_deref(),
+            Some(Blocked::Elevated.message())
+        );
+        // A readable, different window keeps the default "focus changed" text.
+        let other = Ok(Focus::Window {
+            id: 2,
+            pid: None,
+            started: None,
+            class: "editor".into(),
+        });
+        assert_eq!(super::hold_reason(&other), None);
+        assert_eq!(super::hold_reason(&Ok(Focus::Own)), None);
+    }
+
+    #[test]
     fn delivery_target_reads_focus_after_wait_and_keeps_busy_until_drop() {
         use std::sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
@@ -988,12 +1047,16 @@ mod tests {
                 },
                 || crate::platform::Focus::Window {
                     id: worker_focus.load(Ordering::SeqCst),
+                    pid: None,
+                    started: None,
                     class: "editor".into(),
                 },
             )
             .unwrap();
             let origin = crate::platform::Focus::Window {
                 id: 1,
+                pid: None,
+                started: None,
                 class: "editor".into(),
             };
             assert_eq!(

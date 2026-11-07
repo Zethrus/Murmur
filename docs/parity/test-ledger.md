@@ -9,6 +9,59 @@ hardware result.
 Machine for every Linux row unless noted: einstein-probe, Ubuntu 24.04.5 LTS,
 x86_64, RTX 4060 Laptop GPU, NVIDIA driver 580.178.04, Python 3.12, Node 22.
 
+## PR-C (windows-parity), 2026-11-07
+
+**Nothing in this section ran on Windows.** There is no Windows machine, VM or
+runner: hosted runners are billing-locked and Edison is not registered yet.
+Every Windows behaviour is "verified in source, not run on hardware".
+
+| Check | Platform | Status | Evidence |
+| --- | --- | --- | --- |
+| `xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml` | Linux | executed | 279 passed, 3 ignored (+ 11 + 2 in other targets) after the review follow-up (275 before it, 255 before PR-C; see the next table). New: focus identity with PID/start time (reused HWND, reused PID, unreadable start time), blocked targets never typed into in any mode, Insert mode holds an unknown target, integrity-level and secure-desktop decisions, microphone consent decisions and non-Windows behaviour, modifier wait (release and 600 ms bound), hotkey edges and press-during-delivery, overlay MA_NOACTIVATE / foreground hand-back / subclass ownership decisions, Windows rename retry schedule (≤ 5 s), engine files never switched or removed while the engine runs, Windows GPU hidden flag and System32 `nvidia-smi` lookup, `--version`/`--help` |
+| `xvfb-run -a cargo test … --no-default-features` | Linux | executed | 279 passed, 2 ignored (275 before the review follow-up) |
+| `cargo check --no-default-features --target x86_64-pc-windows-gnu` | Windows (cross-compile) | executed | Passes; compiles every new `cfg(windows)` path (token integrity, input desktop, process times, subclassing, registry, ShellExecuteW, GetAsyncKeyState); only pre-existing warnings. Type check only: GNU ≠ MSVC, nothing runs |
+| `cargo test --no-run --no-default-features --target x86_64-pc-windows-gnu` | Windows (cross-compile) | executed | Builds all four test executables (lib, bin, companion client, network); includes the Windows-only tests (`components::detect`, `platform` on Windows). Not executed: no Windows/Wine |
+| `cargo check` / `cargo test --no-run` for `x86_64-pc-windows-gnu` **with default features** | Windows (cross-compile) | blocked | llama.cpp (`llama-cpp-sys-2`) does not compile against this machine's mingw-w64 headers (`unknown type name 'THREAD_POWER_THROTTLING_STATE'`, also with `-D_WIN32_WINNT=0x0A00`); not Murmur code. The MSVC build on Edison covers it |
+| `npm run build && npm run test:ui` | Linux | executed | 53/53 (50 before): overlay buttons never take focus on mouse down but still act on click; Audio explains a Windows microphone privacy block and opens its Settings page; no-device explanation on Windows and none on Linux |
+| `npm run test:tokens` | Linux | executed | 20 passed |
+| `python3 -m unittest discover -s scripts/tests -p 'test_*.py'` | Linux | executed | 122 OK after the review follow-up (109 before it, 76 before PR-C): built-in PE import/delay-import parser on fake PE32/PE32+ images, Windows engine with a cuDNN delay-import fails on any host, pefile required on Windows and its tables merged (fake module); Windows component builder (shim pruned, cuBLAS-only zip, wrong wheel hash, linked NVRTC fails, lazy NVRTC name recorded), Windows locks are hash-pinned win_amd64; manifest signs Windows entries only with matching inputs; Windows release assets, portable layout, manifest entries, GPU evidence (add-on cuBLAS, host `nvcuda.dll`, no cuDNN/NVRTC, stale hashes) and budgets; shared inference core and the Windows script's pure parts (module origin, clean environment, evidence asset set) |
+| `engine/.release-venv/bin/python -m pytest engine/tests -q` | Linux | executed | 55 passed after the review follow-up (53 before) |
+| Real `nvidia-cublas-cu12` 12.9.2.10 win_amd64 wheel → `windows_components.py download-cuda` + `cuda` | Linux (Windows artifact) | executed | Downloaded with `pip --require-hashes --platform win_amd64`; add-on zip 450,766,521 bytes (429.9 MiB), 771 MB unpacked; `cublas64_12.dll` imports KERNEL32 + `cublasLt64_12.dll`; `cublasLt64_12.dll` imports KERNEL32 only and names `nvrtc64_120_0.dll` (lazy, as on Linux). First version of the builder rejected that string; changed to reject linked imports only and record lazy names |
+| Real CTranslate2 4.6.3 win_amd64 wheel, static inspection | Linux (Windows artifact) | executed | `ctranslate2.dll`: no cuDNN import, symbol or string (ASCII or UTF-16); names `cublas64_12.dll` (run-time load). Wheel bundles `cudnn64_9.dll` (266 KB dispatcher, imports KERNEL32 only) → pruned from the freeze; the gate would otherwise fail |
+| `bash -n scripts/build-linux.sh`; YAML parse of the four workflows | Linux | executed | OK |
+| `cargo clippy --all-targets --no-default-features` (Linux and `x86_64-pc-windows-gnu`) | Linux / Windows (cross) | executed | No warnings in code added by PR-C (Windows-only decision helpers marked `allow(dead_code)` off Windows); remaining warnings pre-existing (`inject.rs` imports, `store.rs` CUDA smoke test, `detect.rs` memory query) |
+| PowerShell syntax check of `build-windows.ps1`, `scripts/windows/*.ps1`, `scripts/parity/capture-windows.ps1` | — | blocked | No `pwsh` on this machine; read-only review only |
+| Windows engine freeze, MSVC build, NSIS installer, portable zip, `windows-build.yml`, `release.yml` with Windows | Windows | blocked | No Windows machine or runner; never executed |
+| Startup smoke (`--version`, `--help`, 10 s no-engine launch) on Windows | Windows | blocked | Same; `--version`/`--help` unit-tested on Linux. The launch runs only on hosted runners (session 0 on Edison has no tray/WebView2); Edison covers launch interactively |
+| GPU inference on Windows (`test-windows-inference.py`) | Windows + NVIDIA | blocked | Edison not registered; `WINDOWS_GPU_OFFERED` stays `false` |
+| B7 overlay focus, B8 modifiers, B9 elevated/secure desktop, B10 identity, microphone privacy, tray left-click, refocus refusal, rename retry, CUDA DLL loading | Windows | blocked | Hardware procedure: [windows-checklist.md](windows-checklist.md) (O3/O4/O7, H1–H3, F9/F10, F3, F13, M1–M4, T1, F5, C2) |
+| Settings screenshots on Windows (`capture-windows.ps1`) | Windows | blocked | Logged-in Windows session needed |
+| `provision-runner.ps1` on Edison | Windows | blocked | Owner's agent provisions Edison separately; script not run |
+| Linux packaging build (`scripts/build-linux.sh`) after PR-C | Linux | not run | Only the manifest call changed (Windows inputs optional, off by default) and `write_zip` moved to `component_zip.py` (its tests pass); ~16 GB free disk; CI rebuilds |
+
+### PR-C review follow-up, 2026-11-07
+
+Fixes for the independent review of PR-C. Windows parts are compile-checked only
+(verified in source, not run on hardware).
+
+| Finding | Test (executed on Linux unless noted) | Status |
+| --- | --- | --- |
+| 1 B7 honesty: subclass reaches only the top level; count logged at info | `overlay::noactivate::tests::subclass_outcome_is_logged_once_per_change`; checklist O7 reads the log line | executed (decision); Windows path compile-checked |
+| 2 `IsWindow(lparam)` only for `WM_ACTIVATE` | `cargo check`/`test --no-run` for `x86_64-pc-windows-gnu` | compile-checked |
+| 3 Authenticode import and signing on tags only | `scripts/tests/test_windows_ci.py` (`WindowsBuildSigningTests`: import `if`, only step with secrets, build signs only on tags, removal `always()`, `release.yml` tag-only `secrets: inherit`) | executed (static) |
+| 4 No secrets in the provisioning transcript | `test_windows_ci.py` (`ProvisioningSecretTests`: no `Invoke-Native` with `$Password`/`$RunnerToken`, no interpolated secrets in messages, fixed `config.cmd`/`cmdkey` errors) | executed (static); script not run |
+| 5 `MURMUR_CUDA_DIR` on `PATH` | `engine/tests/test_runtime.py` (PATH prepended once, case-insensitively; kept when `add_dll_directory` fails; untouched on Linux and for invalid dirs) | executed |
+| 6 Launch smoke only on hosted runners | `test_windows_ci.py::WindowsSmokeTests` | executed (static) |
+| 7 Held text shows the focus error | `controller::tests::held_text_says_why_when_focus_is_unreadable_or_blocked` | executed |
+| 8 PE parser bounds | `test_engine_imports.py`: no import directories, short optional header / `NumberOfRvaAndSizes`, unmapped name RVA, truncated images (the old parser fails two of these) | executed |
+| 9 `stop_and_wait` with the supervisor gone | `engine::stop_tests::stop_is_confirmed_only_by_the_supervisor_or_a_cleared_alive_flag` | executed |
+| 10 PID without start time never matches | `focus_guard::tests::windows_identity_without_start_time_never_matches` | executed |
+| 11 Insert here types in idle | none (needs Windows input); documented in focus-contract rule 9, checklist F13 | blocked |
+| 12 F10 accepts either blocked message | checklist text | n/a |
+| 13 `$Args` → `$TauriArgs` | `test_windows_ci.py` (no `$Args` in any workflow) | executed (static) |
+| 14 Driver floor R528.33 | `test_windows_ci.py::test_driver_floor_is_the_cuda_12_windows_minimum` | executed (static) |
+| 15 PyInstaller host-cuBLAS caveat | docs/ci-windows.md | n/a |
+
 ## PR-B (component-manager), 2026-11-07
 
 | Check | Platform | Status | Evidence |
@@ -44,7 +97,7 @@ After rebasing on `slim-linux` (a27179b, the `.deb` ALSA fix, now part of PR-A).
 | `xvfb-run -a cargo test … --no-default-features` | Linux | executed | 255 passed, 2 ignored |
 | `npm run build && npm run test:ui` | Linux | executed | 50/50 |
 | `python3 -m unittest discover -s scripts/tests -p 'test_*.py'` | Linux | executed | 76 OK (unchanged) |
-| `engine/.release-venv/bin/python -m pytest engine/tests -q` | Linux | executed | 53 passed (unchanged) |
+| `engine/.release-venv/bin/python -m pytest engine/tests -q` | Linux | executed | 55 passed after the review follow-up (53 before) |
 | `gpg --edit-key` → `key N` → `revkey` → `save` (docs/signing.md) | Linux, gpg 2.4.4 | executed | Throwaway ed25519 key: the subkey shows `revoked` afterwards |
 | `cargo clippy --all-targets` on the changed files | Linux | executed | No new warnings (one pre-existing in `store.rs` CUDA smoke test) |
 | Packaged build (`scripts/build-linux.sh`) after the follow-up | Linux | not run | No packaging script changed; disk space (~16 GB free); CI rebuilds |

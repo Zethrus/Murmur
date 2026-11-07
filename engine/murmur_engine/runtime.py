@@ -1,7 +1,8 @@
 """Process setup shared by ``python -m murmur_engine`` and the frozen engine.
 
 Nothing here contacts a service. It fixes the offline defaults, makes an
-optional CUDA directory visible to the Windows DLL loader, and replaces PyAV
+optional CUDA directory visible to the Windows DLL loader (PATH and
+os.add_dll_directory), and replaces PyAV
 with a stub when the frozen engine omits it.
 """
 import importlib.util
@@ -40,7 +41,15 @@ def cuda_directory(environ: MutableMapping[str, str] = os.environ) -> Path | Non
 
 def add_cuda_directory(environ: MutableMapping[str, str] = os.environ, platform: str = os.name,
                        add: Callable[[str], Any] | None = None) -> Path | None:
-    """Register MURMUR_CUDA_DIR with the Windows DLL loader.
+    """Make MURMUR_CUDA_DIR visible to the Windows DLL loader.
+
+    CTranslate2 loads ``cublas64_12.dll`` at run time with a plain ``LoadLibrary``,
+    which ignores ``os.add_dll_directory`` unless the process called
+    ``SetDefaultDllDirectories`` (Python does not). So the directory is prepended
+    to ``PATH``, which that standard search order does read; ``add_dll_directory``
+    is kept for loads that use ``LOAD_LIBRARY_SEARCH_*`` flags (Python extension
+    modules). ``os.environ`` updates the process environment, so the change
+    applies to this process's later loads.
 
     Linux reads LD_LIBRARY_PATH only at process start, so the desktop app sets it
     before spawning the engine (src-tauri/src/engine.rs). Nothing to do here.
@@ -50,13 +59,24 @@ def add_cuda_directory(environ: MutableMapping[str, str] = os.environ, platform:
     path = cuda_directory(environ)
     if path is None:
         return None
+    prepend_path(environ, str(path))
     register = add or getattr(os, "add_dll_directory")
     try:
         _DLL_DIRECTORIES.append(register(str(path)))
     except OSError as error:
+        # PATH still reaches plain LoadLibrary, which is what CTranslate2 uses.
         logging.warning("Could not add %s to the DLL search path: %s", CUDA_ENV, error)
-        return None
     return path
+
+
+def prepend_path(environ: MutableMapping[str, str], directory: str) -> None:
+    """Put ``directory`` first on the Windows ``PATH`` (``;``-separated), once."""
+    def key(entry: str) -> str:
+        return entry.rstrip("\\/").lower()
+
+    entries = [entry for entry in environ.get("PATH", "").split(";")
+               if entry and key(entry) != key(directory)]
+    environ["PATH"] = ";".join([directory, *entries])
 
 
 def _missing_pyav(name: str) -> Any:

@@ -127,8 +127,9 @@ pub struct Context<'a> {
     pub free: Option<u64>,
     pub replace: bool,
     pub now: u64,
-    /// Called right before the switch (stops the engine for engine/CUDA updates).
-    pub before_activate: &'a dyn Fn(&Component),
+    /// Called right before the switch (stops the engine for engine/CUDA updates). An error
+    /// (the engine did not stop) aborts the switch and keeps the previous version.
+    pub before_activate: &'a dyn Fn(&Component) -> Result<(), ComponentError>,
 }
 
 fn cancelled() -> ComponentError {
@@ -218,7 +219,7 @@ fn finish(
         return Err(cancelled());
     }
     progress(Phase::Activating, total, total);
-    (ctx.before_activate)(component);
+    (ctx.before_activate)(component)?;
     ctx.store
         .activate(component, staging, ctx.replace, ctx.now)?;
     ctx.store.discard_parts(component);

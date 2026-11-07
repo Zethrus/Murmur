@@ -78,8 +78,39 @@ pub fn parse_nvidia_smi(output: &str) -> Vec<Gpu> {
         .collect()
 }
 
+/// Decision 5 (plan, locked): the Windows CUDA add-on stays hidden until GPU-VALIDATION-windows.json
+/// from the Edison runner (windows-build.yml `gpu-validation` job) is tied to the release assets.
+/// Flipping this to `true` is the only code change needed to offer it; docs/ci-windows.md has
+/// the gate.
+pub const WINDOWS_GPU_OFFERED: bool = false;
+
+/// Whether setup offers the CUDA add-on for this platform and set of detected GPUs.
+pub fn cuda_offered(linux: bool, windows: bool, gpus: &[Gpu]) -> bool {
+    !gpus.is_empty() && (linux || (windows && WINDOWS_GPU_OFFERED))
+}
+
+/// `nvidia-smi` locations: PATH first; on Windows the driver installs it in System32, which a
+/// service or a trimmed PATH may not list.
+fn nvidia_smi_candidates(windows: bool, system_root: Option<&str>) -> Vec<std::path::PathBuf> {
+    let mut candidates = vec![std::path::PathBuf::from("nvidia-smi")];
+    if windows {
+        let root = system_root.unwrap_or("C:\\Windows");
+        candidates.push(Path::new(root).join("System32").join("nvidia-smi.exe"));
+    }
+    candidates
+}
+
 fn nvidia_gpus() -> Vec<Gpu> {
-    let mut command = Command::new("nvidia-smi");
+    let root = std::env::var("SystemRoot").ok();
+    nvidia_smi_candidates(cfg!(windows), root.as_deref())
+        .into_iter()
+        .map(|program| query_gpus(&program))
+        .find(|gpus| !gpus.is_empty())
+        .unwrap_or_default()
+}
+
+fn query_gpus(program: &Path) -> Vec<Gpu> {
+    let mut command = Command::new(program);
     command
         .args([
             "--query-gpu=name,memory.total,driver_version",
@@ -120,7 +151,7 @@ pub fn detect(data: &Path) -> Hardware {
     Hardware {
         ram_mb: ram_mb(),
         avx2: avx2(),
-        cuda_offered: cfg!(target_os = "linux") && !gpus.is_empty(),
+        cuda_offered: cuda_offered(cfg!(target_os = "linux"), cfg!(windows), &gpus),
         gpus,
         free_bytes: crate::platform::available_space(data),
     }
@@ -227,6 +258,33 @@ mod tests {
             (small_gpu.compute, small_gpu.english.as_str()),
             ("cpu", "distil-small.en")
         );
+    }
+
+    #[test]
+    fn windows_gpu_stays_hidden_until_validated() {
+        let gpu = vec![Gpu {
+            name: "RTX".into(),
+            vram_mb: 8192,
+            driver: "580".into(),
+        }];
+        assert!(cuda_offered(true, false, &gpu));
+        assert!(!cuda_offered(true, false, &[]));
+        assert_eq!(cuda_offered(false, true, &gpu), WINDOWS_GPU_OFFERED);
+        // Decision 5: flip only after Edison GPU validation evidence exists for a release.
+        assert!(
+            !std::hint::black_box(WINDOWS_GPU_OFFERED),
+            "decision 5: flip only after Edison validation"
+        );
+        assert!(!cuda_offered(false, false, &gpu));
+    }
+
+    #[test]
+    fn nvidia_smi_is_also_looked_up_in_system32_on_windows() {
+        assert_eq!(nvidia_smi_candidates(false, None).len(), 1);
+        let windows = nvidia_smi_candidates(true, Some("D:\\Win"));
+        assert_eq!(windows[0], std::path::PathBuf::from("nvidia-smi"));
+        assert!(windows[1].ends_with("nvidia-smi.exe"));
+        assert!(windows[1].starts_with("D:\\Win"));
     }
 
     #[test]

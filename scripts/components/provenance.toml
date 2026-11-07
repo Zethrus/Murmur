@@ -27,7 +27,8 @@ description = "cuBLAS runtime for CUDA inference on NVIDIA GPUs. Needs an NVIDIA
 license = { name = "NVIDIA CUDA Toolkit EULA (redistributable cuBLAS)", url = "https://docs.nvidia.com/cuda/eula/index.html" }
 provenance = { type = "murmur_attested_only", source_url = "https://pypi.org/project/nvidia-cublas-cu12/", note = "libcublas.so.12 and libcublasLt.so.12 from the nvidia-cublas-cu12 wheel pinned by SHA-256 in engine/requirements-linux-release.txt; NVIDIA publishes no detached signature." }
 
-# Windows entries are placeholders for PR-C: make-manifest.py skips a platform whose zip is absent.
+# Windows entries: built on the Edison runner (windows-build.yml) and listed only when the
+# release runs with ENABLE_WINDOWS (make-manifest.py --windows-inputs); otherwise skipped.
 [components.engine-windows]
 id = "engine"
 kind = "engine"
@@ -35,11 +36,12 @@ os = "windows"
 arch = "x86_64"
 archive = "zip"
 zip = "murmur-engine-windows-x86_64-{version}.zip"
-placeholder = true
+optional_platform = true
+lock = "engine/requirements-windows-release.txt"
 display_name = "Speech engine"
 description = "Local speech recognition (faster-whisper, CTranslate2, Silero VAD). Required for dictation."
 license = { name = "GPL-3.0-only (Murmur) with bundled third-party notices", url = "https://github.com/Zethrus/Murmur/blob/master/LICENSE" }
-provenance = { type = "murmur_attested_only", source_url = "https://github.com/Zethrus/Murmur", note = "Windows engine: filled in by PR-C." }
+provenance = { type = "murmur_attested_only", source_url = "https://github.com/Zethrus/Murmur", note = "Frozen with PyInstaller on Windows from engine/requirements-windows-release.txt (pip --require-hashes; CTranslate2 4.6.3 win_amd64). The wheel's unused cuDNN dispatcher shim is removed; no upstream signature exists for the PyPI wheels." }
 
 [components.cuda-windows]
 id = "cuda"
@@ -49,11 +51,12 @@ arch = "x86_64"
 archive = "zip"
 zip = "murmur-cuda-windows-x86_64-{version}.zip"
 depends = ["engine"]
-placeholder = true
+optional_platform = true
+lock = "engine/requirements-windows-cuda.txt"
 display_name = "NVIDIA GPU acceleration"
-description = "cuBLAS runtime for CUDA inference on NVIDIA GPUs."
+description = "cuBLAS runtime for CUDA inference on NVIDIA GPUs. Needs an NVIDIA driver; not needed for CPU dictation."
 license = { name = "NVIDIA CUDA Toolkit EULA (redistributable cuBLAS)", url = "https://docs.nvidia.com/cuda/eula/index.html" }
-provenance = { type = "murmur_attested_only", source_url = "https://pypi.org/project/nvidia-cublas-cu12/", note = "Windows cuBLAS: filled in by PR-C." }
+provenance = { type = "murmur_attested_only", source_url = "https://pypi.org/project/nvidia-cublas-cu12/", note = "cublas64_12.dll and cublasLt64_12.dll from the nvidia-cublas-cu12 12.9.2.10 win_amd64 wheel pinned by SHA-256 in engine/requirements-windows-cuda.txt (12.9.3.13 has no Windows wheel); NVIDIA publishes no detached signature. Hidden in setup until validated on Windows hardware." }
 
 [components."speech-tiny.en"]
 kind = "speech-model"

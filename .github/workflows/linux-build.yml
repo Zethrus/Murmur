@@ -7,6 +7,11 @@ on:
   pull_request:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      windows_inputs:
+        description: components-windows-inputs.json from windows-build.yml; the signed manifest then lists the Windows components
+        type: string
+        default: ''
 
 permissions:
   # Write is needed to attach assets when a v* tag is pushed; fork PRs never run on the
@@ -250,6 +255,21 @@ jobs:
           grep -q "RELEASE_PRIMARY_FINGERPRINT: &str = \"$EXPECTED\"" src-tauri/src/components/trust.rs
           actual="$(gpg --batch --with-colons --show-keys src-tauri/trust/murmur-release.asc | awk -F: '/^fpr/ {print $10; exit}')"
           test "$actual" = "$EXPECTED"
+      - name: Fetch the Windows component zips from the draft (when Windows is enabled)
+        if: inputs.windows_inputs != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WINDOWS_INPUTS: ${{ inputs.windows_inputs }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          windows="$RUNNER_TEMP/windows-components"
+          rm -rf "$windows" && mkdir -p "$windows"
+          printf '%s\n' "$WINDOWS_INPUTS" > "$windows/components-windows-inputs.json"
+          gh release download "$GITHUB_REF_NAME" --dir "$windows" \
+            --pattern "murmur-engine-windows-x86_64-$version.zip" --pattern "murmur-cuda-windows-x86_64-$version.zip"
+          # make-manifest.py re-checks both zips against these hashes before signing them.
+          echo "MURMUR_WINDOWS_COMPONENTS=$windows" >> "$GITHUB_ENV"
       - name: Build, sign with the release subkey and test
         env:
           MURMUR_SIGNING_SUBKEY: ${{ secrets.MURMUR_SIGNING_SUBKEY }}
@@ -277,7 +297,7 @@ jobs:
             .cache/artifacts/linux/*.deb \
             .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
             .cache/artifacts/linux/GPU-VALIDATION.json \
-            .cache/artifacts/components/*.zip \
+            .cache/artifacts/components/murmur-*-linux-x86_64-*.zip \
             .cache/artifacts/components/components-manifest.json \
             .cache/artifacts/components/components-manifest.json.sig \
             .cache/artifacts/components/murmur-release.asc --clobber

@@ -24,12 +24,11 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+from component_zip import write_zip  # noqa: F401 - shared with the Windows builder and tests
 from linux_cuda_runtime import CUDA, DOC, stage as stage_cuda
 
 ENGINE_ZIP = "murmur-engine-linux-x86_64-{version}.zip"
 CUDA_ZIP = "murmur-cuda-linux-x86_64-{version}.zip"
-# Fixed timestamp: the same inputs give byte-identical archives.
-ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 CHECK_RELEASE = Path(__file__).with_name("check-release.py")
 SHARED_LIBRARY = re.compile(r"^lib.+\.so(?:\.\d+)*$")
 
@@ -121,36 +120,6 @@ def check_engine(engine):
         raise RuntimeError(f"Not a onedir frozen engine: {engine}")
     subprocess.run([sys.executable, str(Path(__file__).with_name("check-engine-imports.py")), str(engine)],
                    check=True)
-
-
-def write_zip(source, destination):
-    """Deterministic LZMA zip of a directory tree; the component manager refuses links, so
-    PyInstaller's convenience symlinks to files elsewhere in the tree are left out (the real
-    file ships at its own path). A link that leaves the tree or points at nothing fails."""
-    source = source.resolve()
-    files = []
-    for path in sorted(source.rglob("*")):
-        relative = path.relative_to(source).as_posix()
-        if path.is_symlink():
-            target = path.resolve()
-            if not target.is_relative_to(source) or not target.is_file():
-                raise RuntimeError(f"Unsupported link in component: {relative}")
-            continue
-        if path.is_file():
-            files.append((relative, path))
-    temporary = destination.with_suffix(".zip.tmp")
-    # LZMA: the CUDA add-on is 335 MiB this way against 554 MiB with deflate.
-    with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_LZMA) as archive:
-        for relative, path in files:
-            info = zipfile.ZipInfo(relative, ZIP_TIME)
-            info.create_system = 3
-            executable = os.access(path, os.X_OK)
-            info.external_attr = (0o100755 if executable else 0o100644) << 16
-            info.compress_type = zipfile.ZIP_LZMA
-            with path.open("rb") as stream, archive.open(info, "w", force_zip64=path.stat().st_size > 2**31) as out:
-                shutil.copyfileobj(stream, out, 1 << 20)
-    temporary.replace(destination)
-    return destination
 
 
 def build_components(engine, version, output, lock):

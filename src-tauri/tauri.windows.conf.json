@@ -3,6 +3,18 @@
   "bundle": {
     "targets": [
       "nsis"
-    ]
+    ],
+    "licenseFile": "../LICENSE",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "startMenuFolder": "Murmur",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
   }
 }

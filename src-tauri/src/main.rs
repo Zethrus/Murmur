@@ -147,7 +147,9 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     state.start()?;
     // Adopt pre-0.5 models whose hashes match the manifest; local hashing only.
     let migrating = state.components.clone();
-    std::thread::Builder::new().name("murmur-migrate".into()).spawn(move || migrating.migrate())?;
+    std::thread::Builder::new()
+        .name("murmur-migrate".into())
+        .spawn(move || migrating.migrate())?;
     if show_settings_on_launch(std::env::args_os()) {
         platform::open_settings(&handle)?;
     }
@@ -170,19 +172,31 @@ fn show_settings_on_launch(args: impl IntoIterator<Item = impl AsRef<std::ffi::O
 fn install_component_cli(args: &[std::ffi::OsString]) -> Option<i32> {
     let position = args.iter().position(|a| a == "--install-component")?;
     let value = |flag: &str| {
-        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from)
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .map(std::path::PathBuf::from)
     };
-    let (Some(path), Some(manifest), Some(signature)) = (args.get(position + 1).map(std::path::PathBuf::from), value("--manifest"), value("--manifest-sig")) else {
+    let (Some(path), Some(manifest), Some(signature)) = (
+        args.get(position + 1).map(std::path::PathBuf::from),
+        value("--manifest"),
+        value("--manifest-sig"),
+    ) else {
         eprintln!("usage: murmur --install-component <zip|dir> --manifest <json> --manifest-sig <sig> [--trust-root <asc>]");
         return Some(2);
     };
     if let Some(root) = value("--trust-root") {
         std::env::set_var(components::trust::DEV_TRUST_ROOT_ENV, root);
     }
-    let _ = tracing_subscriber::fmt().with_writer(std::io::stderr).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .try_init();
     let result = platform::Paths::discover()
         .map_err(|e| e.to_string())
-        .and_then(|paths| components::install_from_files(&paths.data, &path, &manifest, &signature).map_err(|e| e.message));
+        .and_then(|paths| {
+            components::install_from_files(&paths.data, &path, &manifest, &signature)
+                .map_err(|e| e.message)
+        });
     match result {
         Ok(id) => {
             println!("{}", serde_json::json!({"installed": id}));
@@ -195,8 +209,32 @@ fn install_component_cli(args: &[std::ffi::OsString]) -> Option<i32> {
     }
 }
 
+/// `--version` / `--help`: print and exit before any window, tray or single-instance handoff, so
+/// CI can smoke-test a build (Windows release builds use the GUI subsystem; output still reaches
+/// a redirected stdout).
+fn info_cli(args: &[std::ffi::OsString]) -> Option<String> {
+    let flag = args.get(1)?.to_str()?;
+    match flag {
+        "--version" | "-V" => Some(format!("murmur {}", env!("CARGO_PKG_VERSION"))),
+        "--help" | "-h" => Some(format!(
+            "murmur {} — local, private dictation\n\n\
+             Usage: murmur [--background]\n\
+             \x20 --background   start in the tray without opening Settings (login start)\n\
+             \x20 --version      print the version\n\
+             \x20 --help         print this help\n\n\
+             The speech engine and models are downloaded by the first-run setup.",
+            env!("CARGO_PKG_VERSION")
+        )),
+        _ => None,
+    }
+}
+
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    if let Some(text) = info_cli(&args) {
+        println!("{text}");
+        return;
+    }
     if let Some(code) = install_component_cli(&args) {
         std::process::exit(code);
     }
@@ -229,11 +267,13 @@ fn main() {
                     }
                     // Closing the window during first-run setup means "Set up later".
                     let app = window.app_handle().clone();
-                    let _ = std::thread::Builder::new().name("murmur-setup-postpone".into()).spawn(move || {
-                        if let Some(state) = app.try_state::<app::AppState>() {
-                            state.postpone_setup_if_pending();
-                        }
-                    });
+                    let _ = std::thread::Builder::new()
+                        .name("murmur-setup-postpone".into())
+                        .spawn(move || {
+                            if let Some(state) = app.try_state::<app::AppState>() {
+                                state.postpone_setup_if_pending();
+                            }
+                        });
                 }
             }
         })
@@ -257,6 +297,8 @@ fn main() {
             ipc::components_check_updates,
             ipc::test_engine,
             ipc::list_devices,
+            ipc::microphone_access,
+            ipc::open_microphone_settings,
             ipc::set_hotkey,
             ipc::preview_sound,
             ipc::start_dictation,
@@ -310,5 +352,29 @@ fn main() {
             eprintln!("Murmur failed to start: {error:#}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::info_cli;
+    use std::ffi::OsString;
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+    #[test]
+    fn version_and_help_print_without_starting_the_app() {
+        let version = info_cli(&args(&["murmur", "--version"])).unwrap();
+        assert_eq!(version, format!("murmur {}", env!("CARGO_PKG_VERSION")));
+        assert!(info_cli(&args(&["murmur", "--help"]))
+            .unwrap()
+            .contains("--background"));
+        assert_eq!(info_cli(&args(&["murmur"])), None);
+        assert_eq!(info_cli(&args(&["murmur", "--background"])), None);
+        // Only the first argument counts: `--install-component x --help` is not help.
+        assert_eq!(
+            info_cli(&args(&["murmur", "--install-component", "--help"])),
+            None
+        );
     }
 }
