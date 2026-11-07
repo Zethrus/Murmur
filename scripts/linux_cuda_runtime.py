@@ -1,4 +1,8 @@
-"""Collect and verify the pinned Linux CUDA userspace beside the desktop engine."""
+"""Collect and verify the pinned Linux CUDA userspace beside the desktop engine.
+
+Only cuBLAS ships. CTranslate2 4.6.3 needs nothing else for Whisper on CUDA
+(scripts/check-engine-imports.py fails the build if that changes).
+"""
 import hashlib
 from importlib import metadata
 import json
@@ -7,11 +11,12 @@ import re
 import shutil
 import subprocess
 
-PACKAGES = ("nvidia-cublas-cu12", "nvidia-cudnn-cu12", "nvidia-cuda-nvrtc-cu12")
-REQUIRED = {"libcublas.so.12", "libcublasLt.so.12", "libcudnn.so.9", "libnvrtc.so.12"}
+PACKAGES = ("nvidia-cublas-cu12",)
+# Exactly these files ship; libnvblas (BLAS interposer) is not used by CTranslate2.
+REQUIRED = {"libcublas.so.12", "libcublasLt.so.12"}
+FORBIDDEN = ("libcuda.so", "libcudnn", "libnvrtc")
 DOC = Path("usr/share/doc/murmur/bundled-runtime")
 CUDA = Path("usr/lib/murmur/cuda")
-MAX_ASSET = 2 * 1024 ** 3
 
 
 def sha256(path):
@@ -62,6 +67,8 @@ def stage(appdir, lock_path):
             raise RuntimeError(f"{package}: installed {dist.version}, locked {version}")
         component = package.removeprefix("nvidia-").removesuffix("-cu12").replace("-", "_")
         for source in _runtime_files(dist, component):
+            if source.name not in REQUIRED:
+                continue
             target = cuda / source.name
             if target.exists() or target.is_symlink():
                 if target.is_symlink() != source.is_symlink() or (not source.is_symlink() and sha256(target) != sha256(source)):
@@ -83,8 +90,6 @@ def stage(appdir, lock_path):
     missing = REQUIRED - files.keys()
     if missing:
         raise RuntimeError(f"Missing required CUDA libraries: {sorted(missing)}")
-    if any(name.startswith("libcuda.so") for name in files):
-        raise RuntimeError("Host NVIDIA driver must not be bundled")
     manifest = {"lock_sha256": sha256(lock_path), "packages": packages,
                 "files": files, "notices": notices}
     (docs / "cuda-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -105,9 +110,11 @@ def verify(appdir, lock_path=None):
             "wheel_source": f"https://pypi.org/project/{package}/{pinned[package][0]}/"}
            for package in PACKAGES):
         raise RuntimeError("CUDA package manifest differs from release lock")
-    if set(manifest["packages"]) != set(PACKAGES) or not REQUIRED <= manifest["files"].keys():
-        raise RuntimeError("Incomplete CUDA manifest")
-    actual = {p.name for p in cuda.iterdir() if p.is_file() or p.is_symlink()}
+    if set(manifest["packages"]) != set(PACKAGES) or manifest["files"].keys() != REQUIRED:
+        raise RuntimeError("CUDA manifest must list exactly the cuBLAS runtime")
+    actual = {p.name for p in cuda.iterdir()}
+    if any(name.startswith(FORBIDDEN) for name in actual):
+        raise RuntimeError(f"Unexpected CUDA library shipped: {sorted(actual - REQUIRED)}")
     if actual != manifest["files"].keys():
         raise RuntimeError("CUDA runtime files differ from manifest")
     for name, expected in manifest["files"].items():
@@ -121,11 +128,7 @@ def verify(appdir, lock_path=None):
     for name, expected in manifest["notices"].items():
         if sha256(docs / name) != expected:
             raise RuntimeError(f"CUDA notice checksum mismatch: {name}")
-    if any(name.startswith("libcuda.so") for name in actual):
-        raise RuntimeError("Host NVIDIA driver bundled")
     for name in actual:
-        if not name.endswith((".so", ".so.9", ".so.12", ".so.12.9")):
-            raise RuntimeError(f"Unexpected CUDA runtime file: {name}")
         dynamic = subprocess.run(["readelf", "-d", str(cuda / name)],
                                  capture_output=True, text=True, check=True).stdout
         for needed in re.findall(r"\(NEEDED\).*\[([^]]+)\]", dynamic):
@@ -143,9 +146,3 @@ def verify(appdir, lock_path=None):
                     raise RuntimeError(f"CUDA dependency loaded from host: {dependency} in {name}")
     return manifest
 
-
-def check_asset_sizes(paths):
-    for path in paths:
-        size = path.stat().st_size
-        if size >= MAX_ASSET:
-            raise RuntimeError(f"Release asset at or above 2 GiB: {path.name} ({size} bytes)")

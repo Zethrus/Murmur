@@ -1,4 +1,4 @@
-"""Failure contracts for the bounded CUDA collector and release size gate."""
+"""Failure contracts for the bounded cuBLAS-only CUDA collector."""
 import json
 import os
 from pathlib import Path
@@ -39,17 +39,13 @@ class CudaRuntimeTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.appdir = self.root / "AppDir"
         self.lock = self.root / "lock.txt"
+        # NVRTC stays in the lock as a pip dependency of the cuBLAS wheel; it is not shipped.
         self.lock.write_text("".join(f"{name}=={version} --hash=sha256:{'a'*64}\n" for name, version in (
             ("nvidia-cublas-cu12", "12.9.3.13"),
-            ("nvidia-cudnn-cu12", "9.27.0.42"),
             ("nvidia-cuda-nvrtc-cu12", "12.9.86"))))
         self.distributions = {
             "nvidia-cublas-cu12": FakeDistribution(self.root / "selected", "cublas", "12.9.3.13",
-                ["libcublas.so.12", "libcublasLt.so.12"]),
-            "nvidia-cudnn-cu12": FakeDistribution(self.root / "selected", "cudnn", "9.27.0.42",
-                ["libcudnn.so.9"]),
-            "nvidia-cuda-nvrtc-cu12": FakeDistribution(self.root / "selected", "cuda_nvrtc", "12.9.86",
-                ["libnvrtc.so.12"]),
+                ["libcublas.so.12", "libcublasLt.so.12", "libnvblas.so.12"]),
         }
 
     def stage(self):
@@ -65,19 +61,39 @@ class CudaRuntimeTests(unittest.TestCase):
         (polluted / "libcublas.so.12").write_text("wrong")
         self.stage()
         manifest = json.loads((self.appdir / cuda.DOC / "cuda-manifest.json").read_text())
-        self.assertEqual(set(manifest["packages"]), set(cuda.PACKAGES))
+        self.assertEqual(set(manifest["packages"]), {"nvidia-cublas-cu12"})
         self.assertEqual((self.appdir / cuda.CUDA / "libcublas.so.12").read_bytes(), b"libcublas.so.12")
-        (self.appdir / cuda.CUDA / "libcudnn.so.9").unlink()
+        (self.appdir / cuda.CUDA / "libcublasLt.so.12").unlink()
         with self.assertRaises(RuntimeError): cuda.verify(self.appdir, self.lock)
 
+    def test_only_cublas_ships(self):
+        self.stage()
+        shipped = {p.name for p in (self.appdir / cuda.CUDA).iterdir()}
+        self.assertEqual(shipped, {"libcublas.so.12", "libcublasLt.so.12"})
+        manifest = json.loads((self.appdir / cuda.DOC / "cuda-manifest.json").read_text())
+        self.assertEqual(set(manifest["files"]), shipped)
+        self.assertEqual(set(manifest["notices"]), {"nvidia-cublas-cu12.License.txt"})
+
+    def test_extra_cudnn_or_nvrtc_library_fails_verification(self):
+        self.stage()
+        for name in ("libcudnn.so.9", "libnvrtc.so.12", "libnvblas.so.12"):
+            with self.subTest(name=name):
+                extra = self.appdir / cuda.CUDA / name
+                extra.write_bytes(b"extra")
+                with patch.object(cuda.subprocess, "run") as run:
+                    run.return_value.stdout = ""
+                    with self.assertRaises(RuntimeError):
+                        cuda.verify(self.appdir, self.lock)
+                extra.unlink()
+
     def test_missing_notice_fails_collection(self):
-        self.distributions["nvidia-cudnn-cu12"].files = [f for f in self.distributions["nvidia-cudnn-cu12"].files if "licenses" not in str(f)]
+        self.distributions["nvidia-cublas-cu12"].files = [f for f in self.distributions["nvidia-cublas-cu12"].files if "licenses" not in str(f)]
         with self.assertRaisesRegex(RuntimeError, "Missing NVIDIA notice"):
             self.stage()
 
     def test_tampered_notice_and_lock_fail_verification(self):
         self.stage()
-        notice = self.appdir / cuda.DOC / "nvidia-cudnn-cu12.License.txt"
+        notice = self.appdir / cuda.DOC / "nvidia-cublas-cu12.License.txt"
         notice.write_text("changed")
         with self.assertRaisesRegex(RuntimeError, "notice checksum mismatch"):
             cuda.verify(self.appdir, self.lock)
@@ -86,14 +102,16 @@ class CudaRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "release lock mismatch"):
             cuda.verify(self.appdir, self.lock)
 
-    def test_missing_library_and_oversized_asset_fail(self):
-        self.distributions["nvidia-cudnn-cu12"].files = []
-        with self.assertRaisesRegex(RuntimeError, "Missing cudnn runtime files"):
+    def test_missing_library_fails(self):
+        self.distributions["nvidia-cublas-cu12"].files = []
+        with self.assertRaisesRegex(RuntimeError, "Missing cublas runtime files"):
             self.stage()
-        asset = self.root / "oversized.AppImage"
-        with asset.open("wb") as stream: stream.truncate(cuda.MAX_ASSET)
-        with self.assertRaisesRegex(RuntimeError, "2 GiB"):
-            cuda.check_asset_sizes([asset])
+
+    def test_wheel_without_cublaslt_fails(self):
+        dist = self.distributions["nvidia-cublas-cu12"]
+        dist.files = [f for f in dist.files if f.name != "libcublasLt.so.12"]
+        with self.assertRaisesRegex(RuntimeError, "Missing required CUDA libraries"):
+            self.stage()
 
     def test_unbundled_elf_dependency_fails(self):
         self.stage()
