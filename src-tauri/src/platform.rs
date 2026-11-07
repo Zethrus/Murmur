@@ -148,6 +148,7 @@ pub fn set_autostart(app: &AppHandle, enabled: bool) -> Result<()> {
 /// Why Murmur must not type into the focused window. The focus contract holds the transcript
 /// (Copy / Discard) instead of sending input that would be dropped or land somewhere unexpected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))] // Constructed by the Windows focus reader only.
 pub enum Blocked {
     /// Windows: the target runs at a higher integrity level than Murmur (for example "Run as
     /// administrator"); UIPI silently drops synthetic input to it.
@@ -252,6 +253,7 @@ pub fn activate_window(id: u64) -> Result<()> {
 }
 /// Focus contract: deliver only when the target's integrity level is known and not above
 /// Murmur's own. UIPI drops input sent to a higher level without a reliable error.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn integrity_block(target: Option<u32>, own: Option<u32>) -> Option<Blocked> {
     match (target, own) {
         (Some(target), Some(own)) if target <= own => None,
@@ -261,6 +263,7 @@ pub fn integrity_block(target: Option<u32>, own: Option<u32>) -> Option<Blocked>
 }
 /// Focus contract: input goes only to the normal interactive desktop ("Default"). A failed
 /// `OpenInputDesktop` (`None`) or any other name ("Winlogon", "Screen-saver") is the secure desktop.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn desktop_block(input_desktop: Option<&str>) -> Option<Blocked> {
     match input_desktop {
         Some(name) if name.eq_ignore_ascii_case("Default") => None,
@@ -507,6 +510,7 @@ fn native_activate(_: u64) -> Result<()> {
 /// desktop apps access your microphone"; any of them off silences capture without an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(not(windows), allow(dead_code))] // Read from the Windows registry only.
 pub enum MicrophoneBlock {
     /// "Microphone access" for the whole device (HKLM).
     Device,
@@ -524,6 +528,7 @@ pub struct MicrophoneAccess {
 }
 /// Decide from the `Value` strings of the CapabilityAccessManager consent store. A missing value
 /// means the default, which is allowed.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn microphone_block(
     device: Option<&str>,
     apps: Option<&str>,

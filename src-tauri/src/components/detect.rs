@@ -270,8 +270,9 @@ mod tests {
         assert!(cuda_offered(true, false, &gpu));
         assert!(!cuda_offered(true, false, &[]));
         assert_eq!(cuda_offered(false, true, &gpu), WINDOWS_GPU_OFFERED);
+        // Decision 5: flip only after Edison GPU validation evidence exists for a release.
         assert!(
-            !WINDOWS_GPU_OFFERED,
+            !std::hint::black_box(WINDOWS_GPU_OFFERED),
             "decision 5: flip only after Edison validation"
         );
         assert!(!cuda_offered(false, false, &gpu));

@@ -12,6 +12,9 @@
 //! moves focus (src/overlay/no-focus.ts). Verified in source, not run on hardware: the Edison
 //! checklist (docs/parity/windows-checklist.md, "Overlay focus") is the evidence still owed.
 
+// The decision helpers are used by the Windows subclass and by tests on every platform.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 /// `WM_MOUSEACTIVATE` / `MA_NOACTIVATE` / `WM_ACTIVATE` / `WA_INACTIVE` (winuser.h), local so the
 /// decision logic is testable on every platform.
 pub const WM_MOUSEACTIVATE: u32 = 0x0021;
