@@ -53,9 +53,10 @@ impl Overlay {
         self.idle_view == "hidden"
     }
     /// Replace the older `idle_hide` boolean: `false` kept the full pill on screen.
-    fn migrate_idle_hide(&mut self) {
+    /// An `idle_view` written in the file always wins over the legacy key.
+    fn migrate_idle_hide(&mut self, explicit_view: bool) {
         if let Some(old) = self.extra.remove("idle_hide") {
-            if old.as_bool() == Some(false) && self.idle_view == "icon" {
+            if !explicit_view && old.as_bool() == Some(false) {
                 self.idle_view = "pill".into();
             }
         }
@@ -191,14 +192,19 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let mut config: Self = toml::from_str(&fs::read_to_string(path).context("Read config")?)
+        let raw: toml::Value = toml::from_str(&fs::read_to_string(path).context("Read config")?)
             .context("Parse config TOML")?;
+        let explicit_idle_view = raw
+            .get("overlay")
+            .and_then(|overlay| overlay.get("idle_view"))
+            .is_some();
+        let mut config: Self = raw.try_into().context("Parse config TOML")?;
         // Default migration: old installs inherited a deadline too short for CPU inference.
         // Apply only on disk load; live patches retain an explicitly chosen 15 seconds.
         if config.enhance.timeout_ms == 15000 {
             config.enhance.timeout_ms = 60000;
         }
-        config.overlay.migrate_idle_hide();
+        config.overlay.migrate_idle_hide(explicit_idle_view);
         config.validate()?;
         Ok(config)
     }
@@ -439,11 +445,16 @@ mod tests {
             assert!(!c.overlay.extra.contains_key("idle_hide"));
             assert!(!toml::to_string(&c)?.contains("idle_hide"));
         }
-        fs::write(
-            &path,
-            "[overlay]\nidle_hide = false\nidle_view = \"hidden\"\n",
-        )?;
-        assert_eq!(Config::load(&path)?.overlay.idle_view, "hidden");
+        // An explicit idle_view wins, including one equal to the default.
+        for view in Overlay::IDLE_VIEWS {
+            fs::write(
+                &path,
+                format!("[overlay]\nidle_hide = false\nidle_view = \"{view}\"\n"),
+            )?;
+            let c = Config::load(&path)?;
+            assert_eq!(c.overlay.idle_view, *view);
+            assert!(!c.overlay.extra.contains_key("idle_hide"));
+        }
         fs::remove_dir_all(&dir)?;
         Ok(())
     }
