@@ -134,11 +134,13 @@ jobs:
           rm -rf "$components"
           engine/.release-venv/bin/python scripts/bundle-linux-runtime.py components \
             --engine engine/dist/murmur-engine --version "$version" --output "$components"
-          python3 scripts/components/make-manifest.py --components "$components" --version "$version" \
-            --output "$components/components-manifest.json"
+          # The key must exist before the manifest's issue time.
           key="$RUNNER_TEMP/murmur-throwaway-key"
           rm -rf "$key"
           scripts/components/dev-key.sh "$key" >/dev/null
+          sleep 1
+          python3 scripts/components/make-manifest.py --components "$components" --version "$version" \
+            --output "$components/components-manifest.json"
           GNUPGHOME="$key" scripts/components/sign-manifest.sh "$components/components-manifest.json" "$components/murmur-release.asc"
           gpgconf --homedir "$key" --kill all || true
           rm -rf "$key"

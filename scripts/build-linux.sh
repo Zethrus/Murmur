@@ -34,16 +34,21 @@ COMPONENTS="$ROOT/.cache/artifacts/components"
 rm -rf "$COMPONENTS"
 engine/.release-venv/bin/python scripts/bundle-linux-runtime.py components \
   --engine "$ROOT/engine/dist/murmur-engine" --version "$VERSION" --output "$COMPONENTS"
+# The signing key must already be valid when the manifest is issued, so a throwaway
+# key (no release key configured) is created before the manifest.
+if [[ -z "${MURMUR_SIGNING_SUBKEY:-}" ]]; then
+  KEYHOME="$(mktemp -d "${TMPDIR:-/tmp}/murmur-dev-key.XXXXXX")"
+  trap 'gpgconf --homedir "$KEYHOME" --kill all >/dev/null 2>&1 || true; rm -rf "$KEYHOME"' EXIT
+  scripts/components/dev-key.sh "$KEYHOME" >/dev/null
+  sleep 1
+fi
 python3 scripts/components/make-manifest.py --components "$COMPONENTS" --version "$VERSION" \
   --output "$COMPONENTS/components-manifest.json"
 if [[ -n "${MURMUR_SIGNING_SUBKEY:-}" ]]; then
   scripts/components/sign-manifest.sh "$COMPONENTS/components-manifest.json" "$COMPONENTS/murmur-release.asc"
 else
-  # No release key: sign with a throwaway key. These artifacts are for testing only;
-  # the app refuses them unless MURMUR_DEV_TRUST_ROOT(+ACK) names this certificate.
-  KEYHOME="$(mktemp -d "${TMPDIR:-/tmp}/murmur-dev-key.XXXXXX")"
-  trap 'gpgconf --homedir "$KEYHOME" --kill all >/dev/null 2>&1 || true; rm -rf "$KEYHOME"' EXIT
-  scripts/components/dev-key.sh "$KEYHOME" >/dev/null
+  # These artifacts are for testing only: the app refuses them unless
+  # MURMUR_DEV_TRUST_ROOT(+ACK) names this certificate.
   GNUPGHOME="$KEYHOME" scripts/components/sign-manifest.sh "$COMPONENTS/components-manifest.json" "$COMPONENTS/murmur-release.asc"
   echo "WARNING: components signed with a throwaway key (untrusted-dev-signed)." >&2
 fi

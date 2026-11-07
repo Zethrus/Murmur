@@ -174,8 +174,9 @@ def package_portable(image, output):
     """The portable archive is the AppImage named murmur."""
     with tarfile.open(output / "murmur-linux-x86_64.tar.gz", "w:gz", dereference=True) as archive:
         archive.add(image, arcname="murmur")
-    # A reused output directory may contain assets staged by older scripts.
-    for name in ("murmur", "murmur-engine"):
+    # A reused output directory may contain assets staged by older scripts, and GPU
+    # evidence tied to the previous packages' hashes.
+    for name in ("murmur", "murmur-engine", "GPU-VALIDATION.json"):
         (output / name).unlink(missing_ok=True)
 
 
