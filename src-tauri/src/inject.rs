@@ -119,16 +119,53 @@ fn release_modifiers() {
         thread::sleep(Duration::from_millis(20));
     }
 }
-/// Poll (never synthesise) until Control/Alt are released: a half-released hold chord turns the
-/// opening words into menu accelerators. Bounded at 600 ms so a stuck modifier cannot stall typing.
-#[cfg(target_os = "linux")]
-fn wait_for_modifiers_released() {
-    for _ in 0..30 {
-        if !modifiers_held() {
-            return;
+/// Probes and interval for [`wait_for_modifiers_released`]: 30 × 20 ms = 600 ms.
+const MODIFIER_PROBES: u32 = 30;
+const MODIFIER_STEP: Duration = Duration::from_millis(20);
+/// Shared control flow: poll `held` until it reports no modifier, at most `probes` times with
+/// `sleep(step)` in between. Returns whether the modifiers were released in time.
+fn wait_until_released(
+    mut held: impl FnMut() -> bool,
+    mut sleep: impl FnMut(Duration),
+    probes: u32,
+    step: Duration,
+) -> bool {
+    for probe in 0..probes {
+        if !held() {
+            return true;
         }
-        thread::sleep(Duration::from_millis(20));
+        if probe + 1 < probes {
+            sleep(step);
+        }
     }
+    false
+}
+/// Poll (never synthesise) until the hotkey's modifiers are released: a half-released hold chord
+/// turns the opening words into menu accelerators, and on Windows a synthesised letter while
+/// Ctrl+Alt is still physically down can even fire the dictation hotkey again. Bounded at 600 ms
+/// so a stuck modifier cannot stall typing.
+#[cfg(any(target_os = "linux", windows))]
+fn wait_for_modifiers_released() {
+    if !wait_until_released(
+        modifiers_held,
+        thread::sleep,
+        MODIFIER_PROBES,
+        MODIFIER_STEP,
+    ) {
+        tracing::info!("Modifier keys still held after 600 ms; typing anyway");
+    }
+}
+/// Windows: Control, Alt, Shift or either Windows key physically down. GetAsyncKeyState reads the
+/// asynchronous key state (high bit = down now), the same source global-hotkey polls to report
+/// Released. B8: verified in source, not run on hardware.
+#[cfg(windows)]
+fn modifiers_held() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+    [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
+        .into_iter()
+        .any(|key| unsafe { GetAsyncKeyState(i32::from(key)) } < 0)
 }
 /// Long-lived injection helper.
 ///
@@ -471,6 +508,8 @@ impl Injector {
                 Err(error) => tracing::warn!(%error, "xdotool typing failed; using enigo"),
             }
         }
+        #[cfg(windows)]
+        wait_for_modifiers_released();
         Enigo::new(&Settings::default())
             .context("Connect keyboard injection")?
             .text(text)
@@ -489,6 +528,8 @@ impl Injector {
     }
     #[cfg(not(target_os = "linux"))]
     fn paste_with_enigo(focused: &str) -> Result<()> {
+        #[cfg(windows)]
+        wait_for_modifiers_released();
         let mut keyboard = Enigo::new(&Settings::default()).context("Connect paste keyboard")?;
         keyboard
             .key(Key::Control, Direction::Press)
@@ -570,6 +611,47 @@ mod tests {
             safe_text("line one\nline two", "obsidian"),
             "line one\nline two"
         );
+    }
+    #[test]
+    fn modifier_wait_returns_once_released() {
+        let mut probes = 0;
+        let mut slept = Duration::ZERO;
+        let released = wait_until_released(
+            || {
+                probes += 1;
+                probes < 4
+            },
+            |step| slept += step,
+            MODIFIER_PROBES,
+            MODIFIER_STEP,
+        );
+        assert!(released);
+        assert_eq!(probes, 4);
+        assert_eq!(slept, MODIFIER_STEP * 3);
+    }
+    #[test]
+    fn modifier_wait_is_bounded_at_600_ms() {
+        let mut probes = 0;
+        let mut slept = Duration::ZERO;
+        let released = wait_until_released(
+            || {
+                probes += 1;
+                true
+            },
+            |step| slept += step,
+            MODIFIER_PROBES,
+            MODIFIER_STEP,
+        );
+        assert!(!released);
+        assert_eq!(probes, MODIFIER_PROBES);
+        assert!(slept <= Duration::from_millis(600));
+        // Nothing held: no sleep at all.
+        assert!(wait_until_released(
+            || false,
+            |_| panic!("slept"),
+            30,
+            MODIFIER_STEP
+        ));
     }
     #[test]
     fn explicit_modes() {
