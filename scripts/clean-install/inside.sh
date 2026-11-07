@@ -14,6 +14,10 @@ xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- \
   strace -f -qq -e trace=connect -o /tmp/connect.log timeout 25 /usr/bin/murmur > /tmp/app.log 2>&1 || status=$?
 if [ "${status:-0}" != 124 ]; then echo "Murmur exited early (${status:-0})"; cat /tmp/app.log; exit 1; fi
 if grep -E 'sa_family=AF_INET6?' /tmp/connect.log; then echo "network connection attempted at startup" >&2; exit 1; fi
+# The trace must have seen something (X11/D-Bus sockets), or it proves nothing.
+calls=$(grep -c 'connect(' /tmp/connect.log || true)
+[ "$calls" -gt 0 ] || { echo "strace recorded no connect() calls" >&2; exit 1; }
+echo "connect() calls during startup: $calls, all non-IP ($(grep -o 'sa_family=AF_[A-Z0-9]*' /tmp/connect.log | sort | uniq -c | tr -s ' ' | tr '\n' ' '))"
 grep -q 'Speech engine not installed' ~/.local/share/murmur/murmur.log || { echo "missing-engine report absent"; cat ~/.local/share/murmur/murmur.log; exit 1; }
 test -f ~/.config/murmur/config.toml
 echo "startup without engine: no network, app stayed up"

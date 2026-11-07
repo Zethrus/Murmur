@@ -222,44 +222,64 @@ impl Store {
     }
 }
 
-/// Dynamic `NEEDED` entries of a 64-bit little-endian ELF file (no external tools).
+/// Dynamic `NEEDED` entries of a 64-bit little-endian ELF file (no external tools). Reads
+/// only the header, program headers, dynamic segment and the strings it names: CUDA libraries
+/// are hundreds of megabytes.
 pub fn elf_needed(path: &Path) -> Option<Vec<String>> {
-    let data = fs::read(path).ok()?;
-    let u16_at = |o: usize| data.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
-    let u64_at = |o: usize| {
-        data.get(o..o + 8)
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let mut read_at = |offset: u64, length: usize| -> Option<Vec<u8>> {
+        if length > 16 << 20 {
+            return None;
+        }
+        let mut buffer = vec![0u8; length];
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        file.read_exact(&mut buffer).ok()?;
+        Some(buffer)
+    };
+    let u16_at = |d: &[u8], o: usize| d.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let u32_at = |d: &[u8], o: usize| {
+        d.get(o..o + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    let u64_at = |d: &[u8], o: usize| {
+        d.get(o..o + 8)
             .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
     };
-    if data.get(0..4)? != b"\x7fELF" || *data.get(4)? != 2 || *data.get(5)? != 1 {
+    let header = read_at(0, 64)?;
+    if header.get(0..4)? != b"\x7fELF" || header[4] != 2 || header[5] != 1 {
         return None;
     }
     let (phoff, phentsize, phnum) = (
-        u64_at(0x20)? as usize,
-        u16_at(0x36)? as usize,
-        u16_at(0x38)? as usize,
+        u64_at(&header, 0x20)?,
+        u16_at(&header, 0x36)? as usize,
+        u16_at(&header, 0x38)? as usize,
     );
+    let table = read_at(phoff, phentsize.checked_mul(phnum)?)?;
     let mut loads = Vec::new();
     let mut dynamic = None;
     for i in 0..phnum {
-        let base = phoff + i * phentsize;
-        let kind = u32::from_le_bytes(data.get(base..base + 4)?.try_into().ok()?);
-        let (offset, vaddr, filesz) = (u64_at(base + 8)?, u64_at(base + 16)?, u64_at(base + 32)?);
-        match kind {
+        let base = i * phentsize;
+        let (offset, vaddr, filesz) = (
+            u64_at(&table, base + 8)?,
+            u64_at(&table, base + 16)?,
+            u64_at(&table, base + 32)?,
+        );
+        match u32_at(&table, base)? {
             1 => loads.push((vaddr, offset, filesz)),
-            2 => dynamic = Some((offset as usize, filesz as usize)),
+            2 => dynamic = Some((offset, filesz as usize)),
             _ => {}
         }
     }
     let (offset, size) = dynamic?;
+    let entries = read_at(offset, size)?;
     let mut needed = Vec::new();
     let mut strtab = None;
     for i in 0..size / 16 {
-        let tag = u64_at(offset + i * 16)?;
-        let value = u64_at(offset + i * 16 + 8)?;
-        match tag {
-            0 => break,
-            1 => needed.push(value as usize),
-            5 => strtab = Some(value),
+        match (u64_at(&entries, i * 16)?, u64_at(&entries, i * 16 + 8)?) {
+            (0, _) => break,
+            (1, value) => needed.push(value),
+            (5, value) => strtab = Some(value),
             _ => {}
         }
     }
@@ -267,13 +287,13 @@ pub fn elf_needed(path: &Path) -> Option<Vec<String>> {
     let (vaddr, file_offset, _) = loads
         .iter()
         .find(|(v, _, s)| strtab >= *v && strtab < v + s)?;
-    let table = (strtab - vaddr + file_offset) as usize;
+    let table = strtab - vaddr + file_offset;
     needed
         .into_iter()
         .map(|index| {
-            let start = table + index;
-            let end = start + data.get(start..)?.iter().position(|b| *b == 0)?;
-            String::from_utf8(data[start..end].to_vec()).ok()
+            let bytes = read_at(table + index, 256).or_else(|| read_at(table + index, 64))?;
+            let end = bytes.iter().position(|b| *b == 0)?;
+            String::from_utf8(bytes[..end].to_vec()).ok()
         })
         .collect()
 }
