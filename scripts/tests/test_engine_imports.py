@@ -100,10 +100,14 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def fake_pe(imports=(), delay_imports=(), pe32=False):
-    """Minimal PE image with an import and a delay-import table in one section."""
+def fake_pe(imports=(), delay_imports=(), pe32=False, directories_in_header=16, rva_count=16,
+            name_rva=None):
+    """Minimal PE image with an import and a delay-import table in one section.
+
+    `directories_in_header` sizes the optional header, `rva_count` is NumberOfRvaAndSizes, and
+    `name_rva` overrides every import name RVA (for unmapped-name tests)."""
     import struct
-    optional_size = (96 if pe32 else 112) + 16 * 8
+    optional_size = (96 if pe32 else 112) + directories_in_header * 8
     image = bytearray(0x400)
     image[0:2] = b"MZ"
     struct.pack_into("<I", image, 0x3C, 0x40)
@@ -112,6 +116,7 @@ def fake_pe(imports=(), delay_imports=(), pe32=False):
     optional = 0x58
     struct.pack_into("<H", image, optional, 0x10B if pe32 else 0x20B)
     directories = optional + (96 if pe32 else 112)
+    struct.pack_into("<I", image, directories - 4, rva_count)
     section = optional + optional_size
     image[section:section + 8] = b".rdata\0\0"
     struct.pack_into("<IIII", image, section + 8, 0x1000, 0x1000, 0x200, 0x200)  # vsize, rva, raw size, raw ptr
@@ -121,11 +126,12 @@ def fake_pe(imports=(), delay_imports=(), pe32=False):
     struct.pack_into("<II", image, directories + 8, rva(descriptor), 20 * (len(imports) + 1))
     for name in imports:
         image[names:names + len(name)] = name.encode()
-        struct.pack_into("<IIIII", image, descriptor, 0, 0, 0, rva(names), 0)
+        struct.pack_into("<IIIII", image, descriptor, 0, 0, 0, name_rva or rva(names), 0)
         descriptor += 20
         names += len(name) + 1
     delay = 0x280
-    struct.pack_into("<II", image, directories + 8 * 13, rva(delay), 32 * (len(delay_imports) + 1))
+    if directories_in_header > 13:
+        struct.pack_into("<II", image, directories + 8 * 13, rva(delay), 32 * (len(delay_imports) + 1))
     for name in delay_imports:
         image[names:names + len(name)] = name.encode()
         struct.pack_into("<II", image, delay, 1, rva(names))
@@ -141,6 +147,44 @@ class PortableExecutableTests(unittest.TestCase):
                 image = fake_pe(["KERNEL32.dll", "cublas64_12.dll"], ["cublasLt64_12.dll"], pe32=pe32)
                 self.assertEqual(gate.pe_imports_builtin(image),
                                  {"KERNEL32.dll", "cublas64_12.dll", "cublasLt64_12.dll"})
+
+    def test_image_without_import_directories_gives_nothing(self):
+        for pe32 in (False, True):
+            with self.subTest(pe32=pe32):
+                # No import or delay-import directory at all (RVA 0).
+                self.assertEqual(gate.pe_imports_builtin(fake_pe(pe32=pe32, rva_count=0)), set())
+                self.assertEqual(gate.pe_imports_builtin(fake_pe(pe32=pe32, directories_in_header=0,
+                                                                 rva_count=0)), set())
+
+    def test_short_optional_header_and_rva_count_bound_the_directories(self):
+        # Only two directories in the optional header: the import table is read, and the delay
+        # directory (index 13) is never looked up beyond the header (it would be section data).
+        image = fake_pe(["KERNEL32.dll"], pe32=False, directories_in_header=2)
+        self.assertEqual(gate.pe_imports_builtin(image), {"KERNEL32.dll"})
+        # Full header but NumberOfRvaAndSizes = 2: the delay directory is not declared.
+        image = fake_pe(["KERNEL32.dll"], ["cudnn64_9.dll"], rva_count=2)
+        self.assertEqual(gate.pe_imports_builtin(image), {"KERNEL32.dll"})
+        # Header too short to hold NumberOfRvaAndSizes itself.
+        import struct
+        image = bytearray(fake_pe(["KERNEL32.dll"]))
+        struct.pack_into("<H", image, 0x40 + 20, 16)
+        self.assertEqual(gate.pe_imports_builtin(bytes(image)), set())
+
+    def test_unmapped_name_and_truncated_image_do_not_raise(self):
+        # A name RVA outside every section used to reach _c_string as None (TypeError).
+        image = fake_pe(["cublas64_12.dll"], name_rva=0x9000)
+        self.assertEqual(gate.pe_imports_builtin(image), set())
+        # Truncated inside the section table: whatever was readable, no struct.error.
+        whole = fake_pe(["KERNEL32.dll"])
+        for length in (0x44, 0x5A, 0x160, 0x1F0, 0x210):
+            with self.subTest(length=length):
+                self.assertIsInstance(gate.pe_imports_builtin(whole[:length]), set)
+        # The gate on a file holding such an image reports normally (built-in parser only).
+        import sys
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(sys.modules, {"pefile": None}):
+            path = Path(temporary) / "broken.dll"
+            path.write_bytes(image)
+            self.assertEqual(gate._pe_imports(path), set())
 
     def test_not_pe_gives_nothing(self):
         self.assertEqual(gate.pe_imports_builtin(b"\x7fELF" + bytes(100)), set())

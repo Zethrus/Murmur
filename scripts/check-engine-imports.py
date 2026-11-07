@@ -51,21 +51,35 @@ def _rva_offset(sections, rva):
 
 
 def _c_string(data, offset):
+    """NUL-terminated name at a file offset; None for an unmapped RVA or an unterminated name."""
+    if offset is None or not 0 <= offset < len(data):
+        return None
     end = data.find(b"\0", offset, offset + 512)
-    return data[offset:end].decode("ascii", "replace") if offset is not None and end > offset else None
+    return data[offset:end].decode("ascii", "replace") if end > offset else None
 
 
 def pe_imports_builtin(data):
     """DLL names from a PE image's import and delay-load import tables (no third-party code).
 
     Delay-loaded DLLs matter: a CUDA library CTranslate2 only loads on first use is still a
-    hard dependency of that code path. Returns an empty set for anything that is not PE."""
+    hard dependency of that code path. Returns an empty set for anything that is not PE, and
+    whatever was read before the end of a truncated or malformed image."""
+    import struct
+    names = set()
+    try:
+        _read_pe_imports(data, names)
+    except struct.error:
+        pass  # truncated image: keep the names read so far (pefile also runs on Windows)
+    return names
+
+
+def _read_pe_imports(data, names):
     import struct
     if len(data) < 0x40 or data[:2] != b"MZ":
-        return set()
+        return
     pe, = struct.unpack_from("<I", data, 0x3C)
     if data[pe:pe + 4] != b"PE\0\0":
-        return set()
+        return
     count, = struct.unpack_from("<H", data, pe + 6)
     optional_size, = struct.unpack_from("<H", data, pe + 20)
     optional = pe + 24
@@ -77,16 +91,20 @@ def pe_imports_builtin(data):
         image_base, = struct.unpack_from("<I", data, optional + 28)
         directories = optional + 96
     else:
-        return set()
+        return
+    if directories > optional + optional_size:
+        return  # optional header too short to hold NumberOfRvaAndSizes
+    rva_count, = struct.unpack_from("<I", data, directories - 4)
+    # Only directories that are both declared and inside the optional header exist.
+    available = min(rva_count, (optional + optional_size - directories) // 8)
     sections = []
     for index in range(count):
         entry = optional + optional_size + 40 * index
         size, virtual, raw_size, raw = struct.unpack_from("<IIII", data, entry + 8)
         sections.append((virtual, size, raw, raw_size))
-    names = set()
 
     def directory(index):
-        return struct.unpack_from("<II", data, directories + 8 * index)
+        return struct.unpack_from("<II", data, directories + 8 * index) if index < available else (0, 0)
 
     rva, size = directory(1)  # IMAGE_DIRECTORY_ENTRY_IMPORT: 20-byte descriptors
     offset = _rva_offset(sections, rva) if rva else None
@@ -108,7 +126,6 @@ def pe_imports_builtin(data):
         if (name := _c_string(data, _rva_offset(sections, name_rva))):
             names.add(name)
         offset += 32
-    return names
 
 
 def _pe_imports(path, require_pefile=False):
