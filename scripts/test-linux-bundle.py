@@ -110,6 +110,9 @@ def check_deb(deb, root, manifest, work):
     depends = run('dpkg-deb', '-f', str(deb), 'Depends', capture_output=True).stdout
     for needed in ('libwebkit2gtk-4.1-0', 'xdotool', 'x11-utils', 'libayatana-appindicator3-1'):
         assert needed in depends, depends
+    # Real ALSA first: on Ubuntu 24.04 the virtual libasound2 can resolve to the OSS shim
+    # liboss4-salsa-asound2, which lacks ALSA symbols (found by test-clean-install.sh).
+    assert 'libasound2t64 | libasound2' in depends, depends
     run(sys.executable, str(HERE / 'test-linux-startup.py'), str(package / 'usr/bin/murmur'), timeout=180)
 
 

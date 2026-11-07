@@ -69,7 +69,7 @@
           "libayatana-appindicator3-1",
           "libwebkit2gtk-4.1-0",
           "libgtk-3-0",
-          "libasound2 | libasound2t64",
+          "libasound2t64 | libasound2",
           "libx11-6",
           "libxkbcommon0",
           "libdbus-1-3"
