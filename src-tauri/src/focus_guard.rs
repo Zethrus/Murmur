@@ -1,8 +1,10 @@
 //! Decide whether a finished dictation may go to the window that has focus now.
 //!
 //! Pure: callers read focus through `platform` and act on the decision. Windows are compared by
-//! native identity (X11 window ID or HWND), so two windows of one application are different
-//! targets. Tabs inside a single window cannot be told apart.
+//! native identity (X11 window ID on Linux; HWND + PID + process start time on Windows), so two
+//! windows of one application are different targets. Tabs inside a single window cannot be told
+//! apart. A target Murmur cannot type into (elevated window, secure desktop) or cannot identify is
+//! never typed into: see docs/focus-contract.md.
 use crate::platform::Focus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,14 +41,17 @@ pub enum Decision {
 }
 
 /// `origin` is the focus when dictation started, `current` the focus at delivery. `None` means
-/// the focused window could not be identified, which never counts as a match.
+/// the focused window could not be identified, which never counts as a match. A current focus
+/// that is unknown or blocked is never typed into, even in Insert mode; Copy still copies and
+/// Refocus still tries the original window (it is re-checked before anything is typed).
 pub fn decide(origin: Option<&Focus>, current: Option<&Focus>, mode: FocusMode) -> Decision {
     if same_target(origin, current) {
         return Decision::Deliver;
     }
+    let deliverable = matches!(current, Some(Focus::Window { .. } | Focus::Own));
     match mode {
-        FocusMode::Insert => Decision::Deliver,
-        FocusMode::Hold => Decision::Hold,
+        FocusMode::Insert if deliverable => Decision::Deliver,
+        FocusMode::Insert | FocusMode::Hold => Decision::Hold,
         FocusMode::Copy => Decision::Copy,
         FocusMode::Refocus => match origin {
             Some(Focus::Window { id, .. }) => Decision::Refocus(*id),
@@ -58,7 +63,21 @@ pub fn decide(origin: Option<&Focus>, current: Option<&Focus>, mode: FocusMode) 
 
 fn same_target(origin: Option<&Focus>, current: Option<&Focus>) -> bool {
     match (origin, current) {
-        (Some(Focus::Window { id: a, .. }), Some(Focus::Window { id: b, .. })) => a == b,
+        (
+            Some(Focus::Window {
+                id: a,
+                pid: pa,
+                started: sa,
+                ..
+            }),
+            Some(Focus::Window {
+                id: b,
+                pid: pb,
+                started: sb,
+                ..
+            }),
+        ) => a == b && pa == pb && sa == sb,
+        // Blocked targets never match, so even an unchanged elevated window is held.
         // Started and finished in Murmur: delivery skips its own windows, as before.
         (Some(Focus::Own), Some(Focus::Own)) => true,
         _ => false,
@@ -68,11 +87,30 @@ fn same_target(origin: Option<&Focus>, current: Option<&Focus>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::Blocked;
 
     fn window(id: u64, class: &str) -> Focus {
         Focus::Window {
             id,
+            pid: None,
+            started: None,
             class: class.into(),
+        }
+    }
+
+    fn windows_window(id: u64, pid: u32, started: u64) -> Focus {
+        Focus::Window {
+            id,
+            pid: Some(pid),
+            started: Some(started),
+            class: "notepad.exe".into(),
+        }
+    }
+
+    fn blocked(reason: Blocked) -> Focus {
+        Focus::Blocked {
+            reason,
+            class: "notepad.exe".into(),
         }
     }
 
@@ -158,6 +196,99 @@ mod tests {
             Decision::Refocus(3)
         );
         assert_eq!(decide(None, None, FocusMode::Hold), Decision::Hold);
+        assert_eq!(decide(Some(&editor), None, FocusMode::Copy), Decision::Copy);
+    }
+
+    #[test]
+    fn insert_mode_never_types_into_an_unknown_target() {
+        let editor = window(3, "code");
+        assert_eq!(
+            decide(Some(&editor), None, FocusMode::Insert),
+            Decision::Hold
+        );
+        assert_eq!(decide(None, None, FocusMode::Insert), Decision::Hold);
+    }
+
+    #[test]
+    fn reused_hwnd_with_another_process_is_a_different_target() {
+        let origin = windows_window(0x1234, 100, 5);
+        // Same HWND, same PID, same start time: the same window.
+        assert_eq!(
+            decide(
+                Some(&origin),
+                Some(&windows_window(0x1234, 100, 5)),
+                FocusMode::Hold
+            ),
+            Decision::Deliver
+        );
+        // HWND reused by another process.
+        assert_eq!(
+            decide(
+                Some(&origin),
+                Some(&windows_window(0x1234, 200, 5)),
+                FocusMode::Hold
+            ),
+            Decision::Hold
+        );
+        // PID reused by a new process (different start time).
+        assert_eq!(
+            decide(
+                Some(&origin),
+                Some(&windows_window(0x1234, 100, 6)),
+                FocusMode::Hold
+            ),
+            Decision::Hold
+        );
+        // Start time unreadable at one end: not provably the same.
+        let unknown_start = Focus::Window {
+            id: 0x1234,
+            pid: Some(100),
+            started: None,
+            class: "notepad.exe".into(),
+        };
+        assert_eq!(
+            decide(Some(&origin), Some(&unknown_start), FocusMode::Hold),
+            Decision::Hold
+        );
+    }
+
+    #[test]
+    fn blocked_targets_are_never_typed_into() {
+        for reason in [
+            Blocked::Elevated,
+            Blocked::Unreadable,
+            Blocked::SecureDesktop,
+        ] {
+            let target = blocked(reason);
+            // Dictation started and ended in the same elevated window: still held.
+            assert_eq!(
+                decide(Some(&target), Some(&target), FocusMode::Hold),
+                Decision::Hold
+            );
+            assert_eq!(
+                decide(Some(&target), Some(&target), FocusMode::Insert),
+                Decision::Hold
+            );
+            assert_eq!(
+                decide(Some(&target), Some(&target), FocusMode::Copy),
+                Decision::Copy
+            );
+            // Nothing to return to from a blocked origin.
+            assert_eq!(
+                decide(Some(&target), Some(&target), FocusMode::Refocus),
+                Decision::Hold
+            );
+            // Normal origin, blocked at delivery (UAC prompt appeared).
+            let editor = windows_window(9, 100, 5);
+            assert_eq!(
+                decide(Some(&editor), Some(&target), FocusMode::Insert),
+                Decision::Hold
+            );
+            assert_eq!(
+                decide(Some(&editor), Some(&target), FocusMode::Refocus),
+                Decision::Refocus(9)
+            );
+        }
     }
 
     #[test]

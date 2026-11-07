@@ -434,6 +434,13 @@ impl Controller {
             }
             Decision::Hold => {
                 held = self.hold(state, text, duration);
+                // Say why when the window could not take typing at all (elevated, secure desktop).
+                if let (true, Ok(Focus::Blocked { reason, .. })) = (held, current.as_ref()) {
+                    if let Some(id) = state.held.current_id() {
+                        state.held.set_message(id, reason.message());
+                        state.enhance.refresh_overlay(state);
+                    }
+                }
                 None
             }
         };
@@ -531,7 +538,7 @@ impl Controller {
             .into_iter()
             .flatten()
             .find_map(|focus| match focus {
-                Focus::Window { class, .. } => Some(class.clone()),
+                Focus::Window { class, .. } | Focus::Blocked { class, .. } => Some(class.clone()),
                 Focus::Own => None,
             })
             .unwrap_or_default()
@@ -540,7 +547,7 @@ impl Controller {
     fn hold(&self, state: &AppState, raw: &str, duration: u64) -> bool {
         let origin = self.origin.as_ref().map(|focus| match focus {
             Focus::Own => "Murmur".to_owned(),
-            Focus::Window { class, .. } => class.clone(),
+            Focus::Window { class, .. } | Focus::Blocked { class, .. } => class.clone(),
         });
         let class = origin.as_deref().unwrap_or_default();
         let style = postproc::resolve_style(&self.config, class, self.force_code);
@@ -595,6 +602,10 @@ impl Controller {
         } else {
             match current {
                 Ok(Focus::Window { class, .. }) => class,
+                Ok(Focus::Blocked { reason, .. }) => {
+                    self.held_message(state, held.id, reason.message());
+                    return Ok(());
+                }
                 Ok(Focus::Own) => {
                     self.held_message(state, held.id, FOCUS_TARGET_FIRST);
                     return Ok(());
@@ -988,12 +999,16 @@ mod tests {
                 },
                 || crate::platform::Focus::Window {
                     id: worker_focus.load(Ordering::SeqCst),
+                    pid: None,
+                    started: None,
                     class: "editor".into(),
                 },
             )
             .unwrap();
             let origin = crate::platform::Focus::Window {
                 id: 1,
+                pid: None,
+                started: None,
                 class: "editor".into(),
             };
             assert_eq!(
