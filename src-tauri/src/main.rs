@@ -6,6 +6,7 @@ mod autostart;
 #[cfg(test)]
 mod coding_tests;
 mod companion;
+mod components;
 mod config;
 mod controller;
 mod engine;

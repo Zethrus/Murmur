@@ -60,6 +60,11 @@ getrandom = "0.3"
 llama-cpp-2 = { version = "=0.1.160", default-features = false, optional = true }
 llama-cpp-sys-2 = { version = "=0.1.160", default-features = false, optional = true }
 btleplug = "0.11"
+# Component manager: OpenPGP manifest verification with the pure-Rust backend (no nettle/CNG),
+# and zip extraction of engine/CUDA components. Verification only touches public data, so the
+# variable-time RSA/DSA code paths sequoia gates behind these flags carry no secret.
+sequoia-openpgp = { version = "2.4", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
+zip = { version = "7.2", default-features = false, features = ["deflate"] }
 futures = "0.3"
 # Free-space check before an explicit Enhance model download.
 [target.'cfg(unix)'.dependencies]
@@ -70,4 +75,4 @@ gtk = "0.18"
 gdkx11 = "0.18"
 # Atomic replacement of existing configuration files on Windows.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_SystemInformation"] }
