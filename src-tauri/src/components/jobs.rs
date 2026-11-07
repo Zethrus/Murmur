@@ -143,7 +143,7 @@ pub fn run(
 ) -> Result<(), ComponentError> {
     check_space(component, ctx.free)?;
     let total = component.size_bytes;
-    let staging = ctx.store.staging_dir(&component.id, &component.version);
+    let staging = ctx.store.staging_dir(&component.id, &component.version)?;
     ctx.store.sweep(&component.id);
     let result = (|| match component.archive {
         Archive::Zip => {
@@ -233,7 +233,7 @@ pub fn install_zip(
     progress: &mut dyn FnMut(Phase, u64, u64),
 ) -> Result<(), ComponentError> {
     let total = component.size_bytes;
-    let staging = ctx.store.staging_dir(&component.id, &component.version);
+    let staging = ctx.store.staging_dir(&component.id, &component.version)?;
     let _ = fs::remove_dir_all(&staging);
     progress(Phase::Extracting, total, total);
     let limit = component
@@ -250,7 +250,7 @@ fn install_files(
     progress: &mut dyn FnMut(Phase, u64, u64),
 ) -> Result<(), ComponentError> {
     let total = component.size_bytes;
-    let staging = ctx.store.staging_dir(&component.id, &component.version);
+    let staging = ctx.store.staging_dir(&component.id, &component.version)?;
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)
         .map_err(|_| ComponentError::new(Reason::Io, "Could not create the staging folder"))?;
@@ -307,7 +307,9 @@ pub fn install_local(
     }
     let result = install_zip(component, zip, ctx, &mut |_, _, _| {});
     if result.is_err() {
-        let _ = fs::remove_dir_all(ctx.store.staging_dir(&component.id, &component.version));
+        if let Ok(staging) = ctx.store.staging_dir(&component.id, &component.version) {
+            let _ = fs::remove_dir_all(staging);
+        }
     }
     result
 }

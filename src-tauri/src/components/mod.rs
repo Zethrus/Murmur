@@ -271,7 +271,10 @@ impl Components {
             tracing::warn!(target: "murmur::components", reason = ?error.reason, "{}", error.message);
         }
         let this = Arc::new(Self {
-            store: Store::new(root_dir),
+            store: Store::new(root_dir).with_legacy(vec![
+                options.legacy_models.clone(),
+                options.legacy_enhance.clone(),
+            ]),
             files,
             jobs_file,
             legacy_models: options.legacy_models,
@@ -635,6 +638,7 @@ impl Components {
 
     /// Pause (keep partial downloads) or cancel (discard them) a queued or running job.
     pub fn stop(&self, id: &str, pause: bool) -> Result<(), ComponentError> {
+        check_id(id)?;
         let mut inner = lock(&self.inner);
         let running = inner.running.as_deref() == Some(id);
         let Some(job) = inner.jobs.get_mut(id) else {
@@ -688,6 +692,7 @@ impl Components {
 
     /// Forget a paused or failed job and delete its partial download.
     pub fn discard(&self, id: &str) -> Result<(), ComponentError> {
+        check_id(id)?;
         let mut inner = lock(&self.inner);
         let paused = inner
             .jobs
@@ -854,6 +859,7 @@ impl Components {
     // ---- removal, verification, updates ----
 
     pub fn remove(&self, id: &str) -> Result<(), ComponentError> {
+        check_id(id)?;
         let usage = (self.host.usage)();
         let inner = lock(&self.inner);
         if inner
@@ -936,6 +942,7 @@ impl Components {
 
     /// Re-check installed files: hashes for file components, the smoke test for archives.
     pub fn verify(&self, id: &str) -> Result<Verdict, ComponentError> {
+        check_id(id)?;
         let component = {
             let inner = lock(&self.inner);
             self.require_catalog(&inner)?.manifest.find(id).cloned()
@@ -1057,9 +1064,14 @@ impl Components {
                 changed.push(component.kind);
                 continue;
             }
-            let target = self.store.version_dir(&component.id, &component.version);
-            let moved = fs::create_dir_all(self.store.component_dir(&component.id)).is_ok()
-                && store::rename(&legacy, &target).is_ok();
+            let (Ok(target), Ok(folder)) = (
+                self.store.version_dir(&component.id, &component.version),
+                self.store.component_dir(&component.id),
+            ) else {
+                continue;
+            };
+            let moved =
+                fs::create_dir_all(folder).is_ok() && store::rename(&legacy, &target).is_ok();
             let record = store::Active {
                 version: component.version.clone(),
                 kind: component.kind,
@@ -1171,7 +1183,7 @@ pub fn install_from_files(
                     "The folder matches no component in the manifest",
                 )
             })?;
-        let staging = store.staging_dir(&component.id, &component.version);
+        let staging = store.staging_dir(&component.id, &component.version)?;
         let _ = fs::remove_dir_all(&staging);
         fs::create_dir_all(&staging)
             .map_err(|_| ComponentError::new(Reason::Io, "Cannot stage the component"))?;

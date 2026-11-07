@@ -45,6 +45,9 @@ pub struct Active {
 #[derive(Debug, Clone)]
 pub struct Store {
     pub root: PathBuf,
+    /// Pre-0.5 model folders: the only places outside the store an `active.json` may point
+    /// to (a verified migration that could not be moved).
+    legacy: Vec<PathBuf>,
 }
 
 fn io(message: &str) -> ComponentError {
@@ -73,16 +76,55 @@ pub fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
 
 impl Store {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            legacy: Vec::new(),
+        }
     }
-    pub fn component_dir(&self, id: &str) -> PathBuf {
-        self.root.join(id)
+    pub fn with_legacy(mut self, legacy: Vec<PathBuf>) -> Self {
+        self.legacy = legacy;
+        self
     }
-    pub fn version_dir(&self, id: &str, version: &str) -> PathBuf {
-        self.root.join(id).join(version)
+    /// `<root>/<id>`. Ids become paths, so an unsafe one (`..`, separators) is refused here
+    /// as well as at every public entry point.
+    pub fn component_dir(&self, id: &str) -> Result<PathBuf, ComponentError> {
+        if !super::manifest::safe_id(id) {
+            return Err(ComponentError::new(Reason::NotFound, "Unknown component"));
+        }
+        Ok(self.root.join(id))
     }
-    pub fn staging_dir(&self, id: &str, version: &str) -> PathBuf {
-        self.root.join(id).join(format!(".staging-{version}"))
+    pub fn version_dir(&self, id: &str, version: &str) -> Result<PathBuf, ComponentError> {
+        if !super::manifest::safe_version(version) {
+            return Err(ComponentError::new(
+                Reason::NotFound,
+                "Unknown component version",
+            ));
+        }
+        Ok(self.component_dir(id)?.join(version))
+    }
+    pub fn staging_dir(&self, id: &str, version: &str) -> Result<PathBuf, ComponentError> {
+        if !super::manifest::safe_version(version) {
+            return Err(ComponentError::new(
+                Reason::NotFound,
+                "Unknown component version",
+            ));
+        }
+        Ok(self.component_dir(id)?.join(format!(".staging-{version}")))
+    }
+    /// An `active.json` location outside the version folder must be an absolute path without
+    /// `..` inside the component's own folder or a pre-0.5 model folder.
+    fn location_allowed(&self, id: &str, location: &Path) -> bool {
+        use std::path::Component as Part;
+        let Ok(own) = self.component_dir(id) else {
+            return false;
+        };
+        location.is_absolute()
+            && !location
+                .components()
+                .any(|c| matches!(c, Part::ParentDir | Part::CurDir))
+            && std::iter::once(&own)
+                .chain(&self.legacy)
+                .any(|base| location.starts_with(base) && location != base)
     }
     pub fn downloads(&self) -> PathBuf {
         self.root.join("downloads")
@@ -123,23 +165,28 @@ impl Store {
         }
     }
     pub fn active(&self, id: &str) -> Option<Active> {
-        let bytes = fs::read(self.component_dir(id).join("active.json")).ok()?;
+        let bytes = fs::read(self.component_dir(id).ok()?.join("active.json")).ok()?;
         let active: Active = serde_json::from_slice(&bytes).ok()?;
-        // Unsigned: the version becomes a path, so a record naming `..` is treated as absent.
-        super::manifest::safe_version(&active.version).then_some(active)
+        // Unsigned: the version and location become paths, so a record naming `..` or a
+        // folder outside the store and the legacy model folders is treated as absent.
+        let location_ok = active
+            .location
+            .as_deref()
+            .is_none_or(|l| self.location_allowed(id, l));
+        (super::manifest::safe_version(&active.version) && location_ok).then_some(active)
     }
     /// Directory holding the active version's files, if it exists.
     pub fn active_dir(&self, id: &str) -> Option<PathBuf> {
         let active = self.active(id)?;
         let dir = match &active.location {
             Some(location) => location.clone(),
-            None => self.version_dir(id, &active.version),
+            None => self.version_dir(id, &active.version).ok()?,
         };
         dir.is_dir().then_some(dir)
     }
     pub fn write_active(&self, id: &str, active: &Active) -> Result<(), ComponentError> {
         write_atomic(
-            &self.component_dir(id).join("active.json"),
+            &self.component_dir(id)?.join("active.json"),
             &serde_json::to_vec_pretty(active).map_err(|_| io("Could not record the component"))?,
         )
     }
@@ -152,13 +199,15 @@ impl Store {
         replace: bool,
         now: u64,
     ) -> Result<(), ComponentError> {
-        let target = self.version_dir(&component.id, &component.version);
+        let target = self.version_dir(&component.id, &component.version)?;
         let previous = self.active(&component.id);
         let mut displaced = None;
         if target.exists() {
             // Reinstalling the same version: keep the old copy aside until the switch succeeds.
+            // Only the CLI/test path (`install_from_files`, no `before_activate`) can get here
+            // while the engine runs; the app stops it first.
             let aside = self
-                .component_dir(&component.id)
+                .component_dir(&component.id)?
                 .join(format!(".old-{}-{now}", component.version));
             rename(&target, &aside)
                 .map_err(|_| io("Could not replace the installed version (is it in use?)"))?;
@@ -194,8 +243,9 @@ impl Store {
                     // Files verified in place outside the store are never deleted by it.
                     Some(_) => {}
                     None => {
-                        let _ =
-                            fs::remove_dir_all(self.version_dir(&component.id, &previous.version));
+                        if let Ok(dir) = self.version_dir(&component.id, &previous.version) {
+                            let _ = fs::remove_dir_all(dir);
+                        }
                     }
                 }
             }
@@ -204,7 +254,7 @@ impl Store {
     }
     /// Delete everything the store holds for `id`. Callers check dependencies and use first.
     pub fn remove(&self, id: &str) -> Result<(), ComponentError> {
-        match fs::remove_dir_all(self.component_dir(id)) {
+        match fs::remove_dir_all(self.component_dir(id)?) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(io("Could not remove the component (is it in use?)")),
@@ -212,7 +262,11 @@ impl Store {
     }
     /// Remove leftovers of interrupted activations; never touches active versions.
     pub fn sweep(&self, id: &str) {
-        let Ok(entries) = fs::read_dir(self.component_dir(id)) else {
+        let Some(entries) = self
+            .component_dir(id)
+            .ok()
+            .and_then(|d| fs::read_dir(d).ok())
+        else {
             return;
         };
         for entry in entries.flatten() {
@@ -471,12 +525,54 @@ mod tests {
         manifest.components[0].clone()
     }
     fn stage(store: &Store, c: &Component, files: &[&str]) -> PathBuf {
-        let staging = store.staging_dir(&c.id, &c.version);
+        let staging = store.staging_dir(&c.id, &c.version).unwrap();
         fs::create_dir_all(&staging).unwrap();
         for f in files {
             fs::write(staging.join(f), c.version.as_bytes()).unwrap();
         }
         staging
+    }
+
+    #[test]
+    fn active_location_must_stay_inside_known_folders() {
+        let base = store("location");
+        let legacy = base.root.join("legacy-models");
+        let s = Store::new(base.root.join("components")).with_legacy(vec![legacy.clone()]);
+        let record = |location: Option<PathBuf>| Active {
+            version: "1".into(),
+            kind: Kind::SpeechModel,
+            model: Some("x".into()),
+            location,
+            migrated: true,
+            installed_at: 0,
+        };
+        let accepted = |location: Option<PathBuf>| {
+            s.write_active("speech-x", &record(location)).unwrap();
+            s.active("speech-x").is_some()
+        };
+        assert!(accepted(None));
+        assert!(accepted(Some(legacy.join("x"))), "a pre-0.5 model folder");
+        assert!(accepted(Some(
+            s.component_dir("speech-x").unwrap().join("1")
+        )));
+        assert!(
+            !accepted(Some(PathBuf::from("/etc"))),
+            "outside every known folder"
+        );
+        assert!(!accepted(Some(legacy.clone())), "the legacy root itself");
+        assert!(
+            !accepted(Some(legacy.join("x/../../.."))),
+            "parent components"
+        );
+        assert!(
+            !accepted(Some(PathBuf::from("legacy-models/x"))),
+            "relative"
+        );
+        assert!(
+            !accepted(Some(s.component_dir("speech-y").unwrap())),
+            "another component"
+        );
+        let _ = fs::remove_dir_all(&base.root);
     }
 
     #[test]
@@ -505,14 +601,18 @@ mod tests {
         let staging = stage(&s, &v2, SPEECH_REQUIRED);
         s.activate(&v2, &staging, false, 2).unwrap();
         assert_eq!(s.active("speech-x").unwrap().version, "2");
-        assert!(s.version_dir("speech-x", "1").is_dir());
+        assert!(s.version_dir("speech-x", "1").unwrap().is_dir());
         // Reinstalling the active version swaps it in place; with replace=true the previously
         // active version (here: the same one) is the only candidate, so version 1 stays.
         let staging = stage(&s, &v2, SPEECH_REQUIRED);
         s.activate(&v2, &staging, true, 3).unwrap();
-        assert!(s.version_dir("speech-x", "1").is_dir());
-        assert!(s.version_dir("speech-x", "2").join("config.json").is_file());
-        assert!(fs::read_dir(s.component_dir("speech-x"))
+        assert!(s.version_dir("speech-x", "1").unwrap().is_dir());
+        assert!(s
+            .version_dir("speech-x", "2")
+            .unwrap()
+            .join("config.json")
+            .is_file());
+        assert!(fs::read_dir(s.component_dir("speech-x").unwrap())
             .unwrap()
             .flatten()
             .all(|e| !e.file_name().to_string_lossy().starts_with(".old-")));
@@ -520,7 +620,7 @@ mod tests {
         let v3 = model("speech-x", "3");
         let staging = stage(&s, &v3, SPEECH_REQUIRED);
         s.activate(&v3, &staging, true, 4).unwrap();
-        assert!(!s.version_dir("speech-x", "2").exists());
+        assert!(!s.version_dir("speech-x", "2").unwrap().exists());
         let _ = fs::remove_dir_all(&s.root);
     }
 
@@ -530,7 +630,7 @@ mod tests {
         let v1 = model("speech-y", "1");
         let staging = stage(&s, &v1, SPEECH_REQUIRED);
         s.activate(&v1, &staging, false, 1).unwrap();
-        let dir = s.component_dir("speech-y");
+        let dir = s.component_dir("speech-y").unwrap();
         let names: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -580,7 +680,7 @@ mod tests {
         )
         .unwrap();
         let engine = &manifest.components[0];
-        let dir = s.staging_dir("engine", "1");
+        let dir = s.staging_dir("engine", "1").unwrap();
         fs::create_dir_all(&dir).unwrap();
         assert!(smoke_test(engine, &dir).is_err(), "missing executable");
         #[cfg(unix)]
