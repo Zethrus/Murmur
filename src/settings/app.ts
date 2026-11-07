@@ -78,7 +78,7 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
     bannerAction.textContent = noEngine() ? "Finish setup" : "Choose model";
     if (status.error && !noEngine()) report(status.error); };
   let setupOpen = false;
-  function closeSetup(): void { setupOpen = false; layer.hidden = true; layer.replaceChildren(); shell.hidden = false; pageDisposers.splice(0).forEach(f=>f()); void refreshSnapshot().then(()=>{chrome(); renderPage();}); }
+  function closeSetup(): void { if (!setupOpen) return; setupOpen = false; layer.hidden = true; layer.replaceChildren(); shell.hidden = false; pageDisposers.splice(0).forEach(f=>f()); void refreshSnapshot().then(()=>{chrome(); renderPage();}); }
   function openSetup(): void {
     if (!snapshot) return;
     setupOpen = true; pageDisposers.splice(0).forEach(f=>f()); generation++; const current = generation;
@@ -122,7 +122,8 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   const subscribe = async <K extends keyof Events>(event: K, handler: (data: Events[K])=>void): Promise<void> => {
     const off = await on(event,handler); if (disposed) off(); else disposers.push(off);
   };
-  await subscribe("config",next=>{config = next; theme(); if (!saving) renderPage();});
+  // Closing the window during setup postpones it (Rust side); hide the wizard to match.
+  await subscribe("config",next=>{config = next; theme(); if (setupOpen && next.setup.postponed) closeSetup(); else if (!saving) renderPage();});
   await subscribe("latency",event=>{if (event.text !== undefined) lastTranscript = event.text;});
   const refreshStatus = (): void => { if (refreshTimer !== undefined) return;
     refreshTimer = setTimeout(()=>{refreshTimer = undefined; void call("get_status").then(next=>{
