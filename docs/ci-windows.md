@@ -25,8 +25,8 @@ PowerShell; idempotent):
 .\scripts\windows\provision-runner.ps1 -VerifyOnly           # report only
 ```
 
-It checks Windows (21H2+), the NVIDIA driver (R525+, never upgraded by the
-script) and 60 GB free; creates `murmur-ci` with "Log on as a service"; installs
+It checks Windows (21H2+), the NVIDIA driver (R528.33+, the Windows floor for
+CUDA 12.x; never upgraded by the script) and 60 GB free; creates `murmur-ci` with "Log on as a service"; installs
 Git, GitHub CLI, PowerShell 7, VS 2022 Build Tools (C++ and Windows SDK), CMake,
 LLVM, rustup (machine-wide in `C:\rust`), Node 22, Python 3.12, NSIS, WebView2
 and 7-Zip with winget; stages `distil-small.en` offline in
@@ -73,20 +73,30 @@ Pull requests and manual runs (`workflow_dispatch`, input `gpu`):
    and on the unfrozen site-packages.
 3. UI build and DOM tests, the Windows-relevant script tests, engine pytest,
    `cargo test` with and without the Enhance backend.
-4. Authenticode certificate import (dormant), `tauri build` for the MSVC target
-   (signing through `bundle.windows.signCommand` only when imported), certificate
-   removal (always), llama.cpp CPU-flag audit.
+4. Authenticode certificate import (**release tags only**, dormant until the
+   secrets exist), `tauri build` for the MSVC target (signing through
+   `bundle.windows.signCommand` only on tags with an imported certificate),
+   certificate removal (always), llama.cpp CPU-flag audit. Pull-request and
+   manual builds never receive the certificate secrets, never hold the key in
+   `Cert:\CurrentUser\My` and never produce Authenticode-signed artifacts;
+   `scripts/tests/test_windows_ci.py` checks this in the workflow text.
 5. `scripts/windows/package.ps1`: NSIS installer and portable zip (app only),
    engine zip, cuBLAS-only CUDA zip from the pinned wheel, the manifest input
    `components-windows-inputs.json`, size budgets.
-6. Startup smoke test: `murmur.exe --version` and `--help`, then a launch with
+6. Startup smoke test: `murmur.exe --version` and `--help` on every runner.
+   On **hosted** runners only (`vars.WINDOWS_RUNNER` unset), also a launch with
    `--background` in a throwaway profile for 10 seconds; it must not exit with an
-   error, must write its config, and must not install an engine by itself.
+   error, must write its config, and must not install an engine by itself. The
+   self-hosted runner is a Windows service in session 0, where the tray
+   (`Shell_NotifyIcon` needs a shell) and WebView2 are unavailable, so the launch
+   would fail for reasons unrelated to Murmur; on Edison the interactive
+   checklist in the logged-in session covers launch, tray and Settings.
 7. A Windows-only manifest signed with a throwaway key (never a release asset).
 8. With `gpu=true`: `scripts/test-windows-inference.py` (see below).
 9. Upload the artifacts (best effort, 3 days, marked untrusted-dev-signed).
 
-Release tags (called from `release.yml`): steps 1–6, then the installer, portable
+Release tags (called from `release.yml`): steps 1–6 (on Edison, so without the
+launch smoke), then the installer, portable
 zip and both component zips are attached to the **draft** release with `gh`
 (no third-party publish action), and the component inputs are passed to the
 Linux job as a workflow output.
@@ -135,6 +145,16 @@ string and loads `cublas64_12.dll` at run time; its wheel nevertheless ships the
 `cublasLt64_12.dll` 12.9.2.10 imports only `KERNEL32.dll` but names
 `nvrtc64_120_0.dll` for an optional JIT path, exactly like Linux
 `libcublasLt.so.12` (which never loaded NVRTC in the Linux GPU matrix).
+
+PyInstaller caveat: CTranslate2 loads `cublas64_12.dll` at run time today, so
+PyInstaller's dependency analysis does not see it. If a future CTranslate2
+gains a *static* import of a CUDA DLL and a CUDA Toolkit is on the build
+machine's `PATH`, PyInstaller may copy the host's `cublas64_12.dll` into
+`_internal/`, silently bundling (and preferring) a host copy over the add-on.
+The engine-zip budget would probably catch a ~100 MB jump, but the decisive
+check is the Windows inference test: its module evidence fails unless cuBLAS
+is loaded from the add-on directory. Edison has no CUDA Toolkit installed
+(the provisioning script never installs one), which keeps this latent.
 
 ## Authenticode
 

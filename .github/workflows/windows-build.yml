@@ -99,7 +99,7 @@ jobs:
         run: |
           # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
           Push-Location scripts/tests
-          python -m unittest test_release test_engine_imports test_windows_components test_inference_common
+          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci
           $Code = $LASTEXITCODE
           Pop-Location
           if ($Code -ne 0) { throw 'Script tests failed' }
@@ -119,7 +119,10 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests without Enhance backend failed' }
 
-      - name: Import the Authenticode certificate (dormant until the secrets exist)
+      # Release tags only: pull-request and manual builds never receive the certificate secrets,
+      # never hold the key in the runner's certificate store and never produce signed artifacts.
+      - name: Import the Authenticode certificate (tags only; dormant until the secrets exist)
+        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
           WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
@@ -140,18 +143,18 @@ jobs:
           GGML_SSE42: 'ON'
           GGML_CPU_ALL_VARIANTS: 'OFF'
         run: |
-          $Args = @('tauri', 'build', '--target', 'x86_64-pc-windows-msvc')
-          if ($env:MURMUR_SIGN_THUMBPRINT) {
+          $TauriArgs = @('tauri', 'build', '--target', 'x86_64-pc-windows-msvc')
+          if ($env:MURMUR_SIGN_THUMBPRINT -and $env:GITHUB_REF -like 'refs/tags/*') {
             $Config = Join-Path $env:RUNNER_TEMP 'tauri.sign.conf.json'
             $Command = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PWD\scripts\windows\authenticode.ps1`" -Sign %1"
             @{ bundle = @{ windows = @{ signCommand = $Command } } } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 $Config
-            $Args += @('--config', $Config)
+            $TauriArgs += @('--config', $Config)
             Write-Host 'Signing murmur.exe and the installer with the imported Authenticode certificate.'
           } else {
             Write-Host 'Unsigned build: no Authenticode certificate configured.'
             '**Unsigned**: no Authenticode certificate configured.' | Out-File $env:GITHUB_STEP_SUMMARY -Append
           }
-          npx @Args
+          npx @TauriArgs
           if ($LASTEXITCODE -ne 0) { throw 'tauri build failed' }
 
       - name: Remove the Authenticode certificate
@@ -171,11 +174,12 @@ jobs:
           ./scripts/windows/package.ps1 -Release src-tauri/target/x86_64-pc-windows-msvc/release |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
-      - name: Startup smoke test (no engine installed)
+      - name: Startup smoke test (--version, --help)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $Work = Join-Path $env:RUNNER_TEMP "murmur-smoke-$([guid]::NewGuid())"
+          $Work = Join-Path $env:RUNNER_TEMP 'murmur-smoke-cli'
+          if (Test-Path $Work) { Remove-Item -Recurse -Force $Work }
           Expand-Archive .cache/artifacts/windows/murmur-windows-x86_64.zip $Work
           $App = Join-Path $Work 'murmur.exe'
           # GUI-subsystem binary: piping makes PowerShell wait and capture stdout.
@@ -184,6 +188,20 @@ jobs:
           if ($Version -ne $Expected) { throw "--version printed '$Version', expected '$Expected'" }
           $Help = & $App --help | Out-String
           if ($Help -notmatch '--background') { throw '--help output is incomplete' }
+          Write-Host '--version and --help OK.'
+
+      # Hosted runners only: the self-hosted runner is a Windows service (session 0), where the
+      # tray (Shell_NotifyIcon needs a shell) and WebView2 are unavailable, so a launch there
+      # would fail for reasons unrelated to Murmur. On Edison the launch is covered by the
+      # interactive checklist in the logged-in session (docs/ci-windows.md).
+      - name: Startup smoke test (launch without an engine; hosted runners only)
+        if: vars.WINDOWS_RUNNER == ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Work = Join-Path $env:RUNNER_TEMP "murmur-smoke-$([guid]::NewGuid())"
+          Expand-Archive .cache/artifacts/windows/murmur-windows-x86_64.zip $Work
+          $App = Join-Path $Work 'murmur.exe'
           # Throwaway profile; the runner's own profile is never touched.
           $env:APPDATA = Join-Path $Work 'Roaming'
           $env:LOCALAPPDATA = Join-Path $Work 'Local'
