@@ -87,12 +87,11 @@ native X11 input shape and injection acknowledgement ordering.
 Windows compilation was checked using the installed GNU target:
 
 ```sh
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo check \
-  --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu \
+cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu \
   --release --no-default-features
 ```
 
-This skips sidecar packaging and does **not** validate Windows interaction,
+This does **not** validate Windows interaction,
 the Windows package, or the default Enhance backend on Windows.
 
 ## Native Linux test

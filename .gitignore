@@ -12,7 +12,8 @@ build/
 engine/*.spec
 src-tauri/binaries/*
 # Keep parity documentation/small PNGs; exclude bulky local recordings.
-docs/parity/captures/
+docs/parity/captures/*
+!docs/parity/captures/baseline-*/
 docs/parity/*.mp4
 docs/parity/*.webm
 models/

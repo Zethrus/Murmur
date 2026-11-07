@@ -5,6 +5,10 @@ checks do not establish that a newly changed binary has passed hardware testing.
 Matched cross-platform screenshots and Windows hardware validation are pending. Do not mark a checklist item complete solely because a build or DOM test
 passes. Windows remains **unverified on real Windows hardware**.
 
+Feature-level status and known bugs: [matrix.md](matrix.md). What was actually
+run, per platform: [test-ledger.md](test-ledger.md). Baseline 0.4.7 Linux
+captures: [captures/baseline-0.4.7/](captures/baseline-0.4.7/manifest.md).
+
 Overlay movement implementation and Linux native test instructions are recorded in
 [overlay-drag.md](overlay-drag.md). Linux results do not clear the Windows
 interaction or packaged-release gates below.
