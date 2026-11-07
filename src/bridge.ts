@@ -66,13 +66,41 @@ export interface Config {
   enhance: EnhanceConfig;
   /** Flipper Zero companion link. Defaults are applied by the backend. */
   companion: CompanionConfig;
+  /** First-run component setup; `postponed` = "Set up later" was chosen. */
+  setup: { postponed: boolean };
 }
 export type ConfigPatch = { [K in keyof Config]?: Partial<Config[K]> };
-export interface Model { name: string; repo: string; size_mb: number; accuracy: string; installed: boolean }
+export type ComponentKind = "engine" | "cuda" | "speech-model" | "enhance-model";
+export type ComponentState = "available" | "queued" | "installing" | "installed" | "active" | "paused" | "failed" | "unverified" | "corrupt";
+export type JobPhase = "queued" | "downloading" | "verifying" | "extracting" | "testing" | "activating" | "paused" | "failed";
+/** Live job state; `rate` is bytes per second, `eta` seconds. */
+export interface ComponentJob {
+  id: string; phase: JobPhase; bytes_done: number; bytes_total: number; rate: number; eta: number | null;
+  error: string | null; reason: string | null;
+}
+export interface ComponentInfo {
+  id: string; kind: ComponentKind; display_name: string; description: string; version: string;
+  installed_version: string | null; state: ComponentState; update_available: boolean;
+  size_bytes?: number; installed_size_bytes?: number; temp_size_bytes?: number; depends?: string[];
+  model?: string | null; quality?: string | null; speed?: string | null; memory_mb?: number | null; languages?: "en" | "multilingual" | null;
+  license?: { name: string; url: string };
+  provenance?: { type: "upstream_signature_verified" | "murmur_attested_only"; source_url: string; source_revision: string; note: string };
+  /** Why removal is refused right now, if it is. */
+  in_use: string | null; dependents: string[]; job: ComponentJob | null;
+  legacy_path?: string | null; migrated?: boolean; unlisted?: boolean;
+}
+export interface Gpu { name: string; vram_mb: number; driver: string }
+export interface Hardware { ram_mb: number | null; avx2: boolean; gpus: Gpu[]; cuda_offered: boolean; free_bytes: number | null }
+export interface Recommendation { english: string; multilingual: string; compute: "cpu" | "cuda"; reason: string }
+export interface ComponentsSnapshot {
+  trust: { ok: boolean; development: boolean; reason: string | null; message: string | null };
+  manifest: { serial: number; issued_at: string; expires_at: string; source: "embedded" | "cached" | "fetched" } | null;
+  hardware: Hardware; recommendation: Recommendation; components: ComponentInfo[];
+  migrating: boolean; checking: boolean; engine_installed: boolean;
+}
 export interface Device { id: string; name: string; is_default: boolean }
 export interface Transcript { text: string; language: string; duration_ms: number; infer_ms: number }
 export interface HistoryEntry { id: number; ts: number; text: string; app: string; duration_ms: number; latency_ms: number; model: string }
-export interface Download { name: string; phase: "starting" | "downloading" | "complete" | "error"; progress?: number; file?: string }
 
 export type EnhanceInstallState = "not_installed" | "downloading" | "verifying" | "installed" | "removing" | "corrupt" | "unavailable_model" | "error";
 export type EnhanceLoadState = "unloaded" | "loading" | "loaded" | "unavailable";
@@ -121,20 +149,25 @@ export interface AcceptReply { outcome: "copied" | "stale" | "failed"; message?:
 export interface Events {
   state: { state: DictationState; source?: "local" | "phone" | null }; level: { rms: number }; partial: { text: string };
   latency: { latency_ms: number; text?: string }; error: { message: string; persistent?: boolean };
-  download: Download; config: Config;
+  config: Config; "components/progress": ComponentJob; "components/changed": Record<string, never>;
   "enhance-status": EnhanceStatus; "enhance-download": EnhanceDownload; "overlay-update": OverlaySnapshot;
   companion: CompanionStatus;
 }
 interface Commands {
   get_config: [undefined, Config]; set_config: [{ patch: ConfigPatch }, Config]; get_status: [undefined, Status];
-  list_models: [undefined, Model[]]; install_model: [{ name: string }, { name: string; installed: boolean }];
-  remove_model: [{ name: string }, { name: string; installed: boolean }]; test_engine: [undefined, Transcript];
+  test_engine: [undefined, Transcript];
+  // Component manager. Installs, removals and update checks run only on explicit clicks.
+  components_snapshot: [undefined, ComponentsSnapshot]; components_install: [{ ids: string[] }, void];
+  components_stop: [{ id: string; pause: boolean }, void]; components_resume: [{ id: string }, void];
+  components_discard: [{ id: string }, void]; components_remove: [{ id: string }, void];
+  components_verify: [{ id: string }, { verdict: "verified" | "mismatch" | "missing" }];
+  components_check_updates: [undefined, void];
   list_devices: [undefined, Device[]]; set_hotkey: [{ accel: string }, Config];
   preview_sound: [{ kind: "start" | "stop" | "error" }, void]; start_dictation: [undefined, void];
   stop_dictation: [undefined, void]; cancel_dictation: [undefined, void]; open_settings: [undefined, void];
   quit_app: [undefined, void]; history_search: [{ q: string; limit: number }, HistoryEntry[]];
   history_clear: [undefined, void]; pick_exclude_app: [undefined, string];
-  open_path: [{ kind: "config" | "data" | "models" | "logs" | "history" }, void];
+  open_path: [{ kind: "config" | "data" | "models" | "logs" | "history" | "components" }, void];
   apply_overlay_prefs: [undefined, void];
   // Enhance (contract: .cache/enhance-api-contract.txt). Tauri maps camelCase argument keys onto snake_case Rust parameters.
   get_enhance_status: [undefined, EnhanceStatus]; get_enhance_model: [undefined, EnhanceModel];

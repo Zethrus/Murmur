@@ -7,4 +7,6 @@ export interface PageContext {
   report(error: unknown): void;
   subscribe<K extends keyof Events>(event: K, handler: (data: Events[K]) => void): void;
   cleanup(dispose: () => void): void;
+  /** Reopen first-run setup, prefilled with the current choices. */
+  openSetup(): void;
 }
