@@ -24,6 +24,10 @@ pub const CERT_FILE: &str = "murmur-release.asc";
 pub const RELEASE_BASE: &str = "https://github.com/Zethrus/Murmur/releases/latest/download/";
 pub const URL_ENV: &str = "MURMUR_COMPONENTS_URL";
 const MAX_SMALL: u64 = 1 << 20;
+/// The manifest built into the binary may be issued up to this far "in the future": a computer
+/// whose clock is slightly behind must not report a clock error on first run. Fetched and
+/// cached manifests keep the strict rule.
+pub const EMBEDDED_CLOCK_SLACK: u64 = 24 * 3600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +58,16 @@ pub struct Catalog {
     pub manifest: Manifest,
     pub sha256: String,
     pub source: Source,
+    /// Verified and not a rollback, but past `expires_at`: listed for display, verify and
+    /// remove; nothing new is downloaded or activated until Check for updates succeeds.
+    pub stale: bool,
+}
+
+impl Catalog {
+    /// Expired at load, or has expired since.
+    pub fn is_stale(&self, now: u64) -> bool {
+        self.stale || !self.manifest.expires_at().is_ok_and(|e| e >= now)
+    }
 }
 
 pub fn digest(bytes: &[u8]) -> String {
@@ -70,12 +84,16 @@ impl RollbackState {
     pub fn save(&self, path: &Path) -> Result<(), ComponentError> {
         write_atomic(path, &serde_json::to_vec_pretty(self).unwrap_or_default())
     }
-    /// Freshness and anti-rollback rules; records the manifest when accepted.
+    /// Freshness and anti-rollback rules; records the manifest when accepted. `clock_slack`
+    /// tolerates a manifest issued that many seconds after `now` (the embedded manifest only).
+    /// Rollback is checked before expiry, so `Reason::Expired` means "trusted, not a rollback,
+    /// only too old": the caller may still list it as a stale catalog.
     pub fn admit(
         &mut self,
         manifest: &Manifest,
         sha256: &str,
         now: u64,
+        clock_slack: u64,
     ) -> Result<(), ComponentError> {
         if self.primary_revoked {
             return Err(ComponentError::new(
@@ -84,16 +102,11 @@ impl RollbackState {
             ));
         }
         let issued = manifest.issued_at()?;
-        if now < issued || now < self.newest_issued_at {
+        let clock = now.saturating_add(clock_slack);
+        if clock < issued || clock < self.newest_issued_at {
             return Err(ComponentError::new(
                 Reason::ClockError,
                 "Clock error likely: this computer's date is earlier than a component manifest Murmur has already seen. Check the system clock.",
-            ));
-        }
-        if manifest.expires_at()? < now {
-            return Err(ComponentError::new(
-                Reason::Expired,
-                "The component manifest has expired. Use Check for updates.",
             ));
         }
         if let Some(seen) = self.channels.get(&manifest.channel) {
@@ -110,6 +123,9 @@ impl RollbackState {
                 ));
             }
         }
+        if manifest.expires_at()? < now {
+            return Err(expired());
+        }
         self.channels.insert(
             manifest.channel.clone(),
             Seen {
@@ -120,6 +136,13 @@ impl RollbackState {
         self.newest_issued_at = self.newest_issued_at.max(issued);
         Ok(())
     }
+}
+
+pub fn expired() -> ComponentError {
+    ComponentError::new(
+        Reason::Expired,
+        "The component list has expired. Use Check for updates.",
+    )
 }
 
 /// Trust paths under `<data>/components`.
@@ -141,15 +164,15 @@ impl Files {
     }
 }
 
-/// The certificate in force for a manifest issued at `issued_at`: the root, updated by a
-/// previously accepted newer certificate when that still satisfies the update rule.
-fn effective_cert(
+/// The certificate in force: the pinned root merged with the stored certificate update when
+/// that update is acceptable against the root. Never falls back to the bare root because of a
+/// manifest's issue time: the verifier checks subkey validity at that time itself.
+pub fn effective_cert(
     root: &TrustRoot,
-    cached: Option<&[u8]>,
-    issued_at: u64,
+    stored: Option<&[u8]>,
 ) -> Result<sequoia_openpgp::Cert, ComponentError> {
-    if let Some(bytes) = cached {
-        match trust::accept_update(&root.cert, bytes, trust::unix(issued_at)) {
+    if let Some(bytes) = stored {
+        match trust::accept_update(&root.cert, bytes) {
             Ok(Some(cert)) => return Ok(cert),
             Ok(None) => {}
             Err(error) if error.reason == Reason::PrimaryRevoked => return Err(error),
@@ -161,18 +184,26 @@ fn effective_cert(
     Ok(root.cert.clone())
 }
 
-/// Verify `manifest` + `signature` and parse. Nothing is used unless this returns Ok.
+/// Verify `manifest` + `signature` with `cert` and parse. Nothing is used unless this is Ok.
+pub fn verify_with(
+    cert: &sequoia_openpgp::Cert,
+    manifest: &[u8],
+    signature: &[u8],
+) -> Result<Manifest, ComponentError> {
+    let parsed = Manifest::parse(manifest)?;
+    let issued_at = parsed.issued_at()?;
+    trust::verify(cert, manifest, signature, trust::unix(issued_at))?;
+    Ok(parsed)
+}
+
+/// Verify with the certificate in force (root + stored update).
 pub fn verify(
     root: &TrustRoot,
     cert_update: Option<&[u8]>,
     manifest: &[u8],
     signature: &[u8],
 ) -> Result<Manifest, ComponentError> {
-    let parsed = Manifest::parse(manifest)?;
-    let issued_at = parsed.issued_at()?;
-    let cert = effective_cert(root, cert_update, issued_at)?;
-    trust::verify(&cert, manifest, signature, trust::unix(issued_at))?;
-    Ok(parsed)
+    verify_with(&effective_cert(root, cert_update)?, manifest, signature)
 }
 
 pub fn now() -> u64 {
@@ -183,7 +214,8 @@ pub fn now() -> u64 {
 }
 
 /// Load the best trusted manifest available offline: embedded and cached copies are verified
-/// on every load; the higher serial that passes the rollback rules wins.
+/// on every load; the higher serial that passes the rollback rules wins. When every verified
+/// candidate has merely expired, the newest one is returned as a stale catalog.
 pub fn load_offline(
     root: &TrustRoot,
     files: &Files,
@@ -191,7 +223,17 @@ pub fn load_offline(
     now: u64,
 ) -> Result<Catalog, ComponentError> {
     let mut state = RollbackState::load(&files.state);
-    let cert_update = fs::read(&files.cert).ok();
+    let fail = |state: &mut RollbackState, error: ComponentError| {
+        if error.reason == Reason::PrimaryRevoked {
+            state.primary_revoked = true;
+            let _ = state.save(&files.state);
+        }
+        error
+    };
+    let cert = match effective_cert(root, fs::read(&files.cert).ok().as_deref()) {
+        Ok(cert) => cert,
+        Err(error) => return Err(fail(&mut state, error)),
+    };
     let cached = fs::read(&files.manifest)
         .ok()
         .zip(fs::read(&files.signature).ok());
@@ -207,34 +249,48 @@ pub fn load_offline(
         let Some((bytes, signature)) = pair else {
             continue;
         };
-        match verify(root, cert_update.as_deref(), bytes, signature) {
+        match verify_with(&cert, bytes, signature) {
             Ok(manifest) => candidates.push(Catalog {
                 sha256: digest(bytes),
                 manifest,
                 source,
+                stale: false,
             }),
             Err(error) => {
                 if error.reason == Reason::PrimaryRevoked {
-                    state.primary_revoked = true;
-                    let _ = state.save(&files.state);
-                    return Err(error);
+                    return Err(fail(&mut state, error));
                 }
                 last_error = Some(error);
             }
         }
     }
     candidates.sort_by_key(|c| std::cmp::Reverse(c.manifest.serial));
+    let mut stale = None;
     for candidate in candidates {
+        let slack = match candidate.source {
+            Source::Embedded => EMBEDDED_CLOCK_SLACK,
+            Source::Cached | Source::Fetched => 0,
+        };
         let mut trial = state.clone();
-        match trial.admit(&candidate.manifest, &candidate.sha256, now) {
+        match trial.admit(&candidate.manifest, &candidate.sha256, now, slack) {
             Ok(()) => {
                 if trial != state {
                     trial.save(&files.state)?;
                 }
                 return Ok(candidate);
             }
+            Err(error) if error.reason == Reason::Expired => {
+                stale.get_or_insert(Catalog {
+                    stale: true,
+                    ..candidate
+                });
+                last_error = Some(error);
+            }
             Err(error) => last_error = Some(error),
         }
+    }
+    if let Some(stale) = stale {
+        return Ok(stale);
     }
     Err(last_error.unwrap_or_else(|| {
         ComponentError::new(
@@ -273,7 +329,11 @@ pub fn fetch_small(
     Ok(bytes)
 }
 
-/// Fetch manifest, signature and certificate together; trust all or nothing; persist on success.
+/// Fetch manifest, signature and certificate together. The manifest is trusted all or
+/// nothing. The certificate is judged on its own against the certificate in force (root +
+/// stored update): an acceptable, strictly newer update is persisted even when the manifest
+/// next to it is refused, so a revocation-only emergency update always takes effect. An older
+/// certificate never replaces a newer stored one (that would undo a subkey revocation).
 pub fn fetch_and_admit(
     root: &TrustRoot,
     files: &Files,
@@ -284,33 +344,28 @@ pub fn fetch_and_admit(
     let cancel = Arc::new(AtomicBool::new(false));
     let manifest = fetch_small(transport, &format!("{base}{MANIFEST_FILE}"), &cancel)?;
     let signature = fetch_small(transport, &format!("{base}{SIGNATURE_FILE}"), &cancel)?;
-    let cert = fetch_small(transport, &format!("{base}{CERT_FILE}"), &cancel)?;
+    let fetched_cert = fetch_small(transport, &format!("{base}{CERT_FILE}"), &cancel)?;
     let mut state = RollbackState::load(&files.state);
-    let parsed = Manifest::parse(&manifest)?;
-    let issued_at = parsed.issued_at()?;
-    // The fetched certificate replaces a stored update only if it is itself acceptable.
-    let update = match trust::accept_update(&root.cert, &cert, trust::unix(issued_at)) {
-        Ok(update) => update,
-        Err(error) => {
-            if error.reason == Reason::PrimaryRevoked {
-                state.primary_revoked = true;
-                let _ = state.save(&files.state);
-            }
-            return Err(error);
+    let revoked = |state: &mut RollbackState, error: ComponentError| {
+        if error.reason == Reason::PrimaryRevoked {
+            state.primary_revoked = true;
+            let _ = state.save(&files.state);
         }
+        error
     };
     let stored = fs::read(&files.cert).ok();
-    let cert_bytes = if update.is_some() {
-        Some(cert.clone())
-    } else {
-        stored
+    let current = effective_cert(root, stored.as_deref()).map_err(|e| revoked(&mut state, e))?;
+    let cert = match trust::accept_update(&current, &fetched_cert) {
+        Ok(Some(merged)) => {
+            persist_cert(files, stored.as_deref(), &merged)?;
+            merged
+        }
+        Ok(None) => current,
+        Err(error) => return Err(revoked(&mut state, error)),
     };
-    let manifest_parsed = verify(root, cert_bytes.as_deref(), &manifest, &signature)?;
+    let manifest_parsed = verify_with(&cert, &manifest, &signature)?;
     let sha = digest(&manifest);
-    state.admit(&manifest_parsed, &sha, now)?;
-    if update.is_some() {
-        write_atomic(&files.cert, &cert)?;
-    }
+    state.admit(&manifest_parsed, &sha, now, 0)?;
     write_atomic(&files.manifest, &manifest)?;
     write_atomic(&files.signature, &signature)?;
     state.save(&files.state)?;
@@ -319,7 +374,30 @@ pub fn fetch_and_admit(
         manifest: manifest_parsed,
         sha256: sha,
         source: Source::Fetched,
+        stale: false,
     })
+}
+
+/// Store an accepted certificate update (root + every accepted update, merged). Refuses to
+/// replace a stored certificate whose newest self-signature is as new or newer.
+fn persist_cert(
+    files: &Files,
+    stored: Option<&[u8]>,
+    merged: &sequoia_openpgp::Cert,
+) -> Result<(), ComponentError> {
+    use sequoia_openpgp::serialize::SerializeInto;
+    if let Some(previous) = stored.and_then(|b| trust::parse_cert(b).ok()) {
+        if previous.fingerprint() == merged.fingerprint()
+            && trust::newest_self_signature(merged) <= trust::newest_self_signature(&previous)
+        {
+            return Ok(());
+        }
+    }
+    let armored = merged
+        .armored()
+        .to_vec()
+        .map_err(|_| ComponentError::new(Reason::Io, "Could not save the certificate update"))?;
+    write_atomic(&files.cert, &armored)
 }
 
 /// Manifest location: the release, or an override for development and tests.
@@ -379,54 +457,74 @@ pub mod tests {
         let parse = |v: &Value| Manifest::parse(&bytes(v)).unwrap();
         let mut state = RollbackState::default();
         let five = parse(&manifest(5, vec![component("engine", "engine")]));
-        state.admit(&five, "a", NOW).unwrap();
+        state.admit(&five, "a", NOW, 0).unwrap();
         assert_eq!(
             state
                 .admit(
                     &parse(&manifest(4, vec![component("engine", "engine")])),
                     "b",
-                    NOW
+                    NOW,
+                    0
                 )
                 .unwrap_err()
                 .reason,
             Reason::Rollback
         );
         assert_eq!(
-            state.admit(&five, "different", NOW).unwrap_err().reason,
+            state.admit(&five, "different", NOW, 0).unwrap_err().reason,
             Reason::Rollback,
             "same serial, different bytes"
         );
-        state.admit(&five, "a", NOW).unwrap();
+        state.admit(&five, "a", NOW, 0).unwrap();
         state
             .admit(
                 &parse(&manifest(6, vec![component("engine", "engine")])),
                 "c",
                 NOW,
+                0,
             )
             .unwrap();
         let mut expired = manifest(7, vec![component("engine", "engine")]);
         expired["expires_at"] = json!("2026-11-02T00:00:00Z");
         assert_eq!(
-            state.admit(&parse(&expired), "d", NOW).unwrap_err().reason,
+            state
+                .admit(&parse(&expired), "d", NOW, 0)
+                .unwrap_err()
+                .reason,
             Reason::Expired
         );
         // Clock earlier than a manifest already seen (issued 2026-11-01).
         assert_eq!(
             state
-                .admit(&parse(&manifest(8, vec![])), "e", 1_790_000_000)
+                .admit(&parse(&manifest(8, vec![])), "e", 1_790_000_000, 0)
                 .unwrap_err()
                 .reason,
             Reason::ClockError
         );
         let mut fresh = RollbackState::default();
         assert_eq!(
-            fresh.admit(&five, "a", 1_790_000_000).unwrap_err().reason,
+            fresh
+                .admit(&five, "a", 1_790_000_000, 0)
+                .unwrap_err()
+                .reason,
             Reason::ClockError,
             "manifest from the future"
         );
+        // Within the slack (the embedded manifest only), a slightly slow clock is tolerated.
+        let issued = five.issued_at().unwrap();
+        RollbackState::default()
+            .admit(&five, "a", issued - 3600, EMBEDDED_CLOCK_SLACK)
+            .unwrap();
+        // Expiry is judged after rollback: an expired older serial is still a rollback.
+        let mut old = manifest(4, vec![]);
+        old["expires_at"] = json!("2026-11-02T00:00:00Z");
+        assert_eq!(
+            state.admit(&parse(&old), "f", NOW, 0).unwrap_err().reason,
+            Reason::Rollback
+        );
         fresh.primary_revoked = true;
         assert_eq!(
-            fresh.admit(&five, "a", NOW).unwrap_err().reason,
+            fresh.admit(&five, "a", NOW, 0).unwrap_err().reason,
             Reason::PrimaryRevoked
         );
     }
@@ -557,6 +655,203 @@ pub mod tests {
         assert_eq!(
             load_offline(&root, &files, None, NOW).unwrap_err().reason,
             Reason::PrimaryRevoked
+        );
+        let _ = fs::remove_dir_all(d);
+    }
+
+    type Served = Arc<std::sync::Mutex<BTreeMap<String, Vec<u8>>>>;
+    /// A server that answers from a mutable map; 404 for anything else.
+    fn serve() -> (testserver::Server, Served) {
+        use std::net::TcpStream;
+        let served: Served = Arc::default();
+        let content = served.clone();
+        let server = testserver::start(Arc::new(
+            move |request: &testserver::Request, stream: &mut TcpStream| match content
+                .lock()
+                .unwrap()
+                .get(request.path.trim_start_matches('/'))
+            {
+                Some(body) => testserver::respond(stream, body, None, None),
+                None => {
+                    use std::io::Write;
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                }
+            },
+        ));
+        (server, served)
+    }
+
+    #[test]
+    fn embedded_manifest_tolerates_slow_clock_but_cached_does_not() {
+        let signer = signer();
+        let root = root(&signer);
+        let d = dir("slack");
+        let files = Files::new(&d);
+        let m = bytes(&manifest(3, vec![component("engine", "engine")]));
+        let issued = Manifest::parse(&m).unwrap().issued_at().unwrap();
+        let sig = sign_at(&signer, &m, issued);
+        // First run with the clock an hour behind the build: embedded manifest accepted, and
+        // still accepted on the next start with the same clock.
+        for _ in 0..2 {
+            let catalog = load_offline(&root, &files, Some((&m, &sig)), issued - 3600).unwrap();
+            assert_eq!((catalog.source, catalog.stale), (Source::Embedded, false));
+        }
+        // Two days behind is a clock error even for the embedded manifest.
+        let _ = fs::remove_file(&files.state);
+        assert_eq!(
+            load_offline(&root, &files, Some((&m, &sig)), issued - 2 * 86_400)
+                .unwrap_err()
+                .reason,
+            Reason::ClockError
+        );
+        // The same manifest as a cached (fetched) copy keeps the strict rule.
+        let _ = fs::remove_file(&files.state);
+        write_atomic(&files.manifest, &m).unwrap();
+        write_atomic(&files.signature, &sig).unwrap();
+        assert_eq!(
+            load_offline(&root, &files, None, issued - 3600)
+                .unwrap_err()
+                .reason,
+            Reason::ClockError
+        );
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn expired_manifest_loads_as_stale_catalog() {
+        let signer = signer();
+        let root = root(&signer);
+        let d = dir("stale");
+        let files = Files::new(&d);
+        let m = bytes(&manifest(3, vec![component("engine", "engine")]));
+        let sig = sign_at(&signer, &m, NOW - 86_400);
+        let expires = Manifest::parse(&m).unwrap().expires_at().unwrap();
+        let fresh = load_offline(&root, &files, Some((&m, &sig)), NOW).unwrap();
+        assert!(!fresh.stale && !fresh.is_stale(NOW));
+        assert!(fresh.is_stale(expires + 1), "goes stale while running");
+        let stale = load_offline(&root, &files, Some((&m, &sig)), expires + 1).unwrap();
+        assert!(stale.stale && stale.manifest.serial == 3);
+        // Stale is still subject to rollback: an expired manifest older than one already
+        // seen is refused outright.
+        let mut state = RollbackState::load(&files.state);
+        state.channels.insert(
+            CHANNEL.into(),
+            Seen {
+                serial: 9,
+                sha256: "x".into(),
+            },
+        );
+        state.save(&files.state).unwrap();
+        assert_eq!(
+            load_offline(&root, &files, Some((&m, &sig)), expires + 1)
+                .unwrap_err()
+                .reason,
+            Reason::Rollback
+        );
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn older_certificate_cannot_undo_a_subkey_revocation() {
+        let day = Duration::from_secs(86_400);
+        let mut signer = signer();
+        let root = root(&signer);
+        let a = signer.subkeys()[0].clone();
+        // C1: newer than the root (an extra subkey), subkey A still valid.
+        signer.add_signing_subkey_at(3650, SystemTime::now() - 30 * day);
+        let c1 = signer.public();
+        // C2: A revoked (leaked), B added.
+        signer.revoke_subkey_at(&a, SystemTime::now() - 20 * day);
+        let b = signer.add_signing_subkey_at(3650, SystemTime::now() - 20 * day);
+        let c2 = signer.public();
+        let d = dir("cert-rollback");
+        let files = Files::new(&d);
+        let (server, served) = serve();
+        let base = format!("{}/", server.base);
+        let transport = Https::new(Duration::from_secs(2)).unwrap();
+        let publish = |serial: u64, by: &sequoia_openpgp::Fingerprint, cert: &[u8]| {
+            let m = bytes(&manifest(serial, vec![component("engine", "engine")]));
+            let s = signer.sign_by(by, &m, trust::unix(NOW - 60));
+            let mut map = served.lock().unwrap();
+            map.insert(MANIFEST_FILE.into(), m);
+            map.insert(SIGNATURE_FILE.into(), s);
+            map.insert(CERT_FILE.into(), cert.to_vec());
+        };
+        // The owner's C2 with a manifest signed by B: accepted and stored.
+        publish(4, &b, &c2);
+        fetch_and_admit(&root, &files, &transport, &base, NOW).unwrap();
+        let stored = fs::read(&files.cert).unwrap();
+        // Attacker: older C1 (newer than the root, no revocation) + higher serial signed by A.
+        publish(5, &a, &c1);
+        let error = fetch_and_admit(&root, &files, &transport, &base, NOW).unwrap_err();
+        assert_eq!(error.reason, Reason::SignatureInvalid, "{error:?}");
+        assert_eq!(fs::read(&files.cert).unwrap(), stored, "C2 kept");
+        assert_eq!(
+            Manifest::parse(&fs::read(&files.manifest).unwrap())
+                .unwrap()
+                .serial,
+            4
+        );
+        // Offline, A stays revoked too: a manifest it signed is not trusted.
+        let m = bytes(&manifest(6, vec![]));
+        let s = signer.sign_by(&a, &m, trust::unix(NOW - 60));
+        assert!(load_offline(&root, &files, Some((&m, &s)), NOW)
+            .is_ok_and(|c| c.manifest.serial == 4 && c.source == Source::Cached));
+        assert!(verify(&root, Some(&stored), &m, &s).is_err());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn revocation_only_certificate_update_takes_effect() {
+        let mut signer = signer();
+        let root = root(&signer);
+        let d = dir("revoke-only");
+        let files = Files::new(&d);
+        let (server, served) = serve();
+        let base = format!("{}/", server.base);
+        let transport = Https::new(Duration::from_secs(2)).unwrap();
+        let m = bytes(&manifest(4, vec![component("engine", "engine")]));
+        let s = sign_at(&signer, &m, NOW - 60);
+        let publish = |m: &[u8], s: &[u8], cert: Vec<u8>| {
+            let mut map = served.lock().unwrap();
+            map.insert(MANIFEST_FILE.into(), m.to_vec());
+            map.insert(SIGNATURE_FILE.into(), s.to_vec());
+            map.insert(CERT_FILE.into(), cert);
+        };
+        publish(&m, &s, signer.public());
+        fetch_and_admit(&root, &files, &transport, &base, NOW).unwrap();
+        // Emergency: the sole signing subkey is revoked; nothing new can be signed yet.
+        signer.revoke_subkey();
+        publish(&m, &s, signer.public());
+        assert!(fetch_and_admit(&root, &files, &transport, &base, NOW).is_err());
+        // The revocation was stored anyway, so the cached manifest it signed is refused.
+        assert!(files.cert.exists());
+        assert!(load_offline(&root, &files, None, NOW).is_err());
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn stored_update_covers_manifests_issued_before_its_new_subkey() {
+        let mut signer = signer();
+        let root = root(&signer);
+        let d = dir("new-subkey");
+        let files = Files::new(&d);
+        let a = signer.subkeys()[0].clone();
+        // Cached manifest signed by A; then a certificate update binds B after it was issued.
+        let m = bytes(&manifest(4, vec![component("engine", "engine")]));
+        write_atomic(&files.manifest, &m).unwrap();
+        write_atomic(
+            &files.signature,
+            &signer.sign_by(&a, &m, trust::unix(NOW - 60)),
+        )
+        .unwrap();
+        signer.add_signing_subkey(365);
+        write_atomic(&files.cert, &signer.public()).unwrap();
+        let catalog = load_offline(&root, &files, None, NOW).unwrap();
+        assert_eq!(
+            (catalog.source, catalog.manifest.serial),
+            (Source::Cached, 4)
         );
         let _ = fs::remove_dir_all(d);
     }

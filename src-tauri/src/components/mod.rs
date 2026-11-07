@@ -102,6 +102,15 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ComponentError> {
     Ok(())
 }
 
+/// Every public entry point taking a component id checks it first: ids become store paths.
+fn check_id(id: &str) -> Result<(), ComponentError> {
+    if manifest::safe_id(id) {
+        Ok(())
+    } else {
+        Err(ComponentError::new(Reason::NotFound, "Unknown component"))
+    }
+}
+
 pub fn speech_id(model: &str) -> String {
     format!("speech-{model}")
 }
@@ -499,11 +508,16 @@ impl Components {
             }
         }
         let recommendation = detect::recommend(&hardware);
+        let stale = inner
+            .catalog
+            .as_ref()
+            .is_some_and(|c| c.is_stale((self.now)()));
         json!({
             "trust": {"ok": inner.catalog.is_some(), "development": inner.development,
                 "reason": inner.error.as_ref().map(|e| e.reason), "message": inner.error.as_ref().map(|e| e.message.clone())},
             "manifest": inner.catalog.as_ref().map(|c| json!({"serial": c.manifest.serial, "issued_at": c.manifest.issued_at,
-                "expires_at": c.manifest.expires_at, "source": c.source})),
+                "expires_at": c.manifest.expires_at, "source": c.source, "stale": stale})),
+            "stale": stale,
             "hardware": hardware,
             "recommendation": recommendation,
             "components": components,
@@ -534,10 +548,22 @@ impl Components {
         })
     }
 
+    /// A catalog that may fetch or activate new bytes: present and not expired.
+    fn require_fresh<'a>(&self, inner: &'a Inner) -> Result<&'a Catalog, ComponentError> {
+        let catalog = self.require_catalog(inner)?;
+        if catalog.is_stale((self.now)()) {
+            return Err(catalog::expired());
+        }
+        Ok(catalog)
+    }
+
     /// Queue installs (dependencies first). The caller is the user's explicit click.
     pub fn install(&self, ids: &[String]) -> Result<(), ComponentError> {
+        for id in ids {
+            check_id(id)?;
+        }
         let mut inner = lock(&self.inner);
-        let catalog = self.require_catalog(&inner)?.clone();
+        let catalog = self.require_fresh(&inner)?.clone();
         let mut order: Vec<Component> = Vec::new();
         fn visit(
             catalog: &Manifest,
@@ -639,8 +665,9 @@ impl Components {
 
     /// Resume a paused or failed job (from its partial download).
     pub fn resume(&self, id: &str) -> Result<(), ComponentError> {
+        check_id(id)?;
         let mut inner = lock(&self.inner);
-        self.require_catalog(&inner)?;
+        self.require_fresh(&inner)?;
         let job = inner
             .jobs
             .get_mut(id)
@@ -1105,7 +1132,7 @@ pub fn install_from_files(
     )?;
     let sha = catalog::digest(&bytes);
     let mut state = catalog::RollbackState::load(&files.state);
-    state.admit(&manifest, &sha, catalog::now())?;
+    state.admit(&manifest, &sha, catalog::now(), 0)?;
     state.save(&files.state)?;
     write_atomic(&files.manifest, &bytes)?;
     write_atomic(&files.signature, &signature)?;

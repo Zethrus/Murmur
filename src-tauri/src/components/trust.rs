@@ -152,25 +152,15 @@ fn revoked_error() -> ComponentError {
     )
 }
 
-/// A usable signing subkey at `at`: bound with back-signature, alive, not revoked.
-#[allow(deprecated)] // DSA is named only to reject it.
-fn signing_subkey_at(cert: &Cert, at: SystemTime) -> bool {
-    let policy = policy();
-    cert.keys()
-        .subkeys()
-        .with_policy(&policy, at)
-        .for_signing()
-        .alive()
-        .revoked(false)
-        .any(|key| key.key().pk_algo() != PublicKeyAlgorithm::DSA)
-}
-
-/// The certificate update rule. `Ok(None)` keeps `current` (candidate not strictly newer).
-pub fn accept_update(
-    current: &Cert,
-    candidate: &[u8],
-    issued_at: SystemTime,
-) -> Result<Option<Cert>, ComponentError> {
+/// The certificate update rule: same primary key, primary not revoked, valid under the policy
+/// and strictly newer (newest self-signature) than `current`. `Ok(None)` keeps `current`.
+///
+/// Whether a signing subkey is usable for a given manifest is not decided here: an update that
+/// only revokes the sole signing subkey must still take effect, and the verifier (`Helper`)
+/// already requires a subkey that was bound, alive and unrevoked at the manifest's issue time.
+/// The result is `current` merged with the candidate, so signatures (revocations included)
+/// are only ever added, never dropped.
+pub fn accept_update(current: &Cert, candidate: &[u8]) -> Result<Option<Cert>, ComponentError> {
     let candidate = parse_cert(candidate)?;
     if candidate.fingerprint() != current.fingerprint() {
         return Err(ComponentError::new(
@@ -190,15 +180,13 @@ pub fn accept_update(
             "The downloaded certificate is not valid under Murmur's policy",
         ));
     }
-    if !signing_subkey_at(&candidate, issued_at) {
-        return Err(untrusted(
-            "The downloaded certificate has no signing key valid for this manifest",
-        ));
-    }
     let merged = current
         .clone()
         .merge_public(candidate)
         .map_err(|_| untrusted("Could not merge the certificate update"))?;
+    if primary_revoked(&merged) {
+        return Err(revoked_error());
+    }
     Ok(Some(merged))
 }
 
@@ -391,14 +379,69 @@ pub mod testkeys {
             sequoia_openpgp::Packet::from(signature).to_vec().unwrap()
         }
         pub fn revoke_subkey(&mut self) {
+            let first = self
+                .cert
+                .keys()
+                .subkeys()
+                .next()
+                .unwrap()
+                .key()
+                .fingerprint();
+            self.revoke_subkey_at(&first, SystemTime::now());
+        }
+        /// Revoke one subkey (key compromised) with a revocation made at `at`.
+        pub fn revoke_subkey_at(&mut self, subkey: &Fingerprint, at: SystemTime) {
             let mut pair = self.primary_pair();
-            let subkey = self.cert.keys().subkeys().next().unwrap().key().clone();
+            let key = self
+                .cert
+                .keys()
+                .subkeys()
+                .key_handle(subkey.clone())
+                .next()
+                .unwrap()
+                .key()
+                .clone();
             let revocation = SubkeyRevocationBuilder::new()
+                .set_signature_creation_time(at)
+                .unwrap()
                 .set_reason_for_revocation(ReasonForRevocation::KeyCompromised, b"test")
                 .unwrap()
-                .build(&mut pair, &self.cert, &subkey, None)
+                .build(&mut pair, &self.cert, &key, None)
                 .unwrap();
             self.cert = self.cert.clone().insert_packets(revocation).unwrap().0;
+        }
+        /// Fingerprints of the signing subkeys, oldest binding first.
+        pub fn subkeys(&self) -> Vec<Fingerprint> {
+            let mut keys: Vec<_> = self
+                .cert
+                .keys()
+                .subkeys()
+                .map(|k| (k.key().creation_time(), k.key().fingerprint()))
+                .collect();
+            keys.sort();
+            keys.into_iter().map(|(_, f)| f).collect()
+        }
+        /// Sign with a specific subkey.
+        pub fn sign_by(&self, subkey: &Fingerprint, data: &[u8], at: SystemTime) -> Vec<u8> {
+            let mut pair = self
+                .cert
+                .keys()
+                .subkeys()
+                .secret()
+                .key_handle(subkey.clone())
+                .next()
+                .unwrap()
+                .key()
+                .clone()
+                .into_keypair()
+                .unwrap();
+            let signature = SignatureBuilder::new(SignatureType::Binary)
+                .set_signature_creation_time(at)
+                .unwrap()
+                .set_hash_algo(HashAlgorithm::SHA512)
+                .sign_message(&mut pair, data)
+                .unwrap();
+            sequoia_openpgp::Packet::from(signature).to_vec().unwrap()
         }
         pub fn revoke_primary(&mut self) {
             let mut pair = self.primary_pair();
@@ -409,20 +452,29 @@ pub mod testkeys {
             self.cert = self.cert.clone().insert_packets(revocation).unwrap().0;
         }
         /// Re-certify: a fresh signing subkey bound now (a strictly newer certificate).
-        pub fn add_signing_subkey(&mut self, days: u64) {
+        pub fn add_signing_subkey(&mut self, days: u64) -> Fingerprint {
+            self.add_signing_subkey_at(days, SystemTime::now())
+        }
+        /// A fresh signing subkey created and bound at `at`, valid for `days`.
+        pub fn add_signing_subkey_at(&mut self, days: u64, at: SystemTime) -> Fingerprint {
             use sequoia_openpgp::packet::key::Key4;
             let mut primary = self.primary_pair();
-            let subkey: sequoia_openpgp::packet::Key<
+            let mut subkey: sequoia_openpgp::packet::Key<
                 _,
                 sequoia_openpgp::packet::key::SubordinateRole,
             > = Key4::generate_ecc(true, sequoia_openpgp::types::Curve::Ed25519)
                 .unwrap()
                 .into();
+            subkey.set_creation_time(at).unwrap();
             let mut subkey_pair = subkey.clone().into_keypair().unwrap();
             let backsig = SignatureBuilder::new(SignatureType::PrimaryKeyBinding)
+                .set_signature_creation_time(at)
+                .unwrap()
                 .sign_primary_key_binding(&mut subkey_pair, self.cert.primary_key().key(), &subkey)
                 .unwrap();
             let binding = SignatureBuilder::new(SignatureType::SubkeyBinding)
+                .set_signature_creation_time(at)
+                .unwrap()
                 .set_key_flags(KeyFlags::empty().set_signing())
                 .unwrap()
                 .set_key_validity_period(Duration::from_secs(days * 86_400))
@@ -431,12 +483,14 @@ pub mod testkeys {
                 .unwrap()
                 .sign_subkey_binding(&mut primary, None, &subkey)
                 .unwrap();
+            let fingerprint = subkey.fingerprint();
             self.cert = self
                 .cert
                 .clone()
                 .insert_packets(vec![sequoia_openpgp::Packet::from(subkey), binding.into()])
                 .unwrap()
                 .0;
+            fingerprint
         }
     }
 }
@@ -538,31 +592,89 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // DSA is generated only to prove it is rejected.
     fn dsa_key_rejected() {
+        // A well-formed certificate: Ed25519 primary, DSA signing subkey with a valid binding
+        // and back-signature. Only Murmur's policy (DSA rejected) stands between it and use.
         use sequoia_openpgp::{
-            packet::{key::Key4, signature::SignatureBuilder, UserID},
+            packet::{key::Key4, signature::SignatureBuilder},
+            serialize::SerializeInto,
             types::{KeyFlags, SignatureType},
             Packet,
         };
-        let key: sequoia_openpgp::packet::Key<_, sequoia_openpgp::packet::key::PrimaryRole> =
-            Key4::generate_dsa(2048).unwrap().into();
-        let mut pair = key.clone().into_keypair().unwrap();
-        let uid = UserID::from("DSA <dsa@invalid>");
-        let binding = SignatureBuilder::new(SignatureType::PositiveCertification)
-            .set_key_flags(KeyFlags::empty().set_signing().set_certification())
+        // Certify-only Ed25519 primary without subkeys; the DSA key becomes its only subkey.
+        let (owner, _) = CertBuilder::new()
+            .add_userid("DSA subkey <dsa@invalid>")
+            .set_creation_time(now() - days(5))
+            .set_cipher_suite(CipherSuite::Cv25519)
+            .set_primary_key_flags(KeyFlags::empty().set_certification())
+            .generate()
+            .unwrap();
+        let mut primary = owner
+            .primary_key()
+            .key()
+            .clone()
+            .parts_into_secret()
             .unwrap()
-            .sign_userid_binding(&mut pair, key.parts_as_public(), &uid)
+            .into_keypair()
             .unwrap();
-        let cert = Cert::from_packets(
-            vec![Packet::from(key.clone()), uid.into(), binding.into()].into_iter(),
-        )
-        .unwrap();
+        let bound = now() - days(1);
+        let mut subkey: sequoia_openpgp::packet::Key<
+            _,
+            sequoia_openpgp::packet::key::SubordinateRole,
+        > = Key4::generate_dsa(2048).unwrap().into();
+        subkey.set_creation_time(bound).unwrap();
+        let mut subkey_pair = subkey.clone().into_keypair().unwrap();
+        let backsig = SignatureBuilder::new(SignatureType::PrimaryKeyBinding)
+            .set_signature_creation_time(bound)
+            .unwrap()
+            .set_hash_algo(HashAlgorithm::SHA256)
+            .sign_primary_key_binding(&mut subkey_pair, owner.primary_key().key(), &subkey)
+            .unwrap();
+        let binding = SignatureBuilder::new(SignatureType::SubkeyBinding)
+            .set_signature_creation_time(bound)
+            .unwrap()
+            .set_key_flags(KeyFlags::empty().set_signing())
+            .unwrap()
+            .set_embedded_signature(backsig)
+            .unwrap()
+            .sign_subkey_binding(&mut primary, None, &subkey)
+            .unwrap();
+        let cert = owner
+            .strip_secret_key_material()
+            .insert_packets(vec![Packet::from(subkey.clone()), binding.into()])
+            .unwrap()
+            .0;
+        let at = now() - Duration::from_secs(60);
+        // Structurally valid: a policy that allows DSA sees one usable signing subkey ...
+        let permissive = StandardPolicy::new();
+        assert_eq!(
+            cert.keys()
+                .subkeys()
+                .with_policy(&permissive, at)
+                .for_signing()
+                .count(),
+            1,
+            "the DSA subkey must be correctly bound for this test to mean anything"
+        );
+        // ... Murmur's policy sees none, and a signature by it is refused.
+        assert_eq!(
+            cert.keys()
+                .subkeys()
+                .with_policy(&policy(), at)
+                .for_signing()
+                .count(),
+            0
+        );
         let sig = SignatureBuilder::new(SignatureType::Binary)
-            .sign_message(&mut pair, DATA)
+            .set_signature_creation_time(at)
+            .unwrap()
+            .set_hash_algo(HashAlgorithm::SHA256)
+            .sign_message(&mut subkey_pair, DATA)
             .unwrap();
-        use sequoia_openpgp::serialize::SerializeInto;
         let sig = Packet::from(sig).to_vec().unwrap();
-        assert!(verify(&cert.strip_secret_key_material(), DATA, &sig, now()).is_err());
+        let error = verify(&cert, DATA, &sig, at).unwrap_err();
+        assert_eq!(error.reason, Reason::SignatureInvalid, "{error:?}");
     }
 
     #[test]
@@ -590,9 +702,13 @@ mod tests {
         use sequoia_openpgp::serialize::SerializeInto;
         let secret = signer.cert.as_tsk().armored().to_vec().unwrap();
         assert!(root_from(&secret, &signer.fingerprint(), false).is_err());
-        if RELEASE_PRIMARY_FINGERPRINT.is_empty() {
-            assert!(std::env::var_os(DEV_TRUST_ROOT_ENV).is_some() || load_root().is_err());
-        }
+        // Without a development override, only a pinned, embedded release key is a root. No
+        // other test sets this variable; `--dev-trust-root` sets it only in the app binary.
+        std::env::remove_var(DEV_TRUST_ROOT_ENV);
+        assert_eq!(
+            load_root().is_ok(),
+            !RELEASE_PRIMARY_FINGERPRINT.is_empty() && RELEASE_CERT.is_some()
+        );
     }
 
     #[test]
@@ -600,38 +716,44 @@ mod tests {
         let mut signer = Signer::new(now() - days(30), 365);
         let original = signer.cert.clone().strip_secret_key_material();
         // Same certificate: not strictly newer, keep the current one.
-        assert!(accept_update(&original, &signer.public(), now())
+        assert!(accept_update(&original, &signer.public())
             .unwrap()
             .is_none());
         // Another key's certificate is refused.
         let stranger = Signer::new(now() - days(1), 30);
         assert_eq!(
-            accept_update(&original, &stranger.public(), now())
+            accept_update(&original, &stranger.public())
                 .unwrap_err()
                 .reason,
             Reason::UntrustedKey
         );
         // A strictly newer certificate with a freshly bound subkey is accepted and merged.
         signer.add_signing_subkey(365);
-        let updated = accept_update(&original, &signer.public(), now())
+        let updated = accept_update(&original, &signer.public())
             .unwrap()
             .expect("newer");
         assert_eq!(updated.keys().subkeys().count(), 2);
-        // The older subkey still covers an earlier issue time, so the merged update is usable.
-        assert!(accept_update(&original, &signer.public(), now() - days(20)).is_ok());
-        // Revoked subkey only: newer, but no usable signing key.
+        // Once that update is current, the older certificate is not newer: kept as is.
+        use sequoia_openpgp::serialize::SerializeInto;
+        let older = original.armored().to_vec().unwrap();
+        assert!(accept_update(&updated, &older).unwrap().is_none());
+        // Revocation-only update (the sole signing subkey revoked, nothing added): accepted,
+        // and the merged certificate no longer verifies what that subkey signed.
         let mut lone = Signer::new(now() - days(30), 365);
         let base = lone.cert.clone().strip_secret_key_material();
+        let sig = lone.sign_at(DATA, now() - days(1), HashAlgorithm::SHA512);
+        verify(&base, DATA, &sig, now() - days(1)).unwrap();
         lone.revoke_subkey();
-        assert!(accept_update(&base, &lone.public(), now()).is_err());
+        let revoked = accept_update(&base, &lone.public())
+            .unwrap()
+            .expect("a revocation-only update is newer");
+        assert!(verify(&revoked, DATA, &sig, now() - days(1)).is_err());
         // Revoked primary: refused permanently, regardless of anything else.
         let mut revoked = Signer::new(now() - days(30), 365);
         let base = revoked.cert.clone().strip_secret_key_material();
         revoked.revoke_primary();
         assert_eq!(
-            accept_update(&base, &revoked.public(), now())
-                .unwrap_err()
-                .reason,
+            accept_update(&base, &revoked.public()).unwrap_err().reason,
             Reason::PrimaryRevoked
         );
     }
