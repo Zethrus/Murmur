@@ -1,15 +1,13 @@
-"""Entry point for both python -m murmur_engine and the frozen sidecar."""
+"""Entry point for both python -m murmur_engine and the frozen engine."""
 import argparse
 import logging
-import os
 from pathlib import Path
 import sys
 
 
 def main() -> None:
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    os.environ["DO_NOT_TRACK"] = "1"
+    from murmur_engine import runtime
+    runtime.prepare()
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
     parser = argparse.ArgumentParser(description="Murmur offline speech engine")
     parser.add_argument("--models-dir", required=True, type=Path)

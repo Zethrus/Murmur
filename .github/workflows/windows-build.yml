@@ -78,18 +78,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
           Push-Location engine
           try {
-            & $Python -m PyInstaller --noconfirm --clean --onefile --name murmur-engine `
-              --paths . --runtime-hook runtime_hook_cuda.py `
+            # Onedir engine; CUDA DLLs are found through MURMUR_CUDA_DIR (murmur_engine/runtime.py).
+            & $Python -m PyInstaller --noconfirm --clean --onedir --name murmur-engine `
+              --paths . --exclude-module av --exclude-module hf_xet `
               --collect-all faster_whisper --collect-all ctranslate2 `
-              --collect-all tokenizers --collect-all onnxruntime `
-              murmur_engine/__main__.py
+              --collect-all tokenizers --collect-binaries onnxruntime --collect-data onnxruntime `
+              --hidden-import onnxruntime.capi._pybind_state murmur_engine/__main__.py
             if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
           } finally { Pop-Location }
-          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
-          $Sidecar = 'src-tauri/binaries/murmur-engine-x86_64-pc-windows-msvc.exe'
-          Copy-Item engine/dist/murmur-engine.exe $Sidecar -Force
-          if (-not (Test-Path $Sidecar)) { throw 'sidecar missing' }
-          & $Sidecar --help
+          & engine/dist/murmur-engine/murmur-engine.exe --help
           if ($LASTEXITCODE -ne 0) { throw 'frozen engine did not start' }
 
       - run: npm ci
@@ -133,19 +130,21 @@ jobs:
           $Release = 'src-tauri/target/x86_64-pc-windows-msvc/release'
           $Destination = '.cache/artifacts/windows'
           New-Item -ItemType Directory -Force $Destination | Out-Null
-          # Tauri copies the sidecar next to the app; verify the pair, never the app alone.
-          foreach ($Name in @('murmur.exe', 'murmur-engine.exe')) {
-            $File = Join-Path $Release $Name
-            if (-not (Test-Path $File) -or (Get-Item $File).Length -eq 0) {
-              throw "Missing or empty portable artifact: $File"
-            }
-            Copy-Item $File $Destination -Force
+          # Portable layout the app resolves: murmur.exe + engine\murmur-engine.exe (onedir).
+          $File = Join-Path $Release 'murmur.exe'
+          if (-not (Test-Path $File) -or (Get-Item $File).Length -eq 0) {
+            throw "Missing or empty portable artifact: $File"
           }
+          $Portable = Join-Path $Destination 'portable'
+          New-Item -ItemType Directory -Force $Portable | Out-Null
+          Copy-Item $File $Portable -Force
+          Copy-Item engine/dist/murmur-engine (Join-Path $Portable 'engine') -Recurse -Force
+          # The NSIS installer does not include the engine yet (PR-B/PR-C components).
           $Installers = @(Get-ChildItem "$Release/bundle/nsis/*.exe" -File)
           if ($Installers.Count -eq 0) { throw 'Missing NSIS installer' }
           $Installers | Copy-Item -Destination $Destination
-          Compress-Archive -Path "$Destination/murmur.exe", "$Destination/murmur-engine.exe" `
-            -DestinationPath "$Destination/murmur-windows-x86_64.zip" -Force
+          Compress-Archive -Path "$Portable/*" -DestinationPath "$Destination/murmur-windows-x86_64.zip" -Force
+          Remove-Item $Portable -Recurse -Force
 
       - name: Publish Windows assets to the release (tags only)
         if: startsWith(github.ref, 'refs/tags/')
@@ -155,7 +154,7 @@ jobs:
           generate_release_notes: true
           body: |
             Unsigned builds. Windows runtime and GPU behavior remain unverified on real Windows hardware.
-            Portable archives include the required adjacent engine sidecar; keep the pair together.
+            The portable zip includes the engine folder beside murmur.exe; keep them together.
             Models are not bundled: install a model explicitly in Settings → Engine.
           files: .cache/artifacts/windows/*
           fail_on_unmatched_files: true
