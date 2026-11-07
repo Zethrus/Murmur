@@ -1,6 +1,7 @@
 # Configuration reference
 
-Linux: `${XDG_CONFIG_HOME:-~/.config}/murmur/config.toml`, data/models/history/logs
+Linux: `${XDG_CONFIG_HOME:-~/.config}/murmur/config.toml`, data/history/logs and
+installed components (`components/`, see [components](components.md))
 under `${XDG_DATA_HOME:-~/.local/share}/murmur`. Windows:
 `%APPDATA%\Murmur\config.toml` and `%LOCALAPPDATA%\Murmur` for data.
 Use Settings or edit TOML; writes are atomic, unknown keys are preserved, and
@@ -25,11 +26,12 @@ Linux user install explicitly enables autostart without changing the app default
 | `sounds.enabled` | `true` | Enable synthesized start/stop/error cues |
 | `sounds.volume` | `0.6` | Cue volume, 0–1 |
 | `sounds.muted` | `false` | Mute without changing volume |
-| `engine.model` | `"distil-small.en"` | Catalog model name; empty means none; selection is not installation |
+| `engine.model` | `"distil-small.en"` | Catalog model name; empty means none; selection is not installation (install it in Settings → Components) |
 | `engine.device` | `"auto"` | `auto`, `cuda`, `cpu`; auto allows sticky CPU fallback |
 | `engine.compute_type` | `"auto"` | `auto`, `int8`, `int8_float16`, `float16`, `float32`, `int8_float32`; auto resolves per device |
 | `engine.beam_size` | `1` | Decoder beam size, 1–10 |
 | `engine.vad_filter` | `true` | Filter nonspeech during inference |
+| `setup.postponed` | `false` | Set by "Set up later" or closing first-run setup; while `true` setup never opens by itself (Settings shows **Finish setup**) |
 | `engine.dictionary` | Seeded coding vocabulary below | String array used as decoder prompt bias, not guaranteed corrections |
 | `audio.device` | `"default"` | System default or enumerated input-device name |
 | `audio.gain` | `1.0` | Input multiplier, 0–10 |
@@ -104,8 +106,11 @@ neither.
 
 | Variable | Read by | Meaning |
 | --- | --- | --- |
-| `MURMUR_ENGINE` | App | Speech engine to launch: the `murmur-engine` executable, or a directory containing it. Checked first; if it names nothing usable the app reports "Speech engine is not installed" instead of falling back. Without it, debug builds run the checkout's Python engine and release builds use `<app dir>/../lib/murmur/engine/murmur-engine` on Linux or `<app dir>\engine\murmur-engine.exe` on Windows. |
-| `MURMUR_CUDA_DIR` | Engine (Windows) | Absolute directory with the CUDA DLLs; added to the DLL search path at engine start. Ignored if missing or relative. On Linux the app instead prepends `<app dir>/../lib/murmur/cuda` to the engine's `LD_LIBRARY_PATH`. |
+| `MURMUR_ENGINE` | App | Speech engine to launch: the `murmur-engine` executable, or a directory containing it. Checked first; if it names nothing usable the app reports "Speech engine not installed — open Settings" instead of falling back. Without it, debug builds run the checkout's Python engine; release builds use the installed engine component (`components/engine/<version>/`), then `<app dir>/../lib/murmur/engine/murmur-engine` (source installs) or `<app dir>\engine\murmur-engine.exe` on Windows. |
+| `MURMUR_CUDA_DIR` | Engine (Windows) | Absolute directory with the CUDA DLLs; added to the DLL search path at engine start. Set by the app to the GPU add-on component. Ignored if missing or relative. On Linux the app instead prepends the add-on (or `<app dir>/../lib/murmur/cuda`) to the engine's `LD_LIBRARY_PATH`. |
+| `MURMUR_DEV_TRUST_ROOT` | App | Armored OpenPGP certificate used instead of Murmur's pinned release key to verify the component manifest. **Debug builds only**, unless `MURMUR_DEV_TRUST_ROOT_ACK=I-understand-this-disables-release-trust` is also set; then release builds accept it and log a warning on every start. For tests with throwaway keys. |
+| `MURMUR_COMPONENTS_URL` | App | Base URL for **Check for updates** instead of the latest GitHub release; same conditions as `MURMUR_DEV_TRUST_ROOT`. The host must still be on the download allowlist. |
+| `MURMUR_EMBED_MANIFEST` | Build (`build.rs`) | Signed `components-manifest.json` (its `.sig` beside it) to compile into the app for offline display in setup. |
 
 [Back to the README](../README.md)
 

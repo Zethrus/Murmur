@@ -33,6 +33,7 @@ pub fn find(id: &str) -> Option<&'static Entry> {
     CATALOG.iter().find(|entry| entry.id == id)
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // Paths and URL serve the test-only LegacyStore.
 impl Entry {
     /// Immutable revision URL; the only URL Murmur ever requests for this model.
     pub fn url(&self) -> String {
@@ -63,6 +64,7 @@ pub enum InstallState {
     Error,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct InstalledRecord {
     pub id: String,
@@ -74,6 +76,7 @@ pub struct InstalledRecord {
     pub installed_at_unix: u64,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl InstalledRecord {
     pub fn for_entry(entry: &Entry, installed_at_unix: u64) -> Self {
         Self {
@@ -94,6 +97,7 @@ impl InstalledRecord {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 /// Cheap local inspection (no hashing): metadata plus the installation record.
 /// An orphaned `.part` file means "not installed".
 pub fn local_state(entry: &Entry, root: &Path) -> InstallState {

@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {harness,settle} from "./ui-harness.mjs";
+import {harness,settle,componentsFixture} from "./ui-harness.mjs";
 const plain = value => JSON.parse(JSON.stringify(value)); // args cross a vm realm
+const component = (root,id) => root.querySelectorAll(".component-row").find(r=>r.dataset.component===id);
 const button = (root,label) => root.querySelectorAll("button").find(b=>b.textContent===label||b.dataset.page===label);
 async function settings(overrides){const h=await harness(overrides);await (await h.module("settings/app.ts")).mountSettings(h.root);await settle();return h;}
 test("settings mounts six pages, status/version, and releases all listeners",async()=>{
   const h=await settings();assert.equal(h.root.querySelectorAll(".nav-button").length,6);assert.match(h.root.textContent,/Version 0.1.0/);
-  for(const page of ["General","Engine","Audio","Behavior","Privacy","Companion"]){await button(h.root,page).dispatch("click");await settle();assert.equal(h.root.querySelector("h1").textContent,page);assert.ok(h.root.querySelectorAll(".card").length>=2);}
+  for(const page of ["General","Components","Audio","Behavior","Privacy","Companion"]){await button(h.root,page).dispatch("click");await settle();assert.equal(h.root.querySelector("h1").textContent,page);assert.ok(h.root.querySelectorAll(".card").length>=2);}
   h.unload();assert.equal([...h.events.values()].reduce((n,s)=>n+s.size,0),0);
 });
 test("general saves coding hotkey and theme through set_config",async()=>{
@@ -34,10 +35,136 @@ test("behavior saves style, replacements and safe transcript text",async()=>{
   const table=h.root.querySelector(".replacement-table");await table.querySelector("button").dispatch("click");await button(h.root,"Save replacements").dispatch("click");assert.equal(Object.keys(h.config.postproc.replacements).length,0);
   h.emit("latency",{latency_ms:14,text:"<script>not markup</script>"});assert.equal(h.root.querySelector(".transcript").textContent,"<script>not markup</script>");assert.equal(h.root.querySelector("script"),null);h.unload();
 });
-test("model install is explicit, progress completes, selection and test are wired",async()=>{
-  const h=await settings();await button(h.root,"Engine").dispatch("click");await settle();assert.ok(!h.calls.some(c=>c.name==="install_model"));
-  await button(h.root,"Install").dispatch("click");await settle();assert.ok(h.calls.some(c=>c.name==="install_model"&&c.args.name==="tiny.en"));assert.equal(h.root.querySelector("progress").value,1);
-  await button(h.root,"Use model").dispatch("click");await settle();assert.equal(h.config.engine.model,"tiny.en");await button(h.root,"Test 3 s").dispatch("click");assert.match(h.root.textContent,/12 ms inference/);h.unload();
+test("components install is explicit, progress is live, selection and test are wired",async()=>{
+  const h=await settings();await button(h.root,"Components").dispatch("click");await settle();await settle();
+  assert.ok(!h.calls.some(c=>c.name==="components_install"),"opening the page never installs");
+  const tiny=component(h.root,"speech-tiny.en");assert.equal(tiny.dataset.state,"available");assert.match(tiny.textContent,/75 MB download · 75 MB on disk/);
+  await button(tiny,"Install").dispatch("click");await settle();
+  assert.deepEqual(plain(h.calls.find(c=>c.name==="components_install").args),{ids:["speech-tiny.en"]});
+  h.emit("components/changed",{});h.timers.tick(100);await settle();await settle();
+  h.emit("components/progress",{id:"speech-tiny.en",phase:"downloading",bytes_done:50e6,bytes_total:100e6,rate:5e6,eta:10,error:null,reason:null});
+  const row=component(h.root,"speech-tiny.en");assert.equal(row.querySelector("progress").value,0.5);assert.match(row.textContent,/50 MB of 100 MB · 5 MB\/s · 10 s left/);
+  assert.ok(button(row,"Pause")&&button(row,"Cancel"));
+  // An installed, unselected model offers "Use model"; the active one refuses removal with a reason.
+  const c=h.components.components.find(x=>x.id==="speech-tiny.en");c.state="installed";c.installed_version="1.0.0";c.job=null;
+  h.emit("components/changed",{});h.timers.tick(100);await settle();await settle();
+  await button(component(h.root,"speech-tiny.en"),"Use model").dispatch("click");await settle();assert.equal(h.config.engine.model,"tiny.en");
+  h.components.components.find(x=>x.id==="speech-distil-small.en").in_use="This is the selected speech model. Choose another model first.";
+  h.emit("components/changed",{});h.timers.tick(100);await settle();await settle();
+  const selected=component(h.root,"speech-distil-small.en");await button(selected,"Remove").dispatch("click");await settle();
+  assert.match(selected.textContent,/Choose another model first/);assert.ok(!h.calls.some(c=>c.name==="components_remove"));
+  await button(h.root,"Test 3 s").dispatch("click");assert.match(h.root.textContent,/12 ms inference/);h.unload();
+});
+test("components page shows every state with its actions",async()=>{
+  const fixture=componentsFixture({gpu:true});
+  const set=(id,extra)=>Object.assign(fixture.components.find(c=>c.id===id),extra);
+  set("cuda",{state:"paused",job:{id:"cuda",phase:"paused",bytes_done:1e8,bytes_total:470e6,rate:0,eta:null,error:null,reason:null}});
+  set("speech-tiny.en",{state:"unverified",legacy_path:"/home/u/.local/share/murmur/models/tiny.en"});
+  set("speech-distil-large-v3",{state:"failed",job:{id:"speech-distil-large-v3",phase:"failed",bytes_done:0,bytes_total:1.5e9,rate:0,eta:null,error:"Not enough disk space for distil-large-v3",reason:"insufficient_space"}});
+  set("speech-large-v3-turbo",{state:"corrupt",installed_version:"1.0.0"});
+  set("engine",{dependents:["NVIDIA GPU acceleration"]});
+  const h=await settings({componentsFixture:fixture});await button(h.root,"Components").dispatch("click");await settle();await settle();
+  const row=id=>component(h.root,id);
+  assert.ok(button(row("cuda"),"Resume")&&button(row("cuda"),"Discard"));assert.match(h.root.textContent,/RTX 4060 Laptop GPU · 8.0 GB video memory · driver 580.178.04/);
+  assert.ok(button(row("speech-tiny.en"),"Reinstall"));assert.match(row("speech-tiny.en").textContent,/do not match the signed manifest.*Nothing was deleted/);
+  assert.ok(button(row("speech-distil-large-v3"),"Retry"));assert.match(row("speech-distil-large-v3").textContent,/Not enough disk space/);
+  assert.ok(button(row("speech-large-v3-turbo"),"Reinstall")&&button(row("speech-large-v3-turbo"),"Remove"));
+  await button(row("engine"),"Remove").dispatch("click");assert.match(row("engine").textContent,/NVIDIA GPU acceleration needs this component/);
+  await button(row("cuda"),"Resume").dispatch("click");assert.deepEqual(plain(h.calls.find(c=>c.name==="components_resume").args),{id:"cuda"});
+  await button(row("engine"),"Verify").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_verify"));
+  await button(h.root,"Check for updates").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_check_updates"));h.unload();
+});
+test("missing trust root explains what needs what and disables installs",async()=>{
+  const h=await settings({componentsFixture:componentsFixture({engine:false,trust:false})});
+  assert.equal(h.root.querySelector(".setup-layer").hidden,true,"setup does not open when nothing can be installed");
+  assert.match(h.root.querySelector(".model-banner").textContent,/speech engine is not installed/);
+  await button(h.root,"Components").dispatch("click");await settle();await settle();
+  assert.match(h.root.textContent,/no release signing key/);assert.match(h.root.textContent,/Dictation needs the speech engine and one speech model/);
+  assert.equal(button(component(h.root,"engine"),"Install").disabled,true);h.unload();
+});
+test("expired component list stays listed, explains itself and gates new installs",async()=>{
+  const fixture=componentsFixture({stale:true});
+  Object.assign(fixture.components.find(c=>c.id==="cuda"),{state:"paused",job:{id:"cuda",phase:"paused",bytes_done:1e8,bytes_total:470e6,rate:0,eta:null,error:null,reason:null}});
+  const h=await settings({componentsFixture:fixture});await button(h.root,"Components").dispatch("click");await settle();await settle();
+  assert.match(h.root.textContent,/Component list expired — Check for updates/);assert.match(h.root.textContent,/expired 2027-05-06/);
+  assert.equal(button(component(h.root,"speech-tiny.en"),"Install").disabled,true);
+  assert.equal(button(component(h.root,"cuda"),"Resume").disabled,true);
+  assert.equal(button(component(h.root,"engine"),"Verify").disabled,false);assert.equal(button(component(h.root,"engine"),"Remove").disabled,false);
+  await button(h.root,"Check for updates").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_check_updates"));h.unload();
+});
+test("setup still opens with an expired list but cannot install, and says why",async()=>{
+  const h=await settings({componentsFixture:componentsFixture({engine:false,stale:true})});
+  assert.equal(h.root.querySelector(".setup-layer").hidden,false);
+  for(let i=0;i<4;i++)await button(h.root,"Next").dispatch("click");
+  assert.equal(button(h.root,"Download and install").disabled,true);assert.match(h.root.textContent,/Component list expired — Check for updates/);
+  assert.ok(!h.calls.some(c=>c.name==="components_install"));h.unload();
+});
+
+// ---- First-run setup ----
+const stepTitle=h=>h.root.querySelector(".setup-title").textContent;
+const radio=(h,name,value)=>h.root.querySelectorAll("input").find(i=>i.name===name&&i.value===value);
+test("setup opens on first run, walks six steps in order and installs only after consent",async()=>{
+  const h=await settings({componentsFixture:componentsFixture({engine:false})});
+  assert.equal(h.root.querySelector(".setup-layer").hidden,false);assert.equal(h.root.querySelector(".settings-shell").hidden,true);
+  const seen=[];for(let i=0;i<4;i++){seen.push(stepTitle(h));assert.ok(button(h.root,"Set up later"),"Set up later on every step");await button(h.root,"Next").dispatch("click");}
+  seen.push(stepTitle(h));assert.deepEqual(seen,["Welcome","Language","Speech model","Compute","Summary"]);
+  assert.match(h.root.textContent,/STEP 5 OF 6/);
+  assert.ok(!h.calls.some(c=>c.name==="components_install"),"nothing downloads before the summary click");
+  // Totals: engine 100 MB + distil-small.en 335 MB.
+  assert.match(h.root.textContent,/Download435 MB/);assert.match(h.root.textContent,/Installed size585 MB/);assert.match(h.root.textContent,/Free disk space50.00 GB/);
+  await button(h.root,"Download and install").dispatch("click");await settle();
+  assert.deepEqual(plain(h.calls.find(c=>c.name==="components_install").args),{ids:["engine","speech-distil-small.en"]});
+  assert.equal(h.config.engine.model,"distil-small.en");assert.equal(h.config.engine.device,"cpu");assert.equal(h.config.general.language,"en");
+  assert.equal(stepTitle(h),"Install");assert.equal(button(h.root,"Done").disabled,true);
+  h.emit("components/progress",{id:"engine",phase:"downloading",bytes_done:25e6,bytes_total:100e6,rate:0,eta:null,error:null,reason:null});
+  assert.equal(h.root.querySelector(".setup-progress progress").value,0.25);
+  for(const id of ["engine","speech-distil-small.en"]){const c=h.components.components.find(x=>x.id===id);c.state="active";c.job=null;c.installed_version="1.0.0";}
+  h.components.engine_installed=true;h.emit("components/changed",{});h.timers.tick(100);await settle();await settle();
+  assert.match(h.root.textContent,/All set/);await button(h.root,"Done").dispatch("click");await settle();await settle();
+  assert.equal(h.root.querySelector(".setup-layer").hidden,true);assert.equal(h.root.querySelector(".settings-shell").hidden,false);h.unload();
+});
+test("set up later persists, never reopens, and Settings offers Finish setup",async()=>{
+  const h=await settings({componentsFixture:componentsFixture({engine:false})});
+  await button(h.root,"Next").dispatch("click");await button(h.root,"Set up later").dispatch("click");await settle();
+  assert.equal(h.config.setup.postponed,true);assert.equal(h.root.querySelector(".setup-layer").hidden,true);
+  assert.ok(!h.calls.some(c=>c.name==="components_install"));
+  const banner=h.root.querySelector(".model-banner");assert.equal(banner.hidden,false);assert.ok(button(banner,"Finish setup"));
+  h.unload();
+  const again=await settings({componentsFixture:componentsFixture({engine:false}),get_config:async()=>({...(await import("./ui-harness.mjs")).fixture(),setup:{postponed:true}})});
+  assert.equal(again.root.querySelector(".setup-layer").hidden,true,"postponed setup stays closed");
+  await button(again.root.querySelector(".model-banner"),"Finish setup").dispatch("click");assert.equal(again.root.querySelector(".setup-layer").hidden,false);again.unload();
+});
+test("closing the window during setup (postponed by the backend) hides the wizard",async()=>{
+  const h=await settings({componentsFixture:componentsFixture({engine:false})});
+  assert.equal(h.root.querySelector(".setup-layer").hidden,false);
+  h.config.setup.postponed=true;h.emit("config",structuredClone(h.config));await settle();await settle();
+  assert.equal(h.root.querySelector(".setup-layer").hidden,true);assert.equal(h.root.querySelector(".settings-shell").hidden,false);
+  assert.ok(button(h.root.querySelector(".model-banner"),"Finish setup"));h.unload();
+});
+test("setup hides the GPU option without an NVIDIA GPU and recommends it with one",async()=>{
+  const cpu=await settings({componentsFixture:componentsFixture({engine:false})});
+  for(let i=0;i<3;i++)await button(cpu.root,"Next").dispatch("click");
+  assert.equal(stepTitle(cpu),"Compute");assert.ok(radio(cpu,"compute","cpu"));assert.equal(radio(cpu,"compute","cuda"),undefined);
+  assert.match(cpu.root.textContent,/No supported NVIDIA GPU was detected/);cpu.unload();
+  const gpu=await settings({componentsFixture:componentsFixture({engine:false,gpu:true})});
+  await button(gpu.root,"Next").dispatch("click");await button(gpu.root,"Next").dispatch("click");
+  assert.equal(radio(gpu,"model","distil-large-v3").checked,true,"recommendation follows the GPU");
+  await button(gpu.root,"Next").dispatch("click");assert.equal(radio(gpu,"compute","cuda").checked,true);assert.match(gpu.root.textContent,/RTX 4060.*8.0 GB video memory, driver 580.178.04/);
+  await button(gpu.root,"Next").dispatch("click");assert.match(gpu.root.textContent,/NVIDIA GPU acceleration|cuda/);
+  await button(gpu.root,"Download and install").dispatch("click");await settle();
+  assert.deepEqual(plain(gpu.calls.find(c=>c.name==="components_install").args),{ids:["engine","cuda","speech-distil-large-v3"]});assert.equal(gpu.config.engine.device,"auto");gpu.unload();
+});
+test("setup language choice filters models and keeps translate for multilingual only",async()=>{
+  const h=await settings({componentsFixture:componentsFixture({engine:false})});
+  await button(h.root,"Next").dispatch("click");const multi=radio(h,"language","multilingual");multi.checked=true;await multi.dispatch("change");
+  const translate=h.document.getElementById("setup-translate");assert.ok(translate);translate.checked=true;await translate.dispatch("change");
+  await button(h.root,"Next").dispatch("click");assert.equal(radio(h,"model","tiny.en"),undefined);assert.equal(radio(h,"model","large-v3-turbo").checked,true);
+  await button(h.root,"Next").dispatch("click");await button(h.root,"Next").dispatch("click");
+  assert.match(h.root.textContent,/Download1.70 GB/);
+  await button(h.root,"Download and install").dispatch("click");await settle();
+  assert.equal(h.config.general.language,"");assert.equal(h.config.general.translate,true);assert.equal(h.config.engine.model,"large-v3-turbo");
+  // Keyboard: every step heading takes focus for screen readers.
+  assert.equal(h.document.activeElement?.className,"setup-title");h.unload();
 });
 test("privacy debounces search, clears history and opens folders",async()=>{
   const h=await settings();await button(h.root,"Privacy").dispatch("click");await settle();const input=h.root.querySelectorAll("input").find(i=>i.type==="search");input.value="hello";await input.dispatch("input");h.timers.tick(250);await settle();
@@ -45,8 +172,8 @@ test("privacy debounces search, clears history and opens folders",async()=>{
   await button(h.root,"Open folder").dispatch("click");assert.ok(h.calls.some(c=>c.name==="open_path"&&c.args.kind==="config"));h.unload();
 });
 test("empty and disconnected states remain usable",async()=>{
-  const h=await settings({get_status:async()=>({state:"idle",sidecar_alive:false,model_available:false,device:"unloaded",compute:"unloaded",model:"",error:null}),list_models:async()=>{throw new Error("offline");},list_devices:async()=>[]});
-  assert.equal(h.root.querySelector(".model-banner").hidden,false);await button(h.root,"Engine").dispatch("click");await settle();assert.match(h.root.textContent,/Model library unavailable/);assert.equal(button(h.root,"Test 3 s").disabled,true);
+  const h=await settings({get_status:async()=>({state:"idle",sidecar_alive:false,model_available:false,device:"unloaded",compute:"unloaded",model:"",error:null}),components_snapshot:async()=>{throw new Error("offline");},list_devices:async()=>[]});
+  assert.equal(h.root.querySelector(".model-banner").hidden,false);await button(h.root,"Components").dispatch("click");await settle();assert.match(h.root.textContent,/Components unavailable/);assert.equal(button(h.root,"Test 3 s").disabled,true);
   await button(h.root,"Audio").dispatch("click");await settle();assert.match(h.root.textContent,/No input devices/);h.unload();
 });
 test("sidecar errors refresh the footer without a polling loop",async()=>{
@@ -54,7 +181,7 @@ test("sidecar errors refresh the footer without a polling loop",async()=>{
   assert.match(h.root.querySelector(".sidebar-footer").textContent,/Engine offline/);h.unload();
 });
 test("GPU fallback warning refreshes and clears in Engine settings",async()=>{
-  const h=await settings();await button(h.root,"Engine").dispatch("click");await settle();
+  const h=await settings();await button(h.root,"Components").dispatch("click");await settle();
   h.status.fallback_reason="A required CUDA library could not be loaded.";h.emit("state",{state:"idle"});h.timers.tick(250);await settle();
   assert.match(h.root.textContent,/Using CPU because GPU acceleration is unavailable/);
   h.status.fallback_reason=null;h.emit("state",{state:"idle"});h.timers.tick(250);await settle();

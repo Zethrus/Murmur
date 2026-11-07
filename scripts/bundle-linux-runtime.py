@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Finish Tauri's AppImage and .deb with the speech engine and cuBLAS.
+"""Build the Linux release: slim app packages plus downloadable component zips.
+
+  components  onedir engine -> murmur-engine-linux-x86_64-<ver>.zip
+              pinned cuBLAS -> murmur-cuda-linux-x86_64-<ver>.zip
+  package     Tauri AppImage/.deb -> finished AppImage, .deb, tar.gz (no engine, no CUDA)
 
 Run on the same Debian/Ubuntu machine that built the application. glibc and
 hardware drivers remain host components; Python is inside the onedir engine.
+The app installs the engine and CUDA add-on into ~/.local/share/murmur/components
+after verifying them against the signed manifest (docs/components.md).
 
-Layout shared by both packages (paths relative to the AppDir or /):
-  usr/bin/murmur               Tauri app (stripped by the Cargo release profile)
-  usr/lib/murmur/engine/       onedir frozen engine (murmur-engine + _internal/)
-  usr/lib/murmur/cuda/         libcublas.so.12, libcublasLt.so.12
-The AppImage also carries typing tools and client libraries; the .deb uses
-the system packages named in tauri.conf.json instead.
+The AppImage carries the app, WebKitGTK client libraries and typing tools; the .deb
+uses the system packages named in tauri.conf.json instead.
 """
 import argparse
 import hashlib
@@ -21,9 +23,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import zipfile
 from linux_cuda_runtime import CUDA, DOC, stage as stage_cuda
 
-ENGINE = Path("usr/lib/murmur/engine")
+ENGINE_ZIP = "murmur-engine-linux-x86_64-{version}.zip"
+CUDA_ZIP = "murmur-cuda-linux-x86_64-{version}.zip"
+# Fixed timestamp: the same inputs give byte-identical archives.
+ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 CHECK_RELEASE = Path(__file__).with_name("check-release.py")
 SHARED_LIBRARY = re.compile(r"^lib.+\.so(?:\.\d+)*$")
 
@@ -108,23 +114,69 @@ def dedupe_libraries(root):
     return replaced
 
 
-def stage_engine(engine, destination):
-    """Copy the onedir engine; refuse anything that is not a complete freeze."""
+def check_engine(engine):
+    """Refuse anything that is not a complete onedir freeze; run the cuDNN/NVRTC gate."""
     executable = engine / "murmur-engine"
     if not executable.is_file() or not os.access(executable, os.X_OK) or not (engine / "_internal").is_dir():
         raise RuntimeError(f"Not a onedir frozen engine: {engine}")
     subprocess.run([sys.executable, str(Path(__file__).with_name("check-engine-imports.py")), str(engine)],
                    check=True)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(engine, destination, symlinks=True)
+
+
+def write_zip(source, destination):
+    """Deterministic LZMA zip of a directory tree; the component manager refuses links, so
+    PyInstaller's convenience symlinks to files elsewhere in the tree are left out (the real
+    file ships at its own path). A link that leaves the tree or points at nothing fails."""
+    source = source.resolve()
+    files = []
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source).as_posix()
+        if path.is_symlink():
+            target = path.resolve()
+            if not target.is_relative_to(source) or not target.is_file():
+                raise RuntimeError(f"Unsupported link in component: {relative}")
+            continue
+        if path.is_file():
+            files.append((relative, path))
+    temporary = destination.with_suffix(".zip.tmp")
+    # LZMA: the CUDA add-on is 335 MiB this way against 554 MiB with deflate.
+    with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_LZMA) as archive:
+        for relative, path in files:
+            info = zipfile.ZipInfo(relative, ZIP_TIME)
+            info.create_system = 3
+            executable = os.access(path, os.X_OK)
+            info.external_attr = (0o100755 if executable else 0o100644) << 16
+            info.compress_type = zipfile.ZIP_LZMA
+            with path.open("rb") as stream, archive.open(info, "w", force_zip64=path.stat().st_size > 2**31) as out:
+                shutil.copyfileobj(stream, out, 1 << 20)
+    temporary.replace(destination)
+    return destination
+
+
+def build_components(engine, version, output, lock):
+    """Engine and CUDA add-on zips for the component manifest (make-manifest.py)."""
+    engine, output = engine.resolve(), output.resolve()
+    check_engine(engine)
+    output.mkdir(parents=True, exist_ok=True)
+    engine_zip = write_zip(engine, output / ENGINE_ZIP.format(version=version))
+    with tempfile.TemporaryDirectory(prefix="murmur-cuda-", dir=output.parent) as temporary:
+        root = Path(temporary)
+        stage_cuda(root, lock)
+        flat = root / "cuda"
+        shutil.copytree(root / CUDA, flat, symlinks=False)
+        for notice in [*(root / DOC).glob("nvidia-*"), root / DOC / "cuda-manifest.json"]:
+            shutil.copy2(notice, flat / notice.name)
+        cuda_zip = write_zip(flat, output / CUDA_ZIP.format(version=version))
+    return engine_zip, cuda_zip
 
 
 def package_portable(image, output):
-    """The portable archive is the AppImage named murmur; it already holds the engine."""
+    """The portable archive is the AppImage named murmur."""
     with tarfile.open(output / "murmur-linux-x86_64.tar.gz", "w:gz", dereference=True) as archive:
         archive.add(image, arcname="murmur")
-    # A reused output directory may contain assets staged by older scripts.
-    for name in ("murmur", "murmur-engine"):
+    # A reused output directory may contain assets staged by older scripts, and GPU
+    # evidence tied to the previous packages' hashes.
+    for name in ("murmur", "murmur-engine", "GPU-VALIDATION.json"):
         (output / name).unlink(missing_ok=True)
 
 
@@ -134,19 +186,9 @@ def open_directories(root):
         os.chmod(directory, 0o755)
 
 
-def install_debian_runtime(appdir, package_dir):
-    """Move engine, cuBLAS and their notices into the .deb; the app stays in /usr/bin."""
-    for relative in (ENGINE, CUDA):
-        target = package_dir / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        (appdir / relative).rename(target)
-    open_directories(package_dir / "usr/lib/murmur")
-    notices = package_dir / DOC
-    notices.mkdir(parents=True, exist_ok=True)
-    for notice in (appdir / DOC).glob("nvidia-*"):
-        shutil.copy2(notice, notices)
-    shutil.copy2(appdir / DOC / "cuda-manifest.json", notices)
-    open_directories(package_dir / "usr/share/doc/murmur")
+def finish_debian(package_dir):
+    """The .deb holds only the app; engine and CUDA are components. Refresh md5sums."""
+    open_directories(package_dir / "usr")
     (package_dir / "DEBIAN/md5sums").write_text("".join(
         f"{_digest(path, 'md5').hex()}  {path.relative_to(package_dir)}\n"
         for path in sorted(package_dir.rglob("*"))
@@ -166,8 +208,8 @@ def squash(appdir, destination):
         stdout=subprocess.DEVNULL)
 
 
-def package(image, deb, engine, output, lock):
-    image, deb, engine, output = image.resolve(), deb.resolve(), engine.resolve(), output.resolve()
+def package(image, deb, output):
+    image, deb, output = image.resolve(), deb.resolve(), output.resolve()
     if image.parent == output or deb.parent == output:
         raise ValueError("Output directory must differ from the original bundles")
     output.mkdir(parents=True, exist_ok=True)
@@ -185,8 +227,6 @@ def package(image, deb, engine, output, lock):
             shutil.copy2(source, target)
             binaries.append(Path(source))
         bundle_libraries(appdir, binaries)
-        stage_engine(engine, appdir / ENGINE)
-        stage_cuda(appdir, lock)
         shutil.copytree('/usr/share/alsa', appdir / 'usr/share/alsa', symlinks=False)
         fonts = appdir / 'usr/share/fonts'
         fonts.mkdir(exist_ok=True)
@@ -229,11 +269,11 @@ exec "$APPDIR/AppRun.tauri" "$@"
         filesystem.unlink()
         packaged.chmod(0o755)
         package_portable(packaged, output)
-        # Debian: Tauri's package (app, desktop entry, system Depends) plus the
-        # engine and cuBLAS. WebKitGTK, xdotool and x11-utils come from the system.
+        # Debian: Tauri's package (app, desktop entry, system Depends), xz-compressed.
+        # WebKitGTK, xdotool and x11-utils come from the system.
         package_dir = work / "deb"
         run("dpkg-deb", "-R", str(deb), str(package_dir), stdout=subprocess.DEVNULL)
-        install_debian_runtime(appdir, package_dir)
+        finish_debian(package_dir)
         control = package_dir / "DEBIAN/control"
         size = sum(p.lstat().st_size for p in package_dir.rglob("*")
                    if p.is_file() and "DEBIAN" not in p.relative_to(package_dir).parts) // 1024
@@ -243,11 +283,20 @@ exec "$APPDIR/AppRun.tauri" "$@"
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--appimage", type=Path, required=True)
-    parser.add_argument("--deb", type=Path, required=True)
-    parser.add_argument("--engine", type=Path, required=True, help="onedir frozen engine (engine/dist/murmur-engine)")
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--lock", type=Path, default=Path(__file__).resolve().parents[1] / "engine/requirements-linux-release.txt")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    components = commands.add_parser("components", help="engine and CUDA add-on zips")
+    components.add_argument("--engine", type=Path, required=True, help="onedir frozen engine (engine/dist/murmur-engine)")
+    components.add_argument("--version", required=True)
+    components.add_argument("--output", type=Path, required=True)
+    components.add_argument("--lock", type=Path, default=Path(__file__).resolve().parents[1] / "engine/requirements-linux-release.txt")
+    packages = commands.add_parser("package", help="AppImage, .deb and tar.gz without engine or CUDA")
+    packages.add_argument("--appimage", type=Path, required=True)
+    packages.add_argument("--deb", type=Path, required=True)
+    packages.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    package(args.appimage, args.deb, args.engine, args.output, args.lock)
+    if args.command == "components":
+        for path in build_components(args.engine, args.version, args.output, args.lock):
+            print(path)
+    else:
+        package(args.appimage, args.deb, args.output)

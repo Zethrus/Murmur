@@ -72,16 +72,12 @@ def test_transcription_dispatch(models: Models, method: str) -> None:
     rpc.speech.transcribe.assert_called_once_with({"sample_rate": 16000})
 
 
-def test_download_events_before_response(models: Models) -> None:
+def test_models_install_is_refused(models: Models) -> None:
     rpc, out = server(models)
-    def install(name: str, emit: object) -> dict[str, bool]:
-        emit({"event": "download", "name": name, "progress": 0.5})
-        return {"installed": True}
-    rpc.models.install = Mock(side_effect=install)
     rpc.handle('{"id":4,"method":"models.install","params":{"name":"tiny.en"}}')
-    messages = [json.loads(line) for line in out.getvalue().splitlines()]
-    assert messages[0]["event"] == "download"
-    assert messages[1]["id"] == 4 and messages[1]["ok"]
+    reply = json.loads(out.getvalue())
+    assert reply["id"] == 4 and not reply["ok"]
+    assert "managed by the Murmur app" in reply["error"]["message"]
 
 
 def test_remove_unloads_selected_model(models: Models) -> None:

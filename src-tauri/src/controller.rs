@@ -25,6 +25,8 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 
 pub enum Action {
+    /// A component was installed, removed or migrated: reload what depends on it.
+    ComponentsChanged(crate::components::manifest::Kind),
     Start,
     StartCode,
     ToggleCode,
@@ -812,6 +814,28 @@ impl Controller {
                 state.update(json!({"overlay":{"enabled":!state.config()?.overlay.enabled}}))?;
             }
             Action::Reload => state.reload()?,
+            Action::ComponentsChanged(kind) => {
+                use crate::components::manifest::Kind;
+                match kind {
+                    Kind::Engine | Kind::Cuda => state.engine.restart(),
+                    Kind::EnhanceModel => {
+                        state.enhance.service.refresh(&self.config.enhance.model);
+                        state.enhance.refresh_overlay(state);
+                    }
+                    Kind::SpeechModel => {}
+                }
+                if kind != Kind::EnhanceModel && !self.active {
+                    match state.refresh_engine() {
+                        Ok(result) if result["model_available"].as_bool() == Some(true) => {
+                            warm_engine(&state.app, &self.config)
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::info!(%error, "Engine status after component change")
+                        }
+                    }
+                }
+            }
             Action::Rewrite(observed) => {
                 if observed.is_some() && !self.active && state.status()?.state != "transcribing" {
                     let _ = state.enhance.rewrite_observed(state, observed);

@@ -121,6 +121,12 @@
   /* Enhance settings card. */
   --enhance-model-inset: var(--sp-4) var(--sp-5); --enhance-model-gap: var(--sp-1);
   --enhance-model-name-size: var(--fs-14); --enhance-statement-inset: var(--sp-4) var(--sp-5) 0;
+  /* First-run setup and the Components page. */
+  --setup-max-w: 680px; --setup-inset: var(--sp-10) var(--sp-6); --setup-gap: var(--sp-5);
+  --setup-title-size: 28px; --setup-lead-size: var(--fs-17); --choice-inset: var(--sp-4);
+  --choice-radius: var(--r-md); --choice-gap: var(--sp-3); --choice-title-size: var(--fs-15);
+  --summary-gap: var(--sp-2) var(--sp-6); --component-inset: var(--sp-4) var(--sp-5); --component-gap: var(--sp-2);
+  --setup-points-inset: 0 0 0 var(--sp-5);
 
 }
 :root {

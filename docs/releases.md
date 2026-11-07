@@ -21,22 +21,36 @@ Do not reuse a published version or move its tag. Fixes need a new version.
 `release.yml` validates versions and creates a draft. Linux and Flipper builds
 upload directly to that draft, so publication does not depend on Actions artifact
 storage. Both builds must succeed. The Linux job freezes the onedir engine, fails if it
-references cuDNN or NVRTC, bundles typing utilities, client libraries, the engine
-and pinned cuBLAS, then verifies the AppImage, the `.deb` (system dependencies
-plus engine and cuBLAS) and the size budgets, and writes a size table to the job
-summary. Tag builds require a trusted compatible NVIDIA GPU and an offline
-staged `distil-small.en` model at `MURMUR_GPU_TEST_MODELS`. Real VAD-disabled
-inference produces `GPU-VALIDATION.json` tied to final Linux asset hashes. Missing
-hardware or model fails the tag job before upload. Pull request and manual jobs
-explicitly report the GPU gate skipped.
+references cuDNN or NVRTC, and builds two **component zips**: the engine
+(`murmur-engine-linux-x86_64-<ver>.zip`) and the cuBLAS-only GPU add-on
+(`murmur-cuda-linux-x86_64-<ver>.zip`). `scripts/components/make-manifest.py`
+writes `components-manifest.json` from those zips and the pinned Hugging Face
+model files in `scripts/components/provenance.toml`. The first job signs it with a
+throwaway key and runs every test: the app packages (AppImage, `.deb`, tar.gz,
+none of which contain the engine or CUDA), component installs through the app's
+own verifier, startup with and without an engine, the offline Docker clean
+install, and the size budgets.
+
+On tags, and only when the release key is configured
+([signing.md](signing.md)), the `release` job runs in the protected
+`release-signing` environment: it rebuilds, signs the manifest with the release
+subkey, embeds it, repeats the tests, and requires a trusted compatible NVIDIA GPU
+and an offline staged `distil-small.en` model at `MURMUR_GPU_TEST_MODELS`. Real
+inference with the installed engine and GPU add-on produces `GPU-VALIDATION.json`
+tied to the final asset hashes. Missing hardware or model fails the tag job before
+upload. Without the release key nothing is uploaded.
 
 The final job downloads every asset and runs `scripts/check-release.py`. It
-requires the portable archive, `.deb`, AppImage, version-matched `.fap`, and
-`GPU-VALIDATION.json`. Loose app and engine files are not release assets.
-The Linux build checks that the portable archive contains only the AppImage,
-executable, as `murmur`. The final job checks the archive layout, AppImage
-match, GPU evidence hashes, and per-asset size budgets (AppImage
-700 MiB and `.deb` 550 MiB, tar.gz 710 MiB, while the engine and cuBLAS are still bundled). It generates and
+requires the portable archive, `.deb`, AppImage, version-matched `.fap`,
+`GPU-VALIDATION.json`, both component zips, `components-manifest.json`, its
+`.sig` and `murmur-release.asc`. Loose app and engine files are not release assets.
+The manifest's zip URLs must point at this same release, with matching sizes and
+SHA-256; model files must come from `huggingface.co`. The signature must verify
+against the certificate and its primary fingerprint must equal
+`MURMUR_RELEASE_TRUST_FINGERPRINT`. The final job also checks the archive layout,
+AppImage match, GPU evidence hashes (cuBLAS loaded from the installed add-on), and
+per-asset size budgets: AppImage 125 MiB, `.deb` 125 MiB, tar.gz 130 MiB, engine zip
+130 MiB, CUDA zip 520 MiB, manifest/signature/certificate 1 MiB. It generates and
 verifies `SHA256SUMS`, uploads it, and leaves the release as a draft for testing. Unexpected or missing
 files block publication. Record three short deliveries for each terminal/editor
 and overlay on/off combination, with hotkey and companion triggers where
@@ -54,7 +68,10 @@ still a draft. A published release cannot be overwritten by the prepare job.
 `ubuntu-22.04`. The machine needs the native Linux build dependencies, Python,
 Node, Rust, GitHub CLI, and sufficient disk space. Linux engine builds use
 CPython 3.12 and the checked-in wheel hash lock; release validation uses Python
-3.11 or later. Set `MURMUR_GPU_TEST_MODELS` only on the trusted GPU runner.
+3.11 or later. Set `MURMUR_GPU_TEST_MODELS` only on the trusted GPU runner, and
+`MURMUR_CLEAN_TEST_MODEL` (a staged `distil-small.en` folder) where Docker is
+available for the offline clean-install test. `MURMUR_RELEASE_TRUST_FINGERPRINT`
+and the `release-signing` environment are described in [signing.md](signing.md).
 
 Flipper is required and no longer gated by `ENABLE_FLIPPER`. Windows development
 CI remains behind `ENABLE_WINDOWS`; it is not called by today's release workflow.

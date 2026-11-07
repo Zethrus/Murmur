@@ -1,0 +1,378 @@
+# Inputs for scripts/components/make-manifest.py. Every downloadable component's source,
+# licence and provenance lives here; make-manifest.py adds sizes and SHA-256 of the built zips.
+# Speech and Enhance model files are pinned to a Hugging Face commit by
+# scripts/components/pin-models.py (sizes and SHA-256 per file, recorded 2026-11-06).
+# memory_mb is an estimate, not a measurement: ceil(model.bin MiB x 1.2 + 200).
+
+[components.engine]
+kind = "engine"
+os = "linux"
+arch = "x86_64"
+archive = "zip"
+zip = "murmur-engine-linux-x86_64-{version}.zip"
+display_name = "Speech engine"
+description = "Local speech recognition (faster-whisper, CTranslate2, Silero VAD). Required for dictation."
+license = { name = "GPL-3.0-only (Murmur) with bundled third-party notices", url = "https://github.com/Zethrus/Murmur/blob/master/LICENSE" }
+provenance = { type = "murmur_attested_only", source_url = "https://github.com/Zethrus/Murmur", note = "Frozen with PyInstaller from engine/requirements-linux-release.txt (pip --require-hashes); no upstream signature exists for the PyPI wheels." }
+
+[components.cuda]
+kind = "cuda"
+os = "linux"
+arch = "x86_64"
+archive = "zip"
+zip = "murmur-cuda-linux-x86_64-{version}.zip"
+depends = ["engine"]
+display_name = "NVIDIA GPU acceleration"
+description = "cuBLAS runtime for CUDA inference on NVIDIA GPUs. Needs an NVIDIA driver; not needed for CPU dictation."
+license = { name = "NVIDIA CUDA Toolkit EULA (redistributable cuBLAS)", url = "https://docs.nvidia.com/cuda/eula/index.html" }
+provenance = { type = "murmur_attested_only", source_url = "https://pypi.org/project/nvidia-cublas-cu12/", note = "libcublas.so.12 and libcublasLt.so.12 from the nvidia-cublas-cu12 wheel pinned by SHA-256 in engine/requirements-linux-release.txt; NVIDIA publishes no detached signature." }
+
+# Windows entries are placeholders for PR-C: make-manifest.py skips a platform whose zip is absent.
+[components.engine-windows]
+id = "engine"
+kind = "engine"
+os = "windows"
+arch = "x86_64"
+archive = "zip"
+zip = "murmur-engine-windows-x86_64-{version}.zip"
+placeholder = true
+display_name = "Speech engine"
+description = "Local speech recognition (faster-whisper, CTranslate2, Silero VAD). Required for dictation."
+license = { name = "GPL-3.0-only (Murmur) with bundled third-party notices", url = "https://github.com/Zethrus/Murmur/blob/master/LICENSE" }
+provenance = { type = "murmur_attested_only", source_url = "https://github.com/Zethrus/Murmur", note = "Windows engine: filled in by PR-C." }
+
+[components.cuda-windows]
+id = "cuda"
+kind = "cuda"
+os = "windows"
+arch = "x86_64"
+archive = "zip"
+zip = "murmur-cuda-windows-x86_64-{version}.zip"
+depends = ["engine"]
+placeholder = true
+display_name = "NVIDIA GPU acceleration"
+description = "cuBLAS runtime for CUDA inference on NVIDIA GPUs."
+license = { name = "NVIDIA CUDA Toolkit EULA (redistributable cuBLAS)", url = "https://docs.nvidia.com/cuda/eula/index.html" }
+provenance = { type = "murmur_attested_only", source_url = "https://pypi.org/project/nvidia-cublas-cu12/", note = "Windows cuBLAS: filled in by PR-C." }
+
+[components."speech-tiny.en"]
+kind = "speech-model"
+os = "all"
+arch = "x86_64"
+archive = "none"
+version = "0d3d19a32d33"
+model = "tiny.en"
+display_name = "Tiny (English)"
+description = "Smallest and fastest; fine for short, clear dictation."
+quality = "Basic"
+speed = "Fastest"
+memory_mb = 287
+languages = "en"
+license = { name = "MIT", url = "https://huggingface.co/Systran/faster-whisper-tiny.en" }
+provenance = { type = "murmur_attested_only", source_url = "https://huggingface.co/Systran/faster-whisper-tiny.en", source_revision = "0d3d19a32d3338f10357c0889762bd8d64bbdeba", note = "Hugging Face publishes no signature; files pinned to the commit with SHA-256 from the Hub's LFS metadata." }
+
+[[components."speech-tiny.en".files]]
+name = "config.json"
+url = "https://huggingface.co/Systran/faster-whisper-tiny.en/resolve/0d3d19a32d3338f10357c0889762bd8d64bbdeba/config.json"
+size_bytes = 2317
+sha256 = "14b1b421a90349bc551b881461426b561a874049cb9e4c4864f2ca384f6a7cc5"
+
+[[components."speech-tiny.en".files]]
+name = "model.bin"
+url = "https://huggingface.co/Systran/faster-whisper-tiny.en/resolve/0d3d19a32d3338f10357c0889762bd8d64bbdeba/model.bin"
+size_bytes = 75537502
+sha256 = "1a5afae06a4db91c975c9a9d78be5cc110ee4ea022ad57d55492e4550e936b2a"
+
+[[components."speech-tiny.en".files]]
+name = "tokenizer.json"
+url = "https://huggingface.co/Systran/faster-whisper-tiny.en/resolve/0d3d19a32d3338f10357c0889762bd8d64bbdeba/tokenizer.json"
+size_bytes = 2128466
+sha256 = "929c5252409436dce1b38a75d1abbcb5e132d170d8e324e4e04ed915fa2d22df"
+
+[[components."speech-tiny.en".files]]
+name = "vocabulary.txt"
+url = "https://huggingface.co/Systran/faster-whisper-tiny.en/resolve/0d3d19a32d3338f10357c0889762bd8d64bbdeba/vocabulary.txt"
+size_bytes = 422309
+sha256 = "ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf"
+
+[components."speech-base.en"]
+kind = "speech-model"
+os = "all"
+arch = "x86_64"
+archive = "none"
+version = "3d3d5dee2648"
+model = "base.en"
+display_name = "Base (English)"
+description = "Small and quick with better accuracy than Tiny."
+quality = "Good"
+speed = "Very fast"
+memory_mb = 367
+languages = "en"
+license = { name = "MIT", url = "https://huggingface.co/Systran/faster-whisper-base.en" }
+provenance = { type = "murmur_attested_only", source_url = "https://huggingface.co/Systran/faster-whisper-base.en", source_revision = "3d3d5dee26484f91867d81cb899cfcf72b96be6c", note = "Hugging Face publishes no signature; files pinned to the commit with SHA-256 from the Hub's LFS metadata." }
+
+[[components."speech-base.en".files]]
+name = "config.json"
+url = "https://huggingface.co/Systran/faster-whisper-base.en/resolve/3d3d5dee26484f91867d81cb899cfcf72b96be6c/config.json"
+size_bytes = 2227
+sha256 = "f3bc3821e9fc76a27bae538e11ae5b677dcdd352b4600429ce7951d398569aeb"
+
+[[components."speech-base.en".files]]
+name = "model.bin"
+url = "https://huggingface.co/Systran/faster-whisper-base.en/resolve/3d3d5dee26484f91867d81cb899cfcf72b96be6c/model.bin"
+size_bytes = 145216508
+sha256 = "2a166925539a16005f14ff328359f9b9adb9dc4fb631bb3b227526862e93e2ef"
+
+[[components."speech-base.en".files]]
+name = "tokenizer.json"
+url = "https://huggingface.co/Systran/faster-whisper-base.en/resolve/3d3d5dee26484f91867d81cb899cfcf72b96be6c/tokenizer.json"
+size_bytes = 2128466
+sha256 = "929c5252409436dce1b38a75d1abbcb5e132d170d8e324e4e04ed915fa2d22df"
+
+[[components."speech-base.en".files]]
+name = "vocabulary.txt"
+url = "https://huggingface.co/Systran/faster-whisper-base.en/resolve/3d3d5dee26484f91867d81cb899cfcf72b96be6c/vocabulary.txt"
+size_bytes = 422309
+sha256 = "ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf"
+
+[components."speech-small.en"]
+kind = "speech-model"
+os = "all"
+arch = "x86_64"
+archive = "none"
+version = "d1d751a5f827"
+model = "small.en"
+display_name = "Small (English)"
+description = "Balanced accuracy for everyday dictation."
+quality = "Better"
+speed = "Moderate on CPU"
+memory_mb = 754
+languages = "en"
+license = { name = "MIT", url = "https://huggingface.co/Systran/faster-whisper-small.en" }
+provenance = { type = "murmur_attested_only", source_url = "https://huggingface.co/Systran/faster-whisper-small.en", source_revision = "d1d751a5f8271d482d14ca55d9e2deeebbae577f", note = "Hugging Face publishes no signature; files pinned to the commit with SHA-256 from the Hub's LFS metadata." }
+
+[[components."speech-small.en".files]]
+name = "config.json"
+url = "https://huggingface.co/Systran/faster-whisper-small.en/resolve/d1d751a5f8271d482d14ca55d9e2deeebbae577f/config.json"
+size_bytes = 2657
+sha256 = "666a9605530ac1f61fa8177f3702b4dacec9966749e42610839fcc32661d5fae"
+
+[[components."speech-small.en".files]]
+name = "model.bin"
+url = "https://huggingface.co/Systran/faster-whisper-small.en/resolve/d1d751a5f8271d482d14ca55d9e2deeebbae577f/model.bin"
+size_bytes = 483545366
+sha256 = "62b2a45b05ee59acb4a5341b33ee35e041395d378d418a18acfe4c9e768ee37a"
+
+[[components."speech-small.en".files]]
+name = "tokenizer.json"
+url = "https://huggingface.co/Systran/faster-whisper-small.en/resolve/d1d751a5f8271d482d14ca55d9e2deeebbae577f/tokenizer.json"
+size_bytes = 2128466
+sha256 = "929c5252409436dce1b38a75d1abbcb5e132d170d8e324e4e04ed915fa2d22df"
+
+[[components."speech-small.en".files]]
+name = "vocabulary.txt"
+url = "https://huggingface.co/Systran/faster-whisper-small.en/resolve/d1d751a5f8271d482d14ca55d9e2deeebbae577f/vocabulary.txt"
+size_bytes = 422309
+sha256 = "ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf"
+
+[components."speech-distil-small.en"]
+kind = "speech-model"
+os = "all"
+arch = "x86_64"
+archive = "none"
+version = "ef77d90526cc"
+model = "distil-small.en"
+display_name = "Distil Small (English)"
+description = "Recommended default: near Small accuracy at a fraction of the cost."
+quality = "Better"
+speed = "Fast"
+memory_mb = 581
+languages = "en"
+license = { name = "MIT", url = "https://huggingface.co/Systran/faster-distil-whisper-small.en" }
+provenance = { type = "murmur_attested_only", source_url = "https://huggingface.co/Systran/faster-distil-whisper-small.en", source_revision = "ef77d90526ccd62cde3808ee70626a01e5cf83e4", note = "Hugging Face publishes no signature; files pinned to the commit with SHA-256 from the Hub's LFS metadata." }
+
+[[components."speech-distil-small.en".files]]
+name = "config.json"
+url = "https://huggingface.co/Systran/faster-distil-whisper-small.en/resolve/ef77d90526ccd62cde3808ee70626a01e5cf83e4/config.json"
+size_bytes = 2812
+sha256 = "b571ae8022a34c1df50876a65b5f813a5c22e5ee3b87bc0e4db5662dfc9c2c3d"
+
+[[components."speech-distil-small.en".files]]
+name = "model.bin"
+url = "https://huggingface.co/Systran/faster-distil-whisper-small.en/resolve/ef77d90526ccd62cde3808ee70626a01e5cf83e4/model.bin"
+size_bytes = 332308257
+sha256 = "1187de3982cdcf962a2fb8f797e429fb4651b875b18fe9ce50b58b52fc9072b7"
+
+[[components."speech-distil-small.en".files]]
+name = "preprocessor_config.json"
+url = "https://huggingface.co/Systran/faster-distil-whisper-small.en/resolve/ef77d90526ccd62cde3808ee70626a01e5cf83e4/preprocessor_config.json"
+size_bytes = 339
+sha256 = "a6a76d28c93edb273669eb9e0b0636a2bddbb1272c3261e47b7ca6dfdbac1b8d"
+
+[[components."speech-distil-small.en".files]]
+name = "tokenizer.json"
+url = "https://huggingface.co/Systran/faster-distil-whisper-small.en/resolve/ef77d90526ccd62cde3808ee70626a01e5cf83e4/tokenizer.json"
+size_bytes = 2405466
+sha256 = "c9c77688528c0509abbd41873edab16384b8f041531b1d3092ab4d1d83a02a50"
+
+[[components."speech-distil-small.en".files]]
+name = "vocabulary.json"
+url = "https://huggingface.co/Systran/faster-distil-whisper-small.en/resolve/ef77d90526ccd62cde3808ee70626a01e5cf83e4/vocabulary.json"
+size_bytes = 825480
+sha256 = "4dadfee7c4a871665f65c06037f5f5ec893fb2d7f5eb4cf11063618e31dbe11a"
+
+[components."speech-distil-large-v3"]
+kind = "speech-model"
+os = "all"
+arch = "x86_64"
+archive = "none"
+version = "c3058b475261"
+model = "distil-large-v3"
+display_name = "Distil Large v3 (English)"
+description = "High accuracy for English; best with an NVIDIA GPU."
+quality = "High"
+speed = "Moderate (GPU recommended)"
+memory_mb = 1932
+languages = "en"
+license = { name = "MIT", url = "https://huggingface.co/Systran/faster-distil-whisper-large-v3" }
+provenance = { type = "murmur_attested_only", source_url = "https://huggingface.co/Systran/faster-distil-whisper-large-v3", source_revision = "c3058b475261292e64a0412df1d2681c06260fab", note = "Hugging Face publishes no signature; files pinned to the commit with SHA-256 from the Hub's LFS metadata." }
+
+[[components."speech-distil-large-v3".files]]
+name = "config.json"
+url = "https://huggingface.co/Systran/faster-distil-whisper-large-v3/resolve/c3058b475261292e64a0412df1d2681c06260fab/config.json"
+size_bytes = 2690
+sha256 = "90c55f775cc4e0bb17293d0bf12f96557a486f20dea886fabd8e6075a3588b21"
+
+[[components."speech-distil-large-v3".files]]
+name = "model.bin"
+url = "https://huggingface.co/Systran/faster-distil-whisper-large-v3/resolve/c3058b475261292e64a0412df1d2681c06260fab/model.bin"
+size_bytes = 1512927867
+sha256 = "b79368e19b6623813609431a6e5ee309a71506701ebc49fd7820e692dec7c5f5"
+
+[[components."speech-distil-large-v3".files]]
+name = "preprocessor_config.json"
+url = "https://huggingface.co/Systran/faster-distil-whisper-large-v3/resolve/c3058b475261292e64a0412df1d2681c06260fab/preprocessor_config.json"
+size_bytes = 340
+sha256 = "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+
+[[components."speech-distil-large-v3".files]]
+name = "tokenizer.json"
+url = "https://huggingface.co/Systran/faster-distil-whisper-large-v3/resolve/c3058b475261292e64a0412df1d2681c06260fab/tokenizer.json"
+size_bytes = 2480617
+sha256 = "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca"
+
+[[components."speech-distil-large-v3".files]]
+name = "vocabulary.json"
+url = "https://huggingface.co/Systran/faster-distil-whisper-large-v3/resolve/c3058b475261292e64a0412df1d2681c06260fab/vocabulary.json"
+size_bytes = 1068114
+sha256 = "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+
+[components."speech-large-v3"]
+kind = "speech-model"
+os = "all"
+arch = "x86_64"
+archive = "none"
+version = "edaa852ec7e1"
+model = "large-v3"
+display_name = "Large v3 (multilingual)"
+description = "Highest accuracy, 99 languages and translation; slow without a GPU."
+quality = "Highest"
+speed = "Slow on CPU"
+memory_mb = 3734
+languages = "multilingual"
+license = { name = "MIT", url = "https://huggingface.co/Systran/faster-whisper-large-v3" }
+provenance = { type = "murmur_attested_only", source_url = "https://huggingface.co/Systran/faster-whisper-large-v3", source_revision = "edaa852ec7e145841d8ffdb056a99866b5f0a478", note = "Hugging Face publishes no signature; files pinned to the commit with SHA-256 from the Hub's LFS metadata." }
+
+[[components."speech-large-v3".files]]
+name = "config.json"
+url = "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/config.json"
+size_bytes = 2394
+sha256 = "a9306624f5ec14270a014b647e5c316b6e03a662c369758d1b90697a7b0655b9"
+
+[[components."speech-large-v3".files]]
+name = "model.bin"
+url = "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/model.bin"
+size_bytes = 3087284237
+sha256 = "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1"
+
+[[components."speech-large-v3".files]]
+name = "preprocessor_config.json"
+url = "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/preprocessor_config.json"
+size_bytes = 340
+sha256 = "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+
+[[components."speech-large-v3".files]]
+name = "tokenizer.json"
+url = "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/tokenizer.json"
+size_bytes = 2480617
+sha256 = "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca"
+
+[[components."speech-large-v3".files]]
+name = "vocabulary.json"
+url = "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/vocabulary.json"
+size_bytes = 1068114
+sha256 = "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+
+[components."speech-large-v3-turbo"]
+kind = "speech-model"
+os = "all"
+arch = "x86_64"
+archive = "none"
+version = "0a363e9161cb"
+model = "large-v3-turbo"
+display_name = "Large v3 Turbo (multilingual)"
+description = "Multilingual with near Large v3 accuracy and much faster decoding."
+quality = "High"
+speed = "Fast on GPU"
+memory_mb = 2052
+languages = "multilingual"
+license = { name = "MIT", url = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo" }
+provenance = { type = "murmur_attested_only", source_url = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo", source_revision = "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf", note = "Third-party conversion by dropbox-dash (not Systran). Hugging Face publishes no signature; files pinned to the commit with SHA-256 from the Hub's LFS metadata." }
+
+[[components."speech-large-v3-turbo".files]]
+name = "config.json"
+url = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/config.json"
+size_bytes = 2263
+sha256 = "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e"
+
+[[components."speech-large-v3-turbo".files]]
+name = "model.bin"
+url = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/model.bin"
+size_bytes = 1617884929
+sha256 = "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"
+
+[[components."speech-large-v3-turbo".files]]
+name = "preprocessor_config.json"
+url = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/preprocessor_config.json"
+size_bytes = 340
+sha256 = "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+
+[[components."speech-large-v3-turbo".files]]
+name = "tokenizer.json"
+url = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/tokenizer.json"
+size_bytes = 2710337
+sha256 = "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"
+
+[[components."speech-large-v3-turbo".files]]
+name = "vocabulary.json"
+url = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/vocabulary.json"
+size_bytes = 1068114
+sha256 = "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+
+[components."enhance-qwen3-1.7b-q4_k_m"]
+kind = "enhance-model"
+os = "all"
+arch = "x86_64"
+archive = "none"
+version = "d7f544eead69"
+model = "qwen3-1.7b-q4_k_m"
+display_name = "Qwen3 1.7B (Q4_K_M)"
+description = "Optional local rewriting model for Enhance. Runs on the CPU; never needed for dictation."
+license = { name = "Apache-2.0", url = "https://huggingface.co/Qwen/Qwen3-1.7B" }
+provenance = { type = "murmur_attested_only", source_url = "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF", source_revision = "d7f544eead698dbd1f15126ef60b45a1e1933222", note = "Third-party GGUF quantisation by unsloth of Qwen/Qwen3-1.7B; pinned commit and SHA-256 (same digest as enhance/catalog.rs)." }
+
+[[components."enhance-qwen3-1.7b-q4_k_m".files]]
+name = "model.gguf"
+url = "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/d7f544eead698dbd1f15126ef60b45a1e1933222/Qwen3-1.7B-Q4_K_M.gguf"
+size_bytes = 1107409472
+sha256 = "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897"

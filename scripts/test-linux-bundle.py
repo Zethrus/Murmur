@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Check the shipped AppImage, .deb and portable archive built by bundle-linux-runtime.py."""
+"""Check the shipped AppImage, .deb and portable archive built by bundle-linux-runtime.py,
+then install the engine and CUDA add-on components through the app and check those."""
 import importlib.util
 import hashlib
 import json
@@ -8,12 +9,11 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import tarfile
 import tempfile
-from linux_cuda_runtime import CUDA, verify as verify_cuda
+import linux_components
+from linux_cuda_runtime import REQUIRED as CUDA_LIBRARIES, sha256
 
 HERE = Path(__file__).resolve().parent
-ENGINE = Path("usr/lib/murmur/engine/murmur-engine")
 
 
 def _load(name, file):
@@ -54,58 +54,94 @@ def stripped(path):
     return '.symtab' not in sections
 
 
-def check_engine(root, work, env):
-    engine = root / ENGINE
+def check_engine(engine, work):
+    """The installed engine component: executable, cuDNN-free, answers RPC, never downloads."""
     assert engine.is_file() and os.access(engine, os.X_OK), engine
     engine_gate.check(engine.parent)
-    requests = [{'id': 1, 'method': 'ping'}, {'id': 2, 'method': 'models.list'}, {'id': 3, 'method': 'shutdown'}]
+    requests = [{'id': 1, 'method': 'ping'}, {'id': 2, 'method': 'models.install', 'params': {'name': 'tiny.en'}},
+                {'id': 3, 'method': 'shutdown'}]
+    env = {'PATH': '/usr/bin:/bin', 'HOME': str(work)}
     result = run(str(engine), '--models-dir', str(work / 'models'),
                  input=''.join(json.dumps(request) + '\n' for request in requests),
                  env=env, capture_output=True, timeout=60)
     replies = [json.loads(line) for line in result.stdout.splitlines()]
-    assert len(replies) == 3 and all(reply['ok'] for reply in replies), replies
+    assert len(replies) == 3, replies
     assert replies[0]['result'] == {'pong': True}
-    assert all(not model['installed'] for model in replies[1]['result'])
+    assert not replies[1]['ok'] and 'managed by the Murmur app' in replies[1]['error']['message'], replies[1]
     assert replies[2]['result'] == {'shutdown': True}
+
+
+def check_cuda(cuda):
+    """The installed CUDA add-on: exactly cuBLAS, hashes per its manifest, NEEDED resolved inside."""
+    manifest = json.loads((cuda / 'cuda-manifest.json').read_text())
+    shipped = {p.name for p in cuda.iterdir()}
+    assert shipped == CUDA_LIBRARIES | {'cuda-manifest.json', 'nvidia-cublas-cu12.License.txt'}, shipped
+    assert set(manifest['files']) == CUDA_LIBRARIES
+    for name, digest in manifest['files'].items():
+        assert sha256(cuda / name) == digest, name
+    for name in CUDA_LIBRARIES:
+        linked = run('ldd', str(cuda / name), env={'LD_LIBRARY_PATH': str(cuda)}, capture_output=True).stdout
+        assert 'not found' not in linked, linked
+        for line in linked.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[0].startswith(('libcu', 'libnv')) and not parts[0].startswith('libcuda.so'):
+                assert Path(parts[2]).is_relative_to(cuda), line
+    return manifest
+
+
+def check_components(app, components, work):
+    """Install from the release zips exactly as a user would, then refuse tampered input."""
+    env = linux_components.environment(work / 'home', components)
+    installed = linux_components.install_release(app, components, env)
+    assert set(installed) == {'engine', 'cuda'}, installed
+    check_engine(installed['engine'] / 'murmur-engine', work)
+    check_cuda(installed['cuda'])
+    # A modified archive matches no signed component; a foreign trust root verifies nothing.
+    engine_zip, = components.glob('murmur-engine-linux-x86_64-*.zip')
+    tampered = work / engine_zip.name
+    data = bytearray(engine_zip.read_bytes())
+    data[len(data) // 2] ^= 0xFF
+    tampered.write_bytes(bytes(data))
+    assert linux_components.install(app, components, tampered, env, check=False) is None
+    strange = dict(env, MURMUR_DEV_TRUST_ROOT=str(work / 'missing.asc'))
+    assert linux_components.install(app, components, engine_zip, strange, check=False) is None
+    without_ack = {k: v for k, v in env.items() if k != 'MURMUR_DEV_TRUST_ROOT_ACK'}
+    assert linux_components.install(app, components, engine_zip, without_ack, check=False) is None, \
+        'a release binary must ignore a development trust root without the acknowledgement'
+    return installed
 
 
 def check_appimage(image, work):
     run(str(image), '--appimage-extract', cwd=work, stdout=subprocess.DEVNULL)
     root = work / 'squashfs-root'
-    manifest = verify_cuda(root)
+    for absent in ('usr/lib/murmur/engine', 'usr/lib/murmur/cuda', 'usr/bin/murmur-engine'):
+        assert not (root / absent).exists(), f'{absent} must be a downloadable component, not packaged'
     env = dict(os.environ, LD_LIBRARY_PATH=str(root / 'usr/lib'))
     for name in ('murmur', 'xdotool', 'xprop'):
         executable = root / 'usr/bin' / name
         assert executable.is_file() and os.access(executable, os.X_OK), name
         linked = run('ldd', str(executable), env=env, capture_output=True).stdout
         assert 'not found' not in linked, linked
-    assert not (root / 'usr/bin/murmur-engine').exists(), 'Engine belongs in usr/lib/murmur/engine'
     for name in ('murmur', 'murmur-companion-client'):
         assert stripped(root / 'usr/bin' / name), f'{name} is not stripped'
     run(str(root / 'usr/bin/xdotool'), '--version', env=env)
     if env.get('DISPLAY'):
         run(str(root / 'usr/bin/xprop'), '-version', env=env)
-    check_engine(root, work, env)
     assert (root / 'usr/lib/libxdo.so.3').is_file()
     assert (root / 'usr/lib/libasound.so.2').is_file()
     assert (root / 'usr/share/doc/murmur/bundled-runtime/xdotool.copyright').is_file()
     assert not duplicate_libraries(root / 'usr/lib'), duplicate_libraries(root / 'usr/lib')
-    return root, manifest
+    return root
 
 
-def check_deb(deb, root, manifest, work):
+def check_deb(deb, work):
     package = work / 'deb'
     run('dpkg-deb', '-x', str(deb), str(package))
     assert not (package / 'opt').exists(), 'The .deb must not carry a bundled /opt runtime'
+    assert not (package / 'usr/lib/murmur').exists(), 'The .deb carries only the app; engine and CUDA are components'
     assert stripped(package / 'usr/bin/murmur')
-    for relative in ('usr/lib/murmur/engine', CUDA):
-        files = {p.relative_to(root / relative) for p in (root / relative).rglob('*') if p.is_file()}
-        assert files == {p.relative_to(package / relative) for p in (package / relative).rglob('*') if p.is_file()}, relative
-        for file in files:
-            assert digest(root / relative / file) == digest(package / relative / file), file
-    assert verify_cuda(package) == manifest
     # Extraction runs as the owner, so check modes rather than access.
-    for directory in (p for base in ('usr/lib/murmur', 'usr/share/doc/murmur') for p in (package / base).rglob('*') if p.is_dir() and not p.is_symlink()):
+    for directory in (p for p in (package / 'usr').rglob('*') if p.is_dir() and not p.is_symlink()):
         assert directory.stat().st_mode & 0o777 == 0o755, f'{directory}: {directory.stat().st_mode & 0o777:o}'
     depends = run('dpkg-deb', '-f', str(deb), 'Depends', capture_output=True).stdout
     for needed in ('libwebkit2gtk-4.1-0', 'xdotool', 'x11-utils', 'libayatana-appindicator3-1'):
@@ -116,8 +152,8 @@ def check_deb(deb, root, manifest, work):
     run(sys.executable, str(HERE / 'test-linux-startup.py'), str(package / 'usr/bin/murmur'), timeout=180)
 
 
-def check(directory):
-    directory = directory.resolve()
+def check(directory, components):
+    directory, components = directory.resolve(), components.resolve()
     image, = directory.glob('*.AppImage')
     deb, = directory.glob('*.deb')
     assert {path.name for path in directory.iterdir()} == {
@@ -125,12 +161,16 @@ def check(directory):
     }, 'Linux output must contain only the AppImage, Debian package, and portable archive'
     release.check_budgets(sorted(directory.iterdir()))
     release.check_portable(directory / 'murmur-linux-x86_64.tar.gz', image)
+    release.check_budgets(sorted(p for p in components.iterdir() if p.is_file()))
     with tempfile.TemporaryDirectory(prefix='murmur-bundle-test-') as temporary:
         work = Path(temporary)
-        root, manifest = check_appimage(image, work)
-        check_deb(deb, root, manifest, work)
-    print('AppImage, portable archive, engine, cuBLAS runtime and Debian package verified.')
+        root = check_appimage(image, work)
+        check_components(root / 'usr/bin/murmur', components, work)
+        check_deb(deb, work)
+    print('AppImage, portable archive, Debian package, and engine + cuBLAS components verified.')
 
 
 if __name__ == '__main__':
-    check(Path(sys.argv[1]))
+    if len(sys.argv) != 3:
+        sys.exit('usage: test-linux-bundle.py <linux artifacts dir> <components dir>')
+    check(Path(sys.argv[1]), Path(sys.argv[2]))

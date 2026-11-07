@@ -36,3 +36,8 @@ Thumbs.db
 /.cargo/config.toml
 
 .venv-flipper/
+# Signing keys and keyrings never belong in the repository (docs/signing.md).
+*.gpg
+*.kbx
+secring*
+private-keys-v1.d/
