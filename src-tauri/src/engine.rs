@@ -703,14 +703,9 @@ impl Engine {
         })
     }
     /// Stop the engine and keep it stopped until `restart` (blocking, bounded at 20 s).
-    /// True once the supervisor confirms no engine process is left (it waits for the child to
-    /// exit), or when the supervisor is gone and so is its child.
+    /// True only when no engine process is left: see `request_stop`.
     pub fn stop_and_wait(&self) -> bool {
-        let (done, wait) = mpsc::channel();
-        if self.sender.send(Message::Stop(done)).is_err() {
-            return true;
-        }
-        wait.recv_timeout(Duration::from_secs(20)).is_ok()
+        request_stop(&self.sender, &self.alive, Duration::from_secs(20))
     }
     /// Spawn again with the current files: the reset path after a component change.
     pub fn restart(&self) {
@@ -762,6 +757,17 @@ impl Engine {
         }
     }
 }
+/// Ask the supervisor to stop the engine and wait up to `timeout` for its confirmation (it
+/// replies after the child has exited). If the supervisor is already gone, a failed send proves
+/// nothing about the child: only the supervisor's own exit path clears `alive`, after shutting
+/// the child down, so that flag is the answer. Engine files are switched only on `true`.
+fn request_stop(sender: &mpsc::Sender<Message>, alive: &AtomicBool, timeout: Duration) -> bool {
+    let (done, wait) = mpsc::channel();
+    if sender.send(Message::Stop(done)).is_err() {
+        return !alive.load(Ordering::Acquire);
+    }
+    wait.recv_timeout(timeout).is_ok()
+}
 /// Requests that name a model carry the verified directory (or null) from the store.
 fn attach_model_path(locate: &dyn Locate, method: &str, params: &mut Value) {
     if !matches!(method, "status" | "warm" | "transcribe" | "partial") {
@@ -790,6 +796,54 @@ fn shutdown_process(process: &mut Process, app: &AppHandle) {
         app,
         &AtomicBool::new(false),
     );
+}
+#[cfg(test)]
+mod stop_tests {
+    use super::{request_stop, Message};
+    use std::{
+        sync::{atomic::AtomicBool, mpsc},
+        thread,
+        time::Duration,
+    };
+
+    #[test]
+    fn stop_is_confirmed_only_by_the_supervisor_or_a_cleared_alive_flag() {
+        // Supervisor gone: the child may still be alive unless the supervisor cleared the flag.
+        let (sender, receiver) = mpsc::channel::<Message>();
+        drop(receiver);
+        assert!(!request_stop(
+            &sender,
+            &AtomicBool::new(true),
+            Duration::from_millis(10)
+        ));
+        assert!(request_stop(
+            &sender,
+            &AtomicBool::new(false),
+            Duration::from_millis(10)
+        ));
+
+        // Supervisor confirms after the child exited.
+        let (sender, receiver) = mpsc::channel::<Message>();
+        let supervisor = thread::spawn(move || {
+            if let Ok(Message::Stop(done)) = receiver.recv() {
+                done.send(()).unwrap();
+            }
+        });
+        assert!(request_stop(
+            &sender,
+            &AtomicBool::new(true),
+            Duration::from_secs(5)
+        ));
+        supervisor.join().unwrap();
+
+        // Supervisor alive but never confirms (stuck shutting the child down): not stopped.
+        let (sender, _receiver) = mpsc::channel::<Message>();
+        assert!(!request_stop(
+            &sender,
+            &AtomicBool::new(false),
+            Duration::from_millis(20)
+        ));
+    }
 }
 #[cfg(test)]
 mod model_path_tests {
