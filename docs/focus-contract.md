@@ -16,7 +16,8 @@ run on hardware**. Evidence is tracked in
      X11 IDs are not reused while the window exists, so the PID is not compared.
    - Windows: the foreground `HWND`, the owning process ID, and that process's
      creation time (`GetProcessTimes`), plus the executable name. HWNDs and PIDs
-     are reused; all three must match.
+     are reused; all three must match, and a PID whose start time could not be
+     read never matches.
    - One of Murmur's own windows (Settings, overlay) is "Own".
 2. **Deliver only to the identical target.** Just before typing or pasting,
    focus is read again (after any overlay drag has finished). If the identity is
@@ -33,7 +34,8 @@ run on hardware**. Evidence is tracked in
 4. **Never type into an unknown or blocked target.** These are held (or copied in
    `copy` mode), in every mode including `insert`:
    - the focused window cannot be read (no X11 display, `xprop` failure, no
-     foreground window);
+     foreground window); the held text then shows that error rather than
+     "focus changed";
    - Windows: the **secure desktop** has input (UAC prompt, lock screen,
      Ctrl+Alt+Del): `OpenInputDesktop` fails or the input desktop is not named
      `Default`;
@@ -99,13 +101,13 @@ run on hardware**. Evidence is tracked in
 | Rule | Unit test (Rust unless noted) | Manual check (Windows checklist) | Linux manual |
 | --- | --- | --- | --- |
 | 1 Identity, two windows of one app differ | `focus_guard::tests::two_windows_of_one_app_are_different_targets` | F2 | 0.4.7 X11 two-window test |
-| 1 Windows: HWND + PID + start time | `focus_guard::tests::reused_hwnd_with_another_process_is_a_different_target` | F3 (close and reopen Notepad mid-dictation) | — |
+| 1 Windows: HWND + PID + start time (a PID without a start time never matches) | `focus_guard::tests::reused_hwnd_with_another_process_is_a_different_target`, `windows_identity_without_start_time_never_matches` | F3 (close and reopen Notepad mid-dictation) | — |
 | 1 X11 ID parsing | `platform::focus_tests::active_window_id_parses_from_xprop` | — | covered |
 | 2 Same window always delivers | `focus_guard::tests::same_window_always_delivers` | F1 | covered |
 | 2 Focus read after drag release | `controller::…::delivery_target_reads_focus_after_wait_and_keeps_busy_until_drop`, `…_cleans_up_focus_errors_and_never_reads_after_barrier_failure` | F11 | covered |
 | 3 Modes hold/refocus/copy/insert | `focus_guard::tests::different_window_follows_mode`, `mode_spellings_round_trip` | F4–F7 | covered |
 | 3 Unknown or own origin | `focus_guard::tests::unknown_or_own_start_is_a_mismatch` | F8 | covered |
-| 4 Unknown current focus | `focus_guard::tests::unknown_current_focus_is_a_mismatch`, `insert_mode_never_types_into_an_unknown_target` | F9 | — |
+| 4 Unknown current focus (held text shows the platform error) | `focus_guard::tests::unknown_current_focus_is_a_mismatch`, `insert_mode_never_types_into_an_unknown_target`, `controller::tests::held_text_says_why_when_focus_is_unreadable_or_blocked` | F9 | — |
 | 4 Elevated / unreadable / secure desktop never typed into | `focus_guard::tests::blocked_targets_are_never_typed_into`, `platform::delivery_tests::elevated_or_unreadable_targets_are_blocked`, `only_the_default_desktop_takes_input`, `blocked_focus_keeps_its_class_for_messages` | F9 (UAC prompt), F10 (elevated Notepad) | n/a |
 | 5 Held text memory-only, 120 s, by id | `held::tests::held_text_is_addressed_by_id`, `held_text_expires_after_two_minutes`, `notice_has_no_actionable_id_and_expires`, `clear_forgets_everything_and_reports_change`, `snapshot_shows_preview_origin_and_message` | F4, F12 | covered |
 | 6 Refocus refusal → hold | decision: `focus_guard::tests::different_window_follows_mode`, `blocked_targets_are_never_typed_into` (Refocus from blocked origin holds); `SetForegroundWindow` refusal itself: none (needs a desktop) | F5 | covered |

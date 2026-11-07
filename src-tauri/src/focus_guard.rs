@@ -61,6 +61,9 @@ pub fn decide(origin: Option<&Focus>, current: Option<&Focus>, mode: FocusMode) 
     }
 }
 
+/// Windows identities carry a PID, and then the process start time must be known too: a PID
+/// without a start time cannot rule out a reused PID. Linux has neither (X11 IDs are not reused
+/// while the window exists), so `None`/`None` still matches there.
 fn same_target(origin: Option<&Focus>, current: Option<&Focus>) -> bool {
     match (origin, current) {
         (
@@ -76,7 +79,7 @@ fn same_target(origin: Option<&Focus>, current: Option<&Focus>) -> bool {
                 started: sb,
                 ..
             }),
-        ) => a == b && pa == pb && sa == sb,
+        ) => a == b && pa == pb && sa == sb && (pa.is_none() || sa.is_some()),
         // Blocked targets never match, so even an unchanged elevated window is held.
         // Started and finished in Murmur: delivery skips its own windows, as before.
         (Some(Focus::Own), Some(Focus::Own)) => true,
@@ -207,6 +210,44 @@ mod tests {
             Decision::Hold
         );
         assert_eq!(decide(None, None, FocusMode::Insert), Decision::Hold);
+    }
+
+    #[test]
+    fn windows_identity_without_start_time_never_matches() {
+        let unknown_start = |pid| Focus::Window {
+            id: 0x1234,
+            pid: Some(pid),
+            started: None,
+            class: "notepad.exe".into(),
+        };
+        // GetProcessTimes failed both times: the PID may have been reused, so this is not the
+        // same target (Insert mode still types into whatever has focus, as for any mismatch).
+        let origin = unknown_start(100);
+        assert_eq!(
+            decide(Some(&origin), Some(&unknown_start(100)), FocusMode::Hold),
+            Decision::Hold
+        );
+        assert_eq!(
+            decide(Some(&origin), Some(&unknown_start(100)), FocusMode::Refocus),
+            Decision::Refocus(0x1234)
+        );
+        assert_eq!(
+            decide(
+                Some(&origin),
+                Some(&windows_window(0x1234, 100, 5)),
+                FocusMode::Hold
+            ),
+            Decision::Hold
+        );
+        // Linux identities (no PID, no start time) are unchanged.
+        assert_eq!(
+            decide(
+                Some(&window(7, "code")),
+                Some(&window(7, "code")),
+                FocusMode::Hold
+            ),
+            Decision::Deliver
+        );
     }
 
     #[test]
