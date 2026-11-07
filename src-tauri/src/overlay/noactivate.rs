@@ -1,16 +1,21 @@
 //! Windows: clicking the overlay must never take keyboard focus from the dictation target (B7).
 //!
-//! `focusable: false` (tauri.conf.json) already gives the top-level overlay `WS_EX_NOACTIVATE`
-//! through tao. The remaining risk is WebView2: a click lands on one of its child HWNDs, and the
-//! default `WM_MOUSEACTIVATE` handling activates the top-level window. Every overlay window this
-//! thread owns (the top level and WebView2's in-process host children) is subclassed to answer
-//! `WM_MOUSEACTIVATE` with `MA_NOACTIVATE`; cross-process children (the renderer's input window)
-//! forward the message to these ancestors through `DefWindowProc`. As a last line, if the overlay
-//! is activated anyway, foreground goes straight back to the window that lost it.
+//! What actually protects the target (verified in source, not run on hardware):
 //!
-//! The overlay page also prevents `mousedown` default handling on its buttons so the DOM never
-//! moves focus (src/overlay/no-focus.ts). Verified in source, not run on hardware: the Edison
-//! checklist (docs/parity/windows-checklist.md, "Overlay focus") is the evidence still owed.
+//! 1. `focusable: false` (tauri.conf.json) gives the top-level overlay `WS_EX_NOACTIVATE`
+//!    through tao, so a click does not activate it in the first place.
+//! 2. If it is activated anyway, the `WM_ACTIVATE` hand-back below calls `SetForegroundWindow`
+//!    on the window that lost activation.
+//! 3. The overlay page prevents `mousedown`'s default on its buttons so the DOM never moves focus
+//!    (src/overlay/no-focus.ts).
+//!
+//! The `WM_MOUSEACTIVATE` → `MA_NOACTIVATE` subclass is kept because it is harmless, but expect
+//! it to cover only the top-level window: with default WebView2 hosting the `Chrome_WidgetWin_*`
+//! and `Chrome_RenderWidgetHostHWND` windows belong to `msedgewebview2.exe`, not to this thread,
+//! so `EnumChildWindows` is expected to find no child this thread may subclass, and Chromium's
+//! `LegacyRenderWidgetHostHWND` answers `WM_MOUSEACTIVATE` itself. The number of subclassed
+//! windows is logged at info level ("Overlay no-activate subclass") so the Edison checklist
+//! (docs/parity/windows-checklist.md, O3/O4/O7) records what really happened.
 
 // The decision helpers are used by the Windows subclass and by tests on every platform.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -34,15 +39,23 @@ pub fn restore_previous_on_activate(message: u32, wparam: usize, previous_is_win
     message == WM_ACTIVATE && (wparam & 0xFFFF) != WA_INACTIVE && previous_is_window
 }
 
-/// Only windows owned by this thread can be subclassed (`SetWindowSubclass` refuses others);
-/// cross-process WebView2 children are covered by their in-process ancestors.
+/// Only windows owned by this thread can be subclassed (`SetWindowSubclass` refuses others).
+/// WebView2's renderer windows belong to `msedgewebview2.exe`, so in practice this excludes all
+/// of them; see the module documentation.
 pub fn can_subclass(owner_process: u32, owner_thread: u32, process: u32, thread: u32) -> bool {
     owner_process == process && owner_thread == thread
+}
+
+/// Compact key of one install's outcome, compared to log only when it changes. Never
+/// `usize::MAX`, which marks "nothing logged yet".
+pub fn log_key(top_level: bool, children: usize) -> usize {
+    (children.min(1 << 20) << 1) | usize::from(top_level)
 }
 
 #[cfg(windows)]
 mod native {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use windows_sys::Win32::{
         Foundation::{BOOL, HWND, LPARAM, LRESULT, WPARAM},
         System::Threading::{GetCurrentProcessId, GetCurrentThreadId},
@@ -57,6 +70,8 @@ mod native {
 
     /// Subclass id ("MRNA"): one subclass per window, so repeated installs only refresh it.
     const SUBCLASS_ID: usize = 0x4D52_4E41;
+    /// Last logged `log_key`, so the info line appears once per change rather than on every show.
+    static LOGGED: AtomicUsize = AtomicUsize::new(usize::MAX);
 
     unsafe extern "system" fn overlay_proc(
         window: HWND,
@@ -69,14 +84,17 @@ mod native {
         if let Some(reply) = mouse_activate_reply(message) {
             return reply;
         }
-        let previous = lparam as HWND;
-        if restore_previous_on_activate(
-            message,
-            wparam,
-            !previous.is_null() && IsWindow(previous) != 0,
-        ) {
-            // The click gave Murmur the foreground right; hand it straight back.
-            SetForegroundWindow(previous);
+        // Only WM_ACTIVATE carries a window in lparam; never probe it for other messages.
+        if message == WM_ACTIVATE {
+            let previous = lparam as HWND;
+            if restore_previous_on_activate(
+                message,
+                wparam,
+                !previous.is_null() && IsWindow(previous) != 0,
+            ) {
+                // The click gave Murmur the foreground right; hand it straight back.
+                SetForegroundWindow(previous);
+            }
         }
         if message == WM_NCDESTROY {
             RemoveWindowSubclass(window, Some(overlay_proc), id);
@@ -115,7 +133,16 @@ mod native {
         unsafe {
             EnumChildWindows(top, Some(each_child), &mut children as *mut usize as LPARAM);
         }
-        tracing::debug!(top_level, children, "Overlay windows answer MA_NOACTIVATE");
+        let key = log_key(top_level, children);
+        if LOGGED.swap(key, Ordering::Relaxed) != key {
+            // Evidence for the Edison checklist (O7): children=0 is expected when all of
+            // WebView2's windows live in msedgewebview2.exe.
+            tracing::info!(
+                top_level,
+                children,
+                "Overlay no-activate subclass: top-level and in-process child windows"
+            );
+        }
     }
 }
 
@@ -164,6 +191,15 @@ mod tests {
             WA_ACTIVE,
             true
         ));
+    }
+
+    #[test]
+    fn subclass_outcome_is_logged_once_per_change() {
+        assert_ne!(log_key(true, 0), log_key(false, 0));
+        assert_ne!(log_key(true, 0), log_key(true, 1));
+        assert_eq!(log_key(true, 2), log_key(true, 2));
+        // The "nothing logged yet" sentinel is never a real outcome.
+        assert_ne!(log_key(true, usize::MAX), usize::MAX);
     }
 
     #[test]

@@ -49,6 +49,7 @@ again at 150 % scaling (Settings → Display). It saves
 | O4 | Same as O3 but click the overlay's empty area and the drag handle | Notepad keeps focus; drag works | `O4-overlay-empty-click.mp4` |
 | O5 | Mixed DPI (if a second monitor is available, set 100 % and 150 %): drag the overlay across the boundary, release on each monitor | Size and position follow the monitor; no jump back | `O5-mixed-dpi-drag.mp4` |
 | O6 | Overlay scale minimum/maximum in Settings → General | Pill resizes; text not clipped | `O6-scale-<value>.png` |
+| O7 | **B7 evidence.** After O3/O4, search `%LOCALAPPDATA%\Murmur\murmur.log` for `Overlay no-activate subclass` | Line present with `top_level=true`; record the `children=` value (0 is expected: WebView2's windows belong to `msedgewebview2.exe`, so protection comes from `WS_EX_NOACTIVATE`, the `WM_ACTIVATE` hand-back and `mousedown` prevention). O3/O4 must pass either way | `O7-subclass-log.txt` |
 
 ## 3. Hotkeys
 
@@ -86,9 +87,10 @@ again at 150 % scaling (Settings → Display). It saves
 | F7 | Insert mode with a focus change | Typed into the new window | `F7.mp4` |
 | F8 | Start dictation from the Settings window, finish in Notepad | Held (unknown/own origin) | `F8.mp4` |
 | F9 | **B9.** Insert mode: start in Notepad; before release trigger a UAC prompt (e.g. run `regedit`) and leave it up | Held with "a Windows security prompt or the lock screen had focus"; nothing typed anywhere | `F9-secure-desktop.mp4` (phone video: the secure desktop cannot be screen-recorded) |
-| F10 | **B9.** Run Notepad as administrator; dictate into it (Murmur not elevated), in hold and insert modes | Held with "the window runs as administrator…"; Copy works; nothing claims "delivered" | `F10-elevated-notepad.mp4` |
+| F10 | **B9.** Run Notepad as administrator; dictate into it (Murmur not elevated), in hold and insert modes | Held with either "the window runs as administrator…" or "Murmur could not confirm it may type into this window…" (a medium-integrity Murmur often cannot open an elevated process's token, which also counts as blocked); Copy works; nothing claims "delivered" | `F10-elevated-notepad.mp4` |
 | F11 | Drag the overlay while a transcript is ready, release over Notepad | Delivery waits for the release, then follows rules above | `F11-drag-delivery.mp4` |
 | F12 | Check `%LOCALAPPDATA%\Murmur\murmur.log` after F2–F10 | No transcript text in the log | `F12-log-excerpt.txt` |
+| F13 | Hotkey Ctrl+Alt+D, text containing "d" held (F2). Click Notepad, then **Insert here**; also repeat with Prefer paste on | Text typed once; dictation does **not** start while it is typed (enigo's Unicode/`VK_PACKET` input must not match the registered hotkey); overlay returns to idle | `F13-insert-here-no-retrigger.mp4` |
 
 ## 6. Tray, autostart, single instance
 

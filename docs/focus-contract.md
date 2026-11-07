@@ -6,7 +6,7 @@ of 0.4.7 (`src-tauri/src/focus_guard.rs`, `src-tauri/src/held.rs`,
 `src-tauri/src/controller.rs`); the Windows rows are **verified in source, not
 run on hardware**. Evidence is tracked in
 [parity/test-ledger.md](parity/test-ledger.md); the hands-on Windows procedure is
-[parity/windows-checklist.md](parity/windows-checklist.md) (items `F1`–`F12`).
+[parity/windows-checklist.md](parity/windows-checklist.md) (items `F1`–`F13`).
 
 ## Rules
 
@@ -60,12 +60,27 @@ run on hardware**. Evidence is tracked in
    can still be down at that moment. A dictation press that arrives while the
    previous transcript is being transcribed or delivered is ignored, so a
    synthetic letter that matches the hotkey cannot restart dictation.
-8. **The overlay never takes focus.** It is `focusable: false` (Windows:
-   `WS_EX_NOACTIVATE`); on Windows its window and WebView2's in-process children
-   answer `WM_MOUSEACTIVATE` with `MA_NOACTIVATE`, and if it is activated anyway
-   the foreground is handed straight back to the window that lost it. Its buttons
-   prevent `mousedown`'s default, so clicking Accept/Discard/Insert never moves
-   keyboard focus.
+8. **The overlay never takes focus.** Three things protect the target on
+   Windows: the overlay is `focusable: false`, which gives it
+   `WS_EX_NOACTIVATE`; if it is activated anyway, its `WM_ACTIVATE` handler
+   hands the foreground straight back to the window that lost it
+   (`SetForegroundWindow`); and its buttons prevent `mousedown`'s default, so
+   clicking Accept/Discard/Insert never moves DOM focus. The overlay also
+   subclasses its windows to answer `WM_MOUSEACTIVATE` with `MA_NOACTIVATE`, but
+   with default WebView2 hosting this reaches only the top-level window:
+   WebView2's `Chrome_WidgetWin_*` windows belong to `msedgewebview2.exe`, not to
+   Murmur's UI thread, and Chromium's `LegacyRenderWidgetHostHWND` answers
+   `WM_MOUSEACTIVATE` itself. The subclass is harmless and kept; how many windows
+   it covered is logged at info level (`Overlay no-activate subclass`, checklist
+   O7). Verified in source, not run on hardware.
+9. **Insert here types while Murmur is idle.** `deliver_held` runs from the
+   overlay button in the `idle` state, where dictation presses are not ignored
+   (rule 7 ignores them only while transcribing or delivering). This is believed
+   safe: on Windows enigo's `text()` sends each character as
+   `KEYEVENTF_UNICODE` (`VK_PACKET`), which `RegisterHotKey` hotkeys do not
+   match, and the user has just clicked a button, so no hotkey modifiers are
+   held. The paste path sends Ctrl+V, which matters only for a dictation hotkey
+   bound to Ctrl+V. **Believed, verify on Edison** (checklist F13).
 
 ## What it cannot distinguish
 
@@ -96,7 +111,8 @@ run on hardware**. Evidence is tracked in
 | 6 Refocus refusal → hold | decision: `focus_guard::tests::different_window_follows_mode`, `blocked_targets_are_never_typed_into` (Refocus from blocked origin holds); `SetForegroundWindow` refusal itself: none (needs a desktop) | F5 | covered |
 | 7 Modifier wait (shared loop, 600 ms bound) | `inject::tests::modifier_wait_returns_once_released`, `modifier_wait_is_bounded_at_600_ms` | H3, H4 | covered |
 | 7 Hotkey edges, no re-trigger during delivery | `hotkey::tests::only_press_release_edges_are_acted_on`, `presses_during_delivery_do_not_restart_dictation` | H2, H5 | covered |
-| 8 Overlay never activates | `overlay::noactivate::tests::*` (decision logic); UI: `overlay buttons never take focus on mouse down but still act on click (Windows B7)` (`scripts/tests/ui.test.mjs`) | O3, O4 | GTK path unchanged |
+| 8 Overlay never activates | `overlay::noactivate::tests::*` (decision logic, log-once key); UI: `overlay buttons never take focus on mouse down but still act on click (Windows B7)` (`scripts/tests/ui.test.mjs`) | O3, O4, O7 | GTK path unchanged |
+| 9 Insert here in idle does not re-trigger the hotkey | none (needs Windows input) | F13 | covered |
 
 "covered" in the Linux column means the existing 0.4.7/0.5.0 Linux checks; no
 Linux behaviour changed except rule 4's first bullet in `insert` mode, which used
