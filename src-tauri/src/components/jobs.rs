@@ -266,11 +266,31 @@ fn install_files(
             ));
         }
     }
+    // Move (not copy: models are gigabytes) into staging. If the smoke test, the activation or
+    // a pause fails the job, the files go back to the downloads folder so a retry does not
+    // download them again; they are hashed again before any reuse (above).
+    let restore = || {
+        for file in &component.files {
+            let staged = staging.join(&file.name);
+            if staged.is_file() {
+                let _ = store::rename(&staged, &folder.join(&file.name));
+            }
+        }
+    };
     for file in &component.files {
-        store::rename(&folder.join(&file.name), &staging.join(&file.name))
-            .map_err(|_| ComponentError::new(Reason::Io, "Could not stage the download"))?;
+        if store::rename(&folder.join(&file.name), &staging.join(&file.name)).is_err() {
+            restore();
+            return Err(ComponentError::new(
+                Reason::Io,
+                "Could not stage the download",
+            ));
+        }
     }
-    finish(component, &staging, ctx, progress)
+    let result = finish(component, &staging, ctx, progress);
+    if result.is_err() {
+        restore();
+    }
+    result
 }
 
 /// Install from a local zip (offline tests, `--install-component`): verify size and SHA-256

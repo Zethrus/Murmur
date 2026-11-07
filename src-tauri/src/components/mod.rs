@@ -753,7 +753,8 @@ impl Components {
                 }
             };
             self.emit_changed();
-            let result = self.run_job(&component, &cancel);
+            let stopped = AtomicBool::new(false);
+            let result = self.run_job(&component, &cancel, &stopped);
             let mut inner = lock(&self.inner);
             inner.running = None;
             let pause = inner.jobs.get(&component.id).is_some_and(|j| j.pause);
@@ -789,6 +790,10 @@ impl Components {
             if result.is_ok() {
                 tracing::info!(target: "murmur::components", id = %component.id, version = %component.version, "component installed");
                 (self.host.changed)(component.kind);
+            } else if stopped.load(Ordering::Acquire) {
+                // The engine was stopped for an activation that did not complete: restart
+                // it with the files still in place instead of leaving it held.
+                (self.host.changed)(component.kind);
             }
             self.emit_changed();
         }
@@ -798,6 +803,7 @@ impl Components {
         &self,
         component: &Component,
         cancel: &Arc<AtomicBool>,
+        stopped: &AtomicBool,
     ) -> Result<(), ComponentError> {
         let transport = (self.transport)()?;
         let replace = lock(&self.inner)
@@ -806,6 +812,7 @@ impl Components {
             .is_some_and(|j| j.record.replace);
         let stop_engine = |c: &Component| {
             if matches!(c.kind, Kind::Engine | Kind::Cuda) {
+                stopped.store(true, Ordering::Release);
                 (self.host.stop_engine)();
             }
         };
@@ -930,7 +937,12 @@ impl Components {
         if matches!(active.kind, Kind::Engine | Kind::Cuda) {
             (self.host.stop_engine)();
         }
-        self.store.remove(id)?;
+        if let Err(error) = self.store.remove(id) {
+            // The engine was stopped for this: let it start again with whatever is left.
+            (self.host.changed)(active.kind);
+            self.emit_changed();
+            return Err(error);
+        }
         let mut inner = lock(&self.inner);
         inner.verdicts.remove(id);
         drop(inner);
