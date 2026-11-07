@@ -147,7 +147,9 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     state.start()?;
     // Adopt pre-0.5 models whose hashes match the manifest; local hashing only.
     let migrating = state.components.clone();
-    std::thread::Builder::new().name("murmur-migrate".into()).spawn(move || migrating.migrate())?;
+    std::thread::Builder::new()
+        .name("murmur-migrate".into())
+        .spawn(move || migrating.migrate())?;
     if show_settings_on_launch(std::env::args_os()) {
         platform::open_settings(&handle)?;
     }
@@ -170,19 +172,31 @@ fn show_settings_on_launch(args: impl IntoIterator<Item = impl AsRef<std::ffi::O
 fn install_component_cli(args: &[std::ffi::OsString]) -> Option<i32> {
     let position = args.iter().position(|a| a == "--install-component")?;
     let value = |flag: &str| {
-        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from)
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .map(std::path::PathBuf::from)
     };
-    let (Some(path), Some(manifest), Some(signature)) = (args.get(position + 1).map(std::path::PathBuf::from), value("--manifest"), value("--manifest-sig")) else {
+    let (Some(path), Some(manifest), Some(signature)) = (
+        args.get(position + 1).map(std::path::PathBuf::from),
+        value("--manifest"),
+        value("--manifest-sig"),
+    ) else {
         eprintln!("usage: murmur --install-component <zip|dir> --manifest <json> --manifest-sig <sig> [--trust-root <asc>]");
         return Some(2);
     };
     if let Some(root) = value("--trust-root") {
         std::env::set_var(components::trust::DEV_TRUST_ROOT_ENV, root);
     }
-    let _ = tracing_subscriber::fmt().with_writer(std::io::stderr).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .try_init();
     let result = platform::Paths::discover()
         .map_err(|e| e.to_string())
-        .and_then(|paths| components::install_from_files(&paths.data, &path, &manifest, &signature).map_err(|e| e.message));
+        .and_then(|paths| {
+            components::install_from_files(&paths.data, &path, &manifest, &signature)
+                .map_err(|e| e.message)
+        });
     match result {
         Ok(id) => {
             println!("{}", serde_json::json!({"installed": id}));
@@ -229,11 +243,13 @@ fn main() {
                     }
                     // Closing the window during first-run setup means "Set up later".
                     let app = window.app_handle().clone();
-                    let _ = std::thread::Builder::new().name("murmur-setup-postpone".into()).spawn(move || {
-                        if let Some(state) = app.try_state::<app::AppState>() {
-                            state.postpone_setup_if_pending();
-                        }
-                    });
+                    let _ = std::thread::Builder::new()
+                        .name("murmur-setup-postpone".into())
+                        .spawn(move || {
+                            if let Some(state) = app.try_state::<app::AppState>() {
+                                state.postpone_setup_if_pending();
+                            }
+                        });
                 }
             }
         })
@@ -257,6 +273,8 @@ fn main() {
             ipc::components_check_updates,
             ipc::test_engine,
             ipc::list_devices,
+            ipc::microphone_access,
+            ipc::open_microphone_settings,
             ipc::set_hotkey,
             ipc::preview_sound,
             ipc::start_dictation,
