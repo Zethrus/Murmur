@@ -1,5 +1,6 @@
 import {call, on, startOverlayDrag, type Config, type DictationState, type Enhancement, type Events, type OverlaySnapshot} from "../bridge";
 import {heldPanel} from "./held";
+import {pressWithoutFocus} from "./no-focus";
 import {cssLength, isNewer, sizeChanged, windowSize, type Size} from "./layout";
 
 const NONE: Enhancement = {phase:"none",dictation_id:null,suggestion_id:null,original_text:null,proposed_text:null,acceptance_mode:"unavailable",message:null,expires_at:null};
@@ -122,7 +123,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     } catch(error) { if ((pending ? enhancement.request_id : enhancement.suggestion_id) === id) localMessage = String(error); }
     finally { if ((pending ? enhancement.request_id : enhancement.suggestion_id) === id || kind === "discard") acting = false; renderEnhancement(); }
   };
-  accept.addEventListener("click",()=>act("accept")); discard.addEventListener("click",()=>act("discard"));
+  accept.addEventListener("click",()=>act("accept")); discard.addEventListener("click",()=>act("discard")); pressWithoutFocus(accept,discard);
   // Native drag from the dedicated handle only; text, buttons and scrollbars stay interactive and never start a move.
   // WebKitGTK can miss pointer-up during the compositor grab, suppressing the
   // next pointerdown. Mouse down continues to arrive for successive native drags.
