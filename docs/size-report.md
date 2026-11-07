@@ -49,7 +49,70 @@ What the 0.4.7 AppImage contained, unpacked (ranked):
   im2col + cuBLAS GEMM. This holds for that CTranslate2 version only, so the
   build now checks it (`scripts/check-engine-imports.py`).
 
-## After: this branch (PR-A, interim)
+## After: components (PR-B)
+
+Built on einstein-probe (Ubuntu 24.04.5) with `scripts/build-linux.sh` on
+2026-11-07 (UTC); numbers from `python3 scripts/check-release.py sizes`, the
+`.deb` control file and the generated manifest. Versions still read 0.4.7.
+
+The packages contain only the app. The engine and the GPU add-on are signed
+component zips downloaded on request; models come from Hugging Face.
+
+| Artifact | 0.4.7 | PR-A (interim) | **PR-B** | Unpacked / installed (PR-B) | Budget |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AppImage | 1,708.2 MB | 679.0 MB | **90.8 MB** (86.6 MiB) | 296.4 MB unpacked (282.7 MiB) | 125 MiB |
+| `.deb` | 1,704.3 MB | 533.6 MB | **10.5 MB** (10.1 MiB) | 39.5 MB installed (37.7 MiB) + system packages | 125 MiB |
+| tar.gz | 1,856.1 MB | 678.1 MB | **90.1 MB** (85.9 MiB) | the AppImage only | 130 MiB |
+| Engine component zip | — | — | **65.4 MB** (62.4 MiB) | 297.5 MB installed (283.7 MiB) | 130 MiB |
+| CUDA add-on zip (cuBLAS only) | — | — | **456.4 MB** (435.3 MiB) | 854.4 MB installed (814.8 MiB) | 520 MiB |
+| Manifest + signature + certificate | — | — | 24.5 KB | — | 1 MiB each |
+
+Speech models (from the manifest; download = installed): tiny.en 78.1 MB,
+base.en 147.8 MB, small.en 486.1 MB, distil-small.en 335.5 MB, distil-large-v3
+1,516.5 MB, large-v3 3,090.8 MB, large-v3-turbo 1,621.7 MB. Enhance model
+1,107.4 MB.
+
+### Totals per configuration
+
+App + engine + `distil-small.en`; GPU adds the CUDA add-on. "On disk" counts the
+AppImage file itself (it is not unpacked) or the installed `.deb` files, plus the
+installed components; `.deb` system packages are not counted.
+
+| Configuration | 0.4.7 download | PR-B download | Change | 0.4.7 on disk | PR-B on disk |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AppImage, CPU | 2,043.7 MB | **491.8 MB** | −75.9 % | 2,043.7 MB | 723.9 MB |
+| AppImage, NVIDIA GPU | 2,043.7 MB | **948.2 MB** | −53.6 % | 2,043.7 MB | 1,578.2 MB |
+| `.deb`, CPU | 2,039.8 MB | **411.5 MB** | −79.8 % | 3,125.4 MB | 672.6 MB |
+| `.deb`, NVIDIA GPU | 2,039.8 MB | **868.0 MB** | −57.4 % | 3,125.4 MB | 1,527.0 MB |
+| First download only (app) | 1,708.2 MB | **90.8 MB** AppImage / **10.5 MB** `.deb` | −94.7 % / −99.4 % | — | — |
+
+0.4.7 needed the same model download on top of the package; its onefile engine
+also unpacked about 300 MB into `TMPDIR` on every start, which is not counted
+above.
+
+### How the components were packed
+
+- Deterministic zips with LZMA (`scripts/bundle-linux-runtime.py components`).
+  The CUDA add-on with deflate was 554 MiB (over its budget); LZMA gives
+  435.3 MiB. The engine zip went from 96.3 MiB (deflate) to 62.4 MiB.
+- Installing from the local zips with the release binary (`--install-component`,
+  verify + extract + smoke test): engine 5.9 s, CUDA add-on 20.8 s on this machine.
+- The engine zip leaves out PyInstaller's five convenience symlinks into
+  `ctranslate2.libs/` and `numpy.libs/` (the component manager refuses links); the
+  frozen engine was checked to start, transcribe on the CPU, and run the full GPU
+  matrix without them.
+- GPU validation with the *installed* components on the RTX 4060
+  (`scripts/test-linux-inference.py`, `distil-small.en`, 3 s fixture; evidence
+  `docs/parity/evidence/gpu-validation-components-distil-small-en-rtx4060.json`):
+  all four precisions with VAD on and off gave the same transcript with only the
+  add-on's cuBLAS on the loader path; libraries loaded: `libcublas.so.12` and
+  `libcublasLt.so.12` from `components/cuda/<version>/` and the host
+  `libcuda.so.580.178.04`; no cuDNN or NVRTC. Warm median 65.0 ms (PR-A, packaged
+  runtime: 64.0 ms), cold first inference 1.03 s, engine launch through first
+  reply 1.23 s; CPU warm median 1.38 s. (An earlier run of the same script on a
+  previous build, with other builds running, measured 74.3 ms.)
+
+## After: PR-A (interim)
 
 Built on einstein-probe (Ubuntu 24.04.5) with `scripts/build-linux.sh` on
 2026-11-06; numbers from `python3 scripts/check-release.py sizes` and `du`.
@@ -99,7 +162,7 @@ loaded. The same matrix passed with `large-v3-turbo`, and `large-v3` ran at
 GPU's 8 GB). `libcublasLt.so.12` contains the string `libnvrtc`; none of these
 runs loaded it. Evidence: `docs/parity/evidence/`.
 
-### Interim budget versus the plan
+### Interim budget versus the plan (PR-A)
 
 The plan proposed interim budgets of 400 MiB (AppImage, `.deb`) and 410 MiB
 (tar.gz). cuBLAS alone is 510.8 MB (487 MiB) compressed, so those budgets cannot

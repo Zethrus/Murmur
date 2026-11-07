@@ -31,18 +31,20 @@ desktop with a working microphone and system tray. Native Wayland input is not v
 
 | Download | Download size | Use it for |
 | --- | ---: | --- |
-| `.deb` | 534 MB | Debian/Ubuntu installation; uses the distribution's WebKitGTK, GTK and xdotool (`apt` installs them) |
-| `.AppImage` | 679 MB | Recommended portable download, with runtime and typing tools included |
-| `murmur-linux-x86_64.tar.gz` | 678 MB | The same AppImage, named `murmur`, in a tarball |
+| `.deb` | 11 MB | Debian/Ubuntu installation; uses the distribution's WebKitGTK, GTK and xdotool (`apt` installs them) |
+| `.AppImage` | 91 MB | Recommended portable download, with runtime and typing tools included |
+| `murmur-linux-x86_64.tar.gz` | 90 MB | The same AppImage, named `murmur`, in a tarball |
 | `murmur-companion-vX.Y.Z.fap` | < 0.1 MB | The Flipper Zero remote, matched to the desktop version |
 | `SHA256SUMS` | — | Checking that the downloaded files match the release |
 
 [Get the latest release](https://github.com/Zethrus/Murmur/releases/latest).
-The speech engine is included in the desktop packages. There is no separate
-engine download to install. For NVIDIA GPUs the packages include cuBLAS only;
-cuDNN and NVRTC are no longer shipped because the bundled CTranslate2 does not
-use them. Sizes and how they were measured: [size report](docs/size-report.md).
-Releases up to 0.4.7 were about 1.7 GB per download.
+The packages contain only the app. On first start, Murmur's setup downloads what
+you choose: the speech engine (65 MB), one speech model (75 MB to 3.1 GB;
+`distil-small.en` is 336 MB) and, on NVIDIA GPUs, an optional cuBLAS-only GPU
+add-on (456 MB). Each file is checked against a list signed with Murmur's
+release key before it is used ([components](docs/components.md)). A typical
+CPU setup is about 490 MB in total instead of 2 GB with 0.4.7. Sizes and how they
+were measured: [size report](docs/size-report.md).
 
 The Android APK is planned for **November 6, 2026**. Windows builds are deferred
 until **November 6 or 7**. These are targets, subject to
@@ -89,8 +91,11 @@ unavailable, run `./murmur-portable/murmur --appimage-extract-and-run`.
 The host still provides glibc, the X11 desktop, audio services, and hardware drivers. On GNOME, enable a tray/AppIndicator extension if your
 shell does not show tray icons.
 
-1. Launch Murmur to open **Settings**. Starting at login runs quietly in the tray.
-2. In **Engine**, install a speech model, then choose **Use model**. `distil-small.en` is a useful starting point for English.
+1. Launch Murmur. The first time, **setup** asks for your languages, suggests a
+   speech model for your hardware and offers the GPU add-on if you have an NVIDIA
+   GPU; nothing downloads until you click **Download and install**. Choose **Set
+   up later** to skip it; Settings → **Components** has the same choices.
+2. Wait for the downloads to finish (they resume if interrupted).
 3. In **Audio**, select your microphone.
 4. Focus a text field. Hold **Ctrl+Alt+D**, speak, then release.
 
@@ -98,12 +103,15 @@ Press **Esc** while recording to cancel. For hands-free recording, switch the
 hotkey to **Toggle** in General. Closing Settings keeps Murmur running; choose
 **Quit** from the tray menu to exit.
 
-Models download only when you choose Install. After that, speech recognition
-works offline. Downloads include a Python runtime, so Python, Rust and Node are
-not needed to run them. Desktop packages include cuBLAS for GPU inference;
-a compatible host NVIDIA driver is required. CPU inference
-works without a GPU. For the source installation, see
-[building from source](docs/building.md).
+Components download only when you click Install. After that, speech recognition
+works offline. The engine includes its Python runtime, so Python, Rust and Node
+are not needed. GPU inference needs the GPU add-on and a compatible host NVIDIA
+driver; CPU inference works without a GPU. Models from 0.4.x are checked and
+reused. For the source installation, see [building from source](docs/building.md).
+
+> Until Murmur's release signing key is published, development builds cannot
+> install components ("Release trust root missing"); see
+> [signing](docs/signing.md).
 
 ## Built for everyday dictation
 
@@ -136,8 +144,9 @@ compatibility, and troubleshooting. No Flipper is required to use Murmur.
 ## Privacy
 
 Speech recognition and rewriting run locally. Murmur has no telemetry and does
-not save microphone recordings. Downloads and dependency installation require
-network access. Enabling a companion sends text to that device.
+not save microphone recordings. It contacts the network only when you click
+Install, Update or Check for updates, and only GitHub Releases and Hugging Face.
+Enabling a companion sends text to that device.
 
 Clipboard managers, the application you dictate into, and backups may retain
 text independently. Linux typing uses a temporary text payload in a private

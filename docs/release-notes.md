@@ -1,41 +1,65 @@
 # Murmur 0.5.0 (unreleased)
 
-Much smaller Linux downloads. Measured sizes are in
+Much smaller Linux downloads: the app packages no longer contain the speech
+engine or the GPU runtime. Murmur downloads what you choose, verifies it against
+a signed list, and installs it into your data folder. Measured sizes are in
 [the size report](size-report.md).
+
+## Components and first-run setup
+
+- **Setup on first start.** Choose English-only or multilingual, a speech model
+  (with a recommendation from your memory, CPU and NVIDIA GPU), and CPU or GPU.
+  The summary shows download size, installed size, temporary space and free disk
+  space; nothing downloads until you click **Download and install**. **Set up
+  later** (or closing the window) is remembered; Settings then offers **Finish
+  setup**.
+- **Settings → Components** replaces Settings → Engine: install, pause, cancel,
+  resume, verify and remove the speech engine, the NVIDIA GPU add-on, speech
+  models and the Enhance model, with live progress. Removing something still in
+  use is refused with the reason. The inference controls moved there unchanged.
+- **Signed and pinned.** Every file is checked against a manifest signed with
+  Murmur's release key (OpenPGP, pinned fingerprint, rollback and expiry
+  protection). Speech models come from Hugging Face at a pinned commit with a
+  SHA-256 per file; downloads resume where they stopped. See
+  [components](components.md) and [privacy](privacy.md).
+- **Your models carry over.** Models downloaded by 0.4.x are hashed once; the
+  ones that match are adopted without downloading again. Others are shown as
+  unverified and not used; nothing is deleted.
+- **No engine yet?** Murmur still starts, the tray works, and the overlay says
+  "Speech engine not installed — open Settings". Installing the engine makes it
+  usable without restarting Murmur.
 
 ## Smaller Linux packages
 
-- **No cuDNN or NVRTC.** The bundled CTranslate2 runs Whisper on NVIDIA GPUs
-  with cuBLAS alone, so packages now ship only `libcublas.so.12` and
-  `libcublasLt.so.12`. GPU inference was checked on an RTX 4060 with every
-  precision, VAD on and off. The build fails if a future CTranslate2 starts
-  referencing cuDNN or NVRTC.
-- **Leaner engine.** The speech engine is now a folder
-  (`usr/lib/murmur/engine/`) instead of a self-extracting file, so it starts
-  without unpacking into your temporary directory. It no longer carries PyAV/FFmpeg
-  or hf_xet, which Murmur never used. Model installs still work over HTTPS.
+- **No cuDNN or NVRTC.** CTranslate2 runs Whisper on NVIDIA GPUs with cuBLAS
+  alone; the GPU add-on carries only `libcublas.so.12` and `libcublasLt.so.12`.
+  The build fails if a future CTranslate2 starts referencing cuDNN or NVRTC.
+- **Leaner engine.** A folder instead of a self-extracting file (no unpacking
+  into your temporary directory), without PyAV/FFmpeg or hf_xet.
 - **Stripped binaries, symlinked libraries, zstd AppImage.**
-- **The `.deb` uses your system's libraries.** It installs the app to
-  `/usr/bin`, the engine to `/usr/lib/murmur/engine` and cuBLAS to
-  `/usr/lib/murmur/cuda`. WebKitGTK, GTK, xdotool and the other runtime
-  libraries come from Debian/Ubuntu packages, which `apt install
-  ./Murmur_*.deb` pulls in. The old `/opt/murmur` runtime is gone.
-- **The portable archive is just the AppImage** (as `murmur`). The second copy
-  of the engine it used to carry is gone; the AppImage already contains it.
+- **The `.deb` uses your system's libraries** and installs only `/usr/bin/murmur`
+  and its desktop files; `apt install ./Murmur_*.deb` pulls in WebKitGTK, GTK and
+  xdotool. The old `/opt/murmur` runtime is gone.
+- **The portable archive is just the AppImage** (as `murmur`).
 
 ## For packagers and developers
 
 - `MURMUR_ENGINE` selects the engine executable (or its folder);
   `MURMUR_CUDA_DIR` adds a CUDA folder to the engine's DLL search path on
-  Windows. See [configuration](configuration.md#environment-variables).
-- Release assets have size budgets enforced by `scripts/check-release.py`.
+  Windows; `MURMUR_DEV_TRUST_ROOT` (+ acknowledgement in release builds) trusts
+  a test signing key. See [configuration](configuration.md#environment-variables).
+- Release assets have size budgets enforced by `scripts/check-release.py`:
+  AppImage and `.deb` 125 MiB, tar.gz 130 MiB, engine zip 130 MiB, GPU add-on
+  520 MiB.
+- The engine's `models.install` RPC now fails: installs are the app's job.
 
 ## Known limitations
 
-- The engine and cuBLAS are still inside the Linux packages. A later release
-  moves them to optional, signed downloads.
-- Windows builds remain unverified on Windows hardware; the NSIS installer does
-  not include the engine yet.
+- **Blocked on the release key.** Until the owner creates Murmur's offline
+  release key ([signing](signing.md)), builds refuse to install components
+  ("Release trust root missing") and tag builds upload nothing.
+- Windows builds remain unverified on Windows hardware; Windows engine and GPU
+  components are not built yet, and the GPU option stays hidden on Windows.
 
 # Murmur 0.4.7
 

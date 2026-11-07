@@ -49,7 +49,10 @@ launching the new version. Symlinked installation paths are rejected for safety.
 Fresh installs create a minimal config with autostart enabled. Existing config is
 preserved: its `general.autostart` preference takes precedence on app startup.
 Use Settings → General to change it. Closing Settings leaves Murmur in the tray;
-use tray → Quit to stop it. Install and select a model in Settings → Engine.
+use tray → Quit to stop it. The source install ships its own engine (found as the
+packaged engine); install a speech model in Settings → Components. Component
+installs need a build with the release trust root or a development root
+(`MURMUR_DEV_TRUST_ROOT`, see [components](components.md#development-trust-roots)).
 
 ### Uninstall
 
@@ -81,10 +84,20 @@ npm run tauri dev                # desktop app; source Python engine from the ve
 For a release build without installing into your home directory:
 
 ```sh
-scripts/build-linux.sh          # frozen engine + bundled app, deb and AppImage
+scripts/build-linux.sh          # frozen engine, component zips + signed manifest, app, deb, AppImage
 # Run the raw release binary against the onedir engine it was built with:
 MURMUR_ENGINE=engine/dist/murmur-engine src-tauri/target/release/murmur
+# Or install the built components into a throwaway profile through the app itself:
+export XDG_DATA_HOME=/tmp/murmur-try MURMUR_DEV_TRUST_ROOT=$PWD/.cache/artifacts/components/murmur-release.asc \
+       MURMUR_DEV_TRUST_ROOT_ACK=I-understand-this-disables-release-trust
+src-tauri/target/release/murmur --install-component .cache/artifacts/components/murmur-engine-linux-x86_64-*.zip \
+  --manifest .cache/artifacts/components/components-manifest.json \
+  --manifest-sig .cache/artifacts/components/components-manifest.json.sig
 ```
+
+Without `MURMUR_SIGNING_SUBKEY` the build signs the manifest with a throwaway key
+(`scripts/components/dev-key.sh`): such artifacts install nothing unless the
+development trust root above is set. See [signing](signing.md).
 
 Linux release builds use CPython 3.12 and `scripts/prepare-linux-release.sh` in
 both local and CI builds. It creates a clean `engine/.release-venv` and installs
@@ -103,26 +116,41 @@ then fails the build if any file in that folder references cuDNN or NVRTC.
 
 The default build directory is `src-tauri/target`; manual build-linux.sh honors
 Cargo target overrides. The installer and CI deliberately pin that directory.
-The final downloads are in `.cache/artifacts/linux`. AppImage creation is required.
-`scripts/bundle-linux-runtime.py` adds typing tools, missing client libraries,
-the onedir engine under `usr/lib/murmur/engine`, cuBLAS under
-`usr/lib/murmur/cuda`, and notices to Tauri's AppImage. It replaces duplicate
-library copies with symlinks and repacks the SquashFS with zstd. The portable
-archive holds only that AppImage, named `murmur`. The `.deb` is Tauri's package
-(app in `/usr/bin`, system `Depends`) plus the same engine and cuBLAS folders
-under `/usr/lib/murmur`. `scripts/test-linux-bundle.py` checks the CUDA
-manifest, library resolution, the engine and its cuDNN gate, Debian/AppImage
-parity of the engine and cuBLAS, stripped binaries, symlinked libraries, the
-archive layout, and the size budgets; it also starts the extracted `.deb` app.
-Models download inside Settings.
+The app downloads are in `.cache/artifacts/linux`, the components in
+`.cache/artifacts/components`. AppImage creation is required.
+
+`scripts/bundle-linux-runtime.py components` zips the onedir engine and the
+pinned cuBLAS libraries with their NVIDIA notice (LZMA, deterministic, no
+links). `scripts/components/make-manifest.py` writes the manifest;
+`sign-manifest.sh` signs it. `scripts/bundle-linux-runtime.py package` adds
+typing tools and missing client libraries to Tauri's AppImage, replaces duplicate
+library copies with symlinks and repacks the SquashFS with zstd; the portable
+archive holds only that AppImage, named `murmur`; the `.deb` is Tauri's package
+(app in `/usr/bin`, system `Depends`), xz-compressed. Neither contains the
+engine or CUDA. `scripts/test-linux-bundle.py <linux dir> <components dir>`
+checks the packages, then installs the engine and CUDA add-on through the app's
+`--install-component` path into a throwaway profile, checks the engine (cuDNN
+gate, RPC, refuses `models.install`) and the add-on (exact files, hashes,
+library resolution), and confirms that a tampered zip, a missing trust root, or a
+release binary without the acknowledgement installs nothing. It also starts the
+extracted `.deb` app without an engine.
+
+`scripts/test-clean-install.sh <linux dir> <components dir> <staged model>`
+installs the `.deb` into an offline `ubuntu:24.04` container (`--network none`;
+only the image build with the package's `Depends` uses the network), checks that
+Murmur starts on Xvfb without an engine and makes no IP connection (strace),
+then installs the engine zip and the model folder and transcribes the fixture on
+the CPU.
 
 `python3 scripts/check-release.py sizes <files or folders>` prints download and
 unpacked sizes; `budgets <dir>` enforces the per-asset budgets. Current
 measurements are in [the size report](size-report.md).
 
-`scripts/test-linux-startup.py` launches the AppImage on an isolated X11 display
-and D-Bus session to check manual startup, that the packaged engine starts,
-background startup, autostart migration, and manual reactivation.
+`scripts/test-linux-startup.py [--components DIR]` launches the AppImage on an
+isolated X11 display and D-Bus session to check manual startup without an engine
+(stays up, reports it once, never respawns), with the engine component installed
+(that engine starts), background startup, autostart migration, and manual
+reactivation.
 
 These bundles still use the host's glibc, desktop services, and hardware drivers.
 Build on the oldest supported distribution; the current release baseline is
@@ -130,20 +158,21 @@ Ubuntu 24.04 with glibc 2.39. GPU inference needs a compatible host NVIDIA
 driver. [NVIDIA lists](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-toolkit-release-notes/index.html)
 575.51.03 as the minimum for CUDA 12.9 GA; the tested RTX 4060 Laptop GPU uses
 driver 580.178.04. Other hardware and driver combinations require validation.
-The build copies the cuBLAS wheel's `License.txt` into
-`usr/share/doc/murmur/bundled-runtime`. Before public distribution, review the
+The build copies the cuBLAS wheel's `License.txt` into the CUDA add-on zip. Before public distribution, review the
 exact wheel notice and the [CUDA](https://docs.nvidia.com/cuda/eula/index.html)
 distribution terms for the intended package; this build check does not make a
 legal determination.
 
 For a trusted GPU host with an already staged model, run
 `python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux
---models-dir /path/to/staged/models`. It runs the cuDNN gate on the packaged
-engine, then performs offline VAD-disabled forced CUDA (with only the shipped
-cuBLAS folder on the loader path, plus every GPU precision with VAD on and off),
-Auto, explicit CPU, and GPU-hidden Auto transcription. It checks that cuBLAS
-loads from the package and that no cuDNN or NVRTC library loads, and writes
-`GPU-VALIDATION.json` tied to the built asset hashes. The
+--components .cache/artifacts/components --models-dir /path/to/staged/models`.
+It installs the engine, the CUDA add-on and the model (verified against the
+manifest) into a throwaway profile through the app, runs the cuDNN gate on the
+installed engine, then performs offline VAD-disabled forced CUDA (with only the
+add-on's cuBLAS folder on the loader path, plus every GPU precision with VAD on
+and off), Auto, explicit CPU, and GPU-hidden Auto transcription. It checks that
+cuBLAS loads from the add-on and that no cuDNN or NVRTC library loads, and writes
+`GPU-VALIDATION.json` tied to the asset hashes. The
 fixture is a three-second excerpt of [OpenAI Whisper's `tests/jfk.flac`](https://github.com/openai/whisper/blob/main/tests/jfk.flac). Pass
 `--baseline-engine` and `--baseline-libraries` to compare ten warmed runs with
 a known working manual-path engine. The first inference is recorded separately.
