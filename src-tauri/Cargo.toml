@@ -18,6 +18,13 @@ enhance-llama = ["dep:llama-cpp-2", "dep:llama-cpp-sys-2"]
 # Symbols are not shipped; keeps the packaged binaries ~10 MB smaller.
 strip = true
 
+# Debug builds hash and unpack multi-gigabyte components; unoptimised SHA-256 and LZMA
+# make that minutes instead of seconds.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.lzma-rust2]
+opt-level = 3
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -64,7 +71,7 @@ btleplug = "0.11"
 # and zip extraction of engine/CUDA components. Verification only touches public data, so the
 # variable-time RSA/DSA code paths sequoia gates behind these flags carry no secret.
 sequoia-openpgp = { version = "2.4", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
-zip = { version = "7.2", default-features = false, features = ["deflate"] }
+zip = { version = "7.2", default-features = false, features = ["deflate", "lzma"] }
 futures = "0.3"
 # Free-space check before an explicit Enhance model download.
 [target.'cfg(unix)'.dependencies]

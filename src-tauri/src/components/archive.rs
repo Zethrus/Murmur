@@ -336,6 +336,22 @@ pub mod tests {
     }
 
     #[test]
+    fn extracts_lzma_entries_as_written_by_python() {
+        // Release zips are written by Python's zipfile with ZIP_LZMA (scripts/bundle-linux-runtime.py).
+        let d = dir("lzma");
+        let zip = d.join("a.zip");
+        let python = "import sys, zipfile\nwith zipfile.ZipFile(sys.argv[1], 'w', compression=zipfile.ZIP_LZMA) as z:\n    i = zipfile.ZipInfo('bin/tool', (1980, 1, 1, 0, 0, 0)); i.external_attr = 0o100755 << 16; i.create_system = 3\n    z.writestr(i, b'x' * 300000)\n";
+        let made = std::process::Command::new("python3").args(["-c", python]).arg(&zip).status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("python3 unavailable; skipping");
+            return;
+        }
+        assert_eq!(extract(&zip, &d.join("out"), 300_000, &AtomicBool::new(false)).unwrap(), 300_000);
+        assert_eq!(fs::read(d.join("out/bin/tool")).unwrap(), vec![b'x'; 300_000]);
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
     fn bombs_and_oversize_are_refused() {
         let zeros = vec![0u8; 4 << 20];
         assert!(run("ratio", &[Item::File("zeros", &zeros, 0o644)], u64::MAX).unwrap_err().message.contains("200:1"));

@@ -117,6 +117,13 @@ test("set up later persists, never reopens, and Settings offers Finish setup",as
   assert.equal(again.root.querySelector(".setup-layer").hidden,true,"postponed setup stays closed");
   await button(again.root.querySelector(".model-banner"),"Finish setup").dispatch("click");assert.equal(again.root.querySelector(".setup-layer").hidden,false);again.unload();
 });
+test("closing the window during setup (postponed by the backend) hides the wizard",async()=>{
+  const h=await settings({componentsFixture:componentsFixture({engine:false})});
+  assert.equal(h.root.querySelector(".setup-layer").hidden,false);
+  h.config.setup.postponed=true;h.emit("config",structuredClone(h.config));await settle();await settle();
+  assert.equal(h.root.querySelector(".setup-layer").hidden,true);assert.equal(h.root.querySelector(".settings-shell").hidden,false);
+  assert.ok(button(h.root.querySelector(".model-banner"),"Finish setup"));h.unload();
+});
 test("setup hides the GPU option without an NVIDIA GPU and recommends it with one",async()=>{
   const cpu=await settings({componentsFixture:componentsFixture({engine:false})});
   for(let i=0;i<3;i++)await button(cpu.root,"Next").dispatch("click");
