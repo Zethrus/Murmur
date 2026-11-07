@@ -5,9 +5,7 @@ use super::{ComponentError, Reason};
 use sequoia_openpgp::{
     cert::prelude::*,
     parse::{
-        stream::{
-            DetachedVerifierBuilder, MessageLayer, MessageStructure, VerificationHelper,
-        },
+        stream::{DetachedVerifierBuilder, MessageLayer, MessageStructure, VerificationHelper},
         Parse,
     },
     policy::{AsymmetricAlgorithm, StandardPolicy},
@@ -60,15 +58,22 @@ pub struct TrustRoot {
 
 /// Parse one public certificate; refuse secret material and keyrings.
 pub fn parse_cert(bytes: &[u8]) -> Result<Cert, ComponentError> {
-    let cert = Cert::from_bytes(bytes).map_err(|_| untrusted("The signing certificate is unreadable"))?;
+    let cert =
+        Cert::from_bytes(bytes).map_err(|_| untrusted("The signing certificate is unreadable"))?;
     if cert.is_tsk() {
-        return Err(untrusted("A signing certificate must not contain secret keys"));
+        return Err(untrusted(
+            "A signing certificate must not contain secret keys",
+        ));
     }
     Ok(cert)
 }
 
 /// Accept `bytes` as the trust root only if its primary fingerprint is `expected`.
-pub fn root_from(bytes: &[u8], expected: &str, development: bool) -> Result<TrustRoot, ComponentError> {
+pub fn root_from(
+    bytes: &[u8],
+    expected: &str,
+    development: bool,
+) -> Result<TrustRoot, ComponentError> {
     let missing = || ComponentError::new(Reason::TrustRootMissing, "Release trust root missing");
     let expected: Fingerprint = expected.parse().map_err(|_| missing())?;
     let cert = parse_cert(bytes).map_err(|_| missing())?;
@@ -89,7 +94,10 @@ pub fn load_root() -> Result<TrustRoot, ComponentError> {
                 std::path::Path::new(&path).display()
             );
             let bytes = std::fs::read(&path).map_err(|_| {
-                ComponentError::new(Reason::TrustRootMissing, "Development trust root is unreadable")
+                ComponentError::new(
+                    Reason::TrustRootMissing,
+                    "Development trust root is unreadable",
+                )
             })?;
             let cert = parse_cert(&bytes)?;
             let fingerprint = cert.fingerprint().to_hex();
@@ -101,7 +109,10 @@ pub fn load_root() -> Result<TrustRoot, ComponentError> {
         Some(bytes) if !RELEASE_PRIMARY_FINGERPRINT.is_empty() => {
             root_from(bytes, RELEASE_PRIMARY_FINGERPRINT, false)
         }
-        _ => Err(ComponentError::new(Reason::TrustRootMissing, "Release trust root missing")),
+        _ => Err(ComponentError::new(
+            Reason::TrustRootMissing,
+            "Release trust root missing",
+        )),
     }
 }
 
@@ -128,7 +139,10 @@ pub fn newest_self_signature(cert: &Cert) -> SystemTime {
 }
 
 fn primary_revoked(cert: &Cert) -> bool {
-    matches!(cert.revocation_status(&policy(), None), RevocationStatus::Revoked(_))
+    matches!(
+        cert.revocation_status(&policy(), None),
+        RevocationStatus::Revoked(_)
+    )
 }
 
 fn revoked_error() -> ComponentError {
@@ -152,10 +166,17 @@ fn signing_subkey_at(cert: &Cert, at: SystemTime) -> bool {
 }
 
 /// The certificate update rule. `Ok(None)` keeps `current` (candidate not strictly newer).
-pub fn accept_update(current: &Cert, candidate: &[u8], issued_at: SystemTime) -> Result<Option<Cert>, ComponentError> {
+pub fn accept_update(
+    current: &Cert,
+    candidate: &[u8],
+    issued_at: SystemTime,
+) -> Result<Option<Cert>, ComponentError> {
     let candidate = parse_cert(candidate)?;
     if candidate.fingerprint() != current.fingerprint() {
-        return Err(ComponentError::new(Reason::UntrustedKey, "The downloaded certificate belongs to another key"));
+        return Err(ComponentError::new(
+            Reason::UntrustedKey,
+            "The downloaded certificate belongs to another key",
+        ));
     }
     // A valid primary revocation is honoured whether or not the rest of the update is.
     if primary_revoked(&candidate) {
@@ -165,10 +186,14 @@ pub fn accept_update(current: &Cert, candidate: &[u8], issued_at: SystemTime) ->
         return Ok(None);
     }
     if candidate.with_policy(&policy(), None).is_err() {
-        return Err(untrusted("The downloaded certificate is not valid under Murmur's policy"));
+        return Err(untrusted(
+            "The downloaded certificate is not valid under Murmur's policy",
+        ));
     }
     if !signing_subkey_at(&candidate, issued_at) {
-        return Err(untrusted("The downloaded certificate has no signing key valid for this manifest"));
+        return Err(untrusted(
+            "The downloaded certificate has no signing key valid for this manifest",
+        ));
     }
     let merged = current
         .clone()
@@ -204,14 +229,23 @@ impl VerificationHelper for Helper<'_> {
                 };
                 let key = good.ka.key();
                 if key.fingerprint() == self.cert.fingerprint() {
-                    failure.get_or_insert_with(|| "signed by the primary key, not the signing subkey".into());
+                    failure.get_or_insert_with(|| {
+                        "signed by the primary key, not the signing subkey".into()
+                    });
                     continue;
                 }
-                if key.pk_algo() == PublicKeyAlgorithm::DSA || good.sig.hash_algo() == HashAlgorithm::SHA1 {
+                if key.pk_algo() == PublicKeyAlgorithm::DSA
+                    || good.sig.hash_algo() == HashAlgorithm::SHA1
+                {
                     failure.get_or_insert_with(|| "weak algorithm".into());
                     continue;
                 }
-                let subkey = self.cert.keys().subkeys().key_handle(key.fingerprint()).next();
+                let subkey = self
+                    .cert
+                    .keys()
+                    .subkeys()
+                    .key_handle(key.fingerprint())
+                    .next();
                 let valid_at_issue = self
                     .cert
                     .keys()
@@ -225,11 +259,14 @@ impl VerificationHelper for Helper<'_> {
                     .is_some();
                 let revoked_now = subkey.is_some_and(|k| {
                     k.self_revocations().next().is_some()
-                        && k.with_policy(&policy, None)
-                            .map_or(true, |k| !matches!(k.revocation_status(), RevocationStatus::NotAsFarAsWeKnow))
+                        && k.with_policy(&policy, None).map_or(true, |k| {
+                            !matches!(k.revocation_status(), RevocationStatus::NotAsFarAsWeKnow)
+                        })
                 });
                 if !valid_at_issue {
-                    failure.get_or_insert_with(|| "the signing key was not valid when the manifest was issued".into());
+                    failure.get_or_insert_with(|| {
+                        "the signing key was not valid when the manifest was issued".into()
+                    });
                 } else if revoked_now {
                     failure.get_or_insert_with(|| "the signing key has been revoked".into());
                 } else {
@@ -237,18 +274,27 @@ impl VerificationHelper for Helper<'_> {
                 }
             }
         }
-        Err(anyhow::anyhow!(failure.unwrap_or_else(|| "no signature".into())))
+        Err(anyhow::anyhow!(
+            failure.unwrap_or_else(|| "no signature".into())
+        ))
     }
 }
 
 /// Verify a detached signature over exactly `data`. `issued_at` is the manifest's issue time.
-pub fn verify(cert: &Cert, data: &[u8], signature: &[u8], issued_at: SystemTime) -> Result<(), ComponentError> {
+pub fn verify(
+    cert: &Cert,
+    data: &[u8],
+    signature: &[u8],
+    issued_at: SystemTime,
+) -> Result<(), ComponentError> {
     if primary_revoked(cert) {
         return Err(revoked_error());
     }
     let policy = policy();
     if cert.with_policy(&policy, None).is_err() {
-        return Err(untrusted("Murmur's release certificate is not valid under the signature policy"));
+        return Err(untrusted(
+            "Murmur's release certificate is not valid under the signature policy",
+        ));
     }
     let helper = Helper { cert, issued_at };
     let mut verifier = DetachedVerifierBuilder::from_bytes(signature)
@@ -259,7 +305,9 @@ pub fn verify(cert: &Cert, data: &[u8], signature: &[u8], issued_at: SystemTime)
         // Sequoia's message names the policy rule; no secrets or contents are in it.
         let detail = error.to_string();
         let detail: String = detail.chars().take(200).collect();
-        untrusted(format!("The component manifest signature is not valid ({detail})"))
+        untrusted(format!(
+            "The component manifest signature is not valid ({detail})"
+        ))
     })
 }
 
@@ -313,7 +361,14 @@ pub mod testkeys {
                 .unwrap()
         }
         fn primary_pair(&self) -> sequoia_openpgp::crypto::KeyPair {
-            self.cert.primary_key().key().clone().parts_into_secret().unwrap().into_keypair().unwrap()
+            self.cert
+                .primary_key()
+                .key()
+                .clone()
+                .parts_into_secret()
+                .unwrap()
+                .into_keypair()
+                .unwrap()
         }
         pub fn sign_at(&self, data: &[u8], at: SystemTime, hash: HashAlgorithm) -> Vec<u8> {
             let mut pair = self.subkey_pair();
@@ -330,7 +385,9 @@ pub mod testkeys {
         }
         pub fn sign_with_primary(&self, data: &[u8]) -> Vec<u8> {
             let mut pair = self.primary_pair();
-            let signature = SignatureBuilder::new(SignatureType::Binary).sign_message(&mut pair, data).unwrap();
+            let signature = SignatureBuilder::new(SignatureType::Binary)
+                .sign_message(&mut pair, data)
+                .unwrap();
             sequoia_openpgp::Packet::from(signature).to_vec().unwrap()
         }
         pub fn revoke_subkey(&mut self) {
@@ -345,15 +402,22 @@ pub mod testkeys {
         }
         pub fn revoke_primary(&mut self) {
             let mut pair = self.primary_pair();
-            let revocation = self.cert.revoke(&mut pair, ReasonForRevocation::KeyCompromised, b"test").unwrap();
+            let revocation = self
+                .cert
+                .revoke(&mut pair, ReasonForRevocation::KeyCompromised, b"test")
+                .unwrap();
             self.cert = self.cert.clone().insert_packets(revocation).unwrap().0;
         }
         /// Re-certify: a fresh signing subkey bound now (a strictly newer certificate).
         pub fn add_signing_subkey(&mut self, days: u64) {
             use sequoia_openpgp::packet::key::Key4;
             let mut primary = self.primary_pair();
-            let subkey: sequoia_openpgp::packet::Key<_, sequoia_openpgp::packet::key::SubordinateRole> =
-                Key4::generate_ecc(true, sequoia_openpgp::types::Curve::Ed25519).unwrap().into();
+            let subkey: sequoia_openpgp::packet::Key<
+                _,
+                sequoia_openpgp::packet::key::SubordinateRole,
+            > = Key4::generate_ecc(true, sequoia_openpgp::types::Curve::Ed25519)
+                .unwrap()
+                .into();
             let mut subkey_pair = subkey.clone().into_keypair().unwrap();
             let backsig = SignatureBuilder::new(SignatureType::PrimaryKeyBinding)
                 .sign_primary_key_binding(&mut subkey_pair, self.cert.primary_key().key(), &subkey)
@@ -404,7 +468,12 @@ mod tests {
             writer.finalize().unwrap();
         }
         verify(&signer.cert, DATA, &armored, now()).unwrap();
-        assert_eq!(verify(&signer.cert, b"{\"schema_version\":2}", &sig, now()).unwrap_err().reason, Reason::SignatureInvalid);
+        assert_eq!(
+            verify(&signer.cert, b"{\"schema_version\":2}", &sig, now())
+                .unwrap_err()
+                .reason,
+            Reason::SignatureInvalid
+        );
         let mut bad = sig.clone();
         let last = bad.len() - 3;
         bad[last] ^= 0x40;
@@ -425,10 +494,23 @@ mod tests {
     fn expired_subkey_rejected() {
         // Subkey valid for one day from ten days ago; the manifest was issued now.
         let signer = Signer::new(now() - days(10), 1);
-        let sig = signer.sign_at(DATA, now() - days(10) + Duration::from_secs(3600), HashAlgorithm::SHA512);
-        assert!(verify(&signer.cert, DATA, &sig, now()).is_err(), "issued after expiry");
+        let sig = signer.sign_at(
+            DATA,
+            now() - days(10) + Duration::from_secs(3600),
+            HashAlgorithm::SHA512,
+        );
+        assert!(
+            verify(&signer.cert, DATA, &sig, now()).is_err(),
+            "issued after expiry"
+        );
         // Same signature, manifest claimed issued while the key was valid: accepted.
-        verify(&signer.cert, DATA, &sig, now() - days(10) + Duration::from_secs(7200)).unwrap();
+        verify(
+            &signer.cert,
+            DATA,
+            &sig,
+            now() - days(10) + Duration::from_secs(7200),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -440,7 +522,10 @@ mod tests {
         let mut signer = Signer::new(now() - days(5), 365);
         let sig = signer.sign(DATA);
         signer.revoke_primary();
-        assert_eq!(verify(&signer.cert, DATA, &sig, now()).unwrap_err().reason, Reason::PrimaryRevoked);
+        assert_eq!(
+            verify(&signer.cert, DATA, &sig, now()).unwrap_err().reason,
+            Reason::PrimaryRevoked
+        );
     }
 
     #[test]
@@ -468,8 +553,13 @@ mod tests {
             .unwrap()
             .sign_userid_binding(&mut pair, key.parts_as_public(), &uid)
             .unwrap();
-        let cert = Cert::from_packets(vec![Packet::from(key.clone()), uid.into(), binding.into()].into_iter()).unwrap();
-        let sig = SignatureBuilder::new(SignatureType::Binary).sign_message(&mut pair, DATA).unwrap();
+        let cert = Cert::from_packets(
+            vec![Packet::from(key.clone()), uid.into(), binding.into()].into_iter(),
+        )
+        .unwrap();
+        let sig = SignatureBuilder::new(SignatureType::Binary)
+            .sign_message(&mut pair, DATA)
+            .unwrap();
         use sequoia_openpgp::serialize::SerializeInto;
         let sig = Packet::from(sig).to_vec().unwrap();
         assert!(verify(&cert.strip_secret_key_material(), DATA, &sig, now()).is_err());
@@ -480,9 +570,22 @@ mod tests {
         let signer = Signer::new(now() - days(1), 30);
         assert!(root_from(&signer.public(), &signer.fingerprint(), false).is_ok());
         let other = Signer::new(now() - days(1), 30);
-        assert_eq!(root_from(&signer.public(), &other.fingerprint(), false).unwrap_err().reason, Reason::TrustRootMissing);
-        assert_eq!(root_from(b"garbage", &signer.fingerprint(), false).unwrap_err().reason, Reason::TrustRootMissing);
-        assert_eq!(root_from(&signer.public(), "", false).unwrap_err().reason, Reason::TrustRootMissing);
+        assert_eq!(
+            root_from(&signer.public(), &other.fingerprint(), false)
+                .unwrap_err()
+                .reason,
+            Reason::TrustRootMissing
+        );
+        assert_eq!(
+            root_from(b"garbage", &signer.fingerprint(), false)
+                .unwrap_err()
+                .reason,
+            Reason::TrustRootMissing
+        );
+        assert_eq!(
+            root_from(&signer.public(), "", false).unwrap_err().reason,
+            Reason::TrustRootMissing
+        );
         // Secret material is never acceptable as a root.
         use sequoia_openpgp::serialize::SerializeInto;
         let secret = signer.cert.as_tsk().armored().to_vec().unwrap();
@@ -497,13 +600,22 @@ mod tests {
         let mut signer = Signer::new(now() - days(30), 365);
         let original = signer.cert.clone().strip_secret_key_material();
         // Same certificate: not strictly newer, keep the current one.
-        assert!(accept_update(&original, &signer.public(), now()).unwrap().is_none());
+        assert!(accept_update(&original, &signer.public(), now())
+            .unwrap()
+            .is_none());
         // Another key's certificate is refused.
         let stranger = Signer::new(now() - days(1), 30);
-        assert_eq!(accept_update(&original, &stranger.public(), now()).unwrap_err().reason, Reason::UntrustedKey);
+        assert_eq!(
+            accept_update(&original, &stranger.public(), now())
+                .unwrap_err()
+                .reason,
+            Reason::UntrustedKey
+        );
         // A strictly newer certificate with a freshly bound subkey is accepted and merged.
         signer.add_signing_subkey(365);
-        let updated = accept_update(&original, &signer.public(), now()).unwrap().expect("newer");
+        let updated = accept_update(&original, &signer.public(), now())
+            .unwrap()
+            .expect("newer");
         assert_eq!(updated.keys().subkeys().count(), 2);
         // The older subkey still covers an earlier issue time, so the merged update is usable.
         assert!(accept_update(&original, &signer.public(), now() - days(20)).is_ok());
@@ -516,6 +628,11 @@ mod tests {
         let mut revoked = Signer::new(now() - days(30), 365);
         let base = revoked.cert.clone().strip_secret_key_material();
         revoked.revoke_primary();
-        assert_eq!(accept_update(&base, &revoked.public(), now()).unwrap_err().reason, Reason::PrimaryRevoked);
+        assert_eq!(
+            accept_update(&base, &revoked.public(), now())
+                .unwrap_err()
+                .reason,
+            Reason::PrimaryRevoked
+        );
     }
 }

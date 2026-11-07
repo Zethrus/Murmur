@@ -9,9 +9,9 @@ pub mod fetch;
 pub mod jobs;
 pub mod manifest;
 pub mod store;
-pub mod trust;
 #[cfg(test)]
 mod tests;
+pub mod trust;
 
 use catalog::{Catalog, Files};
 use fetch::{Retry, Transport};
@@ -66,7 +66,10 @@ pub struct ComponentError {
 }
 impl ComponentError {
     pub fn new(reason: Reason, message: impl Into<String>) -> Self {
-        Self { reason, message: message.into() }
+        Self {
+            reason,
+            message: message.into(),
+        }
     }
 }
 impl std::fmt::Display for ComponentError {
@@ -79,13 +82,17 @@ impl std::error::Error for ComponentError {}
 /// Write `bytes` to `path` via a synced temporary file and rename.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ComponentError> {
     let fail = |_| ComponentError::new(Reason::Io, "Could not write component state");
-    let parent = path.parent().ok_or_else(|| ComponentError::new(Reason::Io, "Invalid state path"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| ComponentError::new(Reason::Io, "Invalid state path"))?;
     fs::create_dir_all(parent).map_err(fail)?;
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
     let temporary = parent.join(name);
     let mut file = fs::File::create(&temporary).map_err(fail)?;
-    file.write_all(bytes).and_then(|_| file.sync_all()).map_err(fail)?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(fail)?;
     drop(file);
     store::rename(&temporary, path).map_err(fail)?;
     #[cfg(unix)]
@@ -123,7 +130,8 @@ pub struct Host {
 }
 
 pub type Space = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
-pub type TransportFactory = Arc<dyn Fn() -> Result<Box<dyn Transport>, ComponentError> + Send + Sync>;
+pub type TransportFactory =
+    Arc<dyn Fn() -> Result<Box<dyn Transport>, ComponentError> + Send + Sync>;
 
 pub struct Options {
     pub data: PathBuf,
@@ -146,7 +154,10 @@ impl Options {
             legacy_enhance,
             root: trust::load_root(),
             embedded: trust::EMBEDDED_MANIFEST.map(|(m, s)| (m.to_vec(), s.to_vec())),
-            transport: Arc::new(|| fetch::Https::new(Duration::from_secs(30)).map(|t| Box::new(t) as Box<dyn Transport>)),
+            transport: Arc::new(|| {
+                fetch::Https::new(Duration::from_secs(30))
+                    .map(|t| Box::new(t) as Box<dyn Transport>)
+            }),
             space: Arc::new(crate::platform::available_space),
             retry: Retry::default(),
             now: catalog::now,
@@ -233,7 +244,10 @@ impl Components {
         match &options.root {
             Ok(root) => {
                 inner.development = root.development;
-                let embedded = options.embedded.as_ref().map(|(m, s)| (m.as_slice(), s.as_slice()));
+                let embedded = options
+                    .embedded
+                    .as_ref()
+                    .map(|(m, s)| (m.as_slice(), s.as_slice()));
                 match catalog::load_offline(root, &files, embedded, (options.now)()) {
                     Ok(catalog) => inner.catalog = Some(catalog),
                     Err(error) => inner.error = Some(error),
@@ -265,7 +279,10 @@ impl Components {
             worker: Mutex::new(None),
         });
         let worker = this.clone();
-        if let Ok(handle) = std::thread::Builder::new().name("murmur-components".into()).spawn(move || worker.work()) {
+        if let Ok(handle) = std::thread::Builder::new()
+            .name("murmur-components".into())
+            .spawn(move || worker.work())
+        {
             *lock(&this.worker) = Some(handle);
         }
         this
@@ -274,7 +291,9 @@ impl Components {
     // ---- lookups used by the engine and Enhance ----
 
     pub fn engine_dir(&self) -> Option<PathBuf> {
-        self.store.active_dir("engine").filter(|d| d.join(store::ENGINE_FILE).is_file())
+        self.store
+            .active_dir("engine")
+            .filter(|d| d.join(store::ENGINE_FILE).is_file())
     }
     pub fn cuda_dir(&self) -> Option<PathBuf> {
         self.store.active_dir("cuda")
@@ -286,7 +305,11 @@ impl Components {
             return None;
         }
         let inner = lock(&self.inner);
-        if inner.verdicts.get(&id).is_some_and(|v| *v != Verdict::Verified) {
+        if inner
+            .verdicts
+            .get(&id)
+            .is_some_and(|v| *v != Verdict::Verified)
+        {
             return None;
         }
         let no_catalog = inner.catalog.is_none();
@@ -298,7 +321,10 @@ impl Components {
         // using pre-0.5 models in place. Release builds never load unverified files.
         if cfg!(debug_assertions) && no_catalog {
             let legacy = self.legacy_models.join(model);
-            if store::SPEECH_REQUIRED.iter().all(|f| legacy.join(f).is_file()) {
+            if store::SPEECH_REQUIRED
+                .iter()
+                .all(|f| legacy.join(f).is_file())
+            {
                 return Some(legacy);
             }
         }
@@ -306,19 +332,32 @@ impl Components {
     }
     pub fn enhance_model_path(&self, model: &str) -> Option<PathBuf> {
         let id = enhance_id(model);
-        if lock(&self.inner).verdicts.get(&id).is_some_and(|v| *v != Verdict::Verified) {
+        if lock(&self.inner)
+            .verdicts
+            .get(&id)
+            .is_some_and(|v| *v != Verdict::Verified)
+        {
             return None;
         }
-        self.store.active_dir(&id).map(|d| d.join("model.gguf")).filter(|p| p.is_file())
+        self.store
+            .active_dir(&id)
+            .map(|d| d.join("model.gguf"))
+            .filter(|p| p.is_file())
     }
     pub fn manifest(&self) -> Option<Manifest> {
-        lock(&self.inner).catalog.as_ref().map(|c| c.manifest.clone())
+        lock(&self.inner)
+            .catalog
+            .as_ref()
+            .map(|c| c.manifest.clone())
     }
     pub fn job(&self, id: &str) -> Option<Record> {
         lock(&self.inner).jobs.get(id).map(|j| j.record.clone())
     }
     pub fn job_running(&self, id: &str) -> bool {
-        lock(&self.inner).jobs.get(id).is_some_and(|j| !matches!(j.record.phase, Phase::Paused | Phase::Failed))
+        lock(&self.inner)
+            .jobs
+            .get(id)
+            .is_some_and(|j| !matches!(j.record.phase, Phase::Paused | Phase::Failed))
     }
 
     // ---- state for the UI ----
@@ -338,7 +377,12 @@ impl Components {
         found
     }
 
-    fn state_of(&self, inner: &Inner, component: &Component, usage: &Usage) -> (&'static str, Option<String>) {
+    fn state_of(
+        &self,
+        inner: &Inner,
+        component: &Component,
+        usage: &Usage,
+    ) -> (&'static str, Option<String>) {
         let active = self.store.active(&component.id);
         let installed_version = active.as_ref().map(|a| a.version.clone());
         if let Some(job) = inner.jobs.get(&component.id) {
@@ -350,18 +394,31 @@ impl Components {
             };
             return (phase, installed_version);
         }
-        if inner.verdicts.get(&component.id).is_some_and(|v| *v != Verdict::Verified) {
+        if inner
+            .verdicts
+            .get(&component.id)
+            .is_some_and(|v| *v != Verdict::Verified)
+        {
             return ("corrupt", installed_version);
         }
         match active {
-            Some(_) if self.store.active_dir(&component.id).is_none() => ("corrupt", installed_version),
+            Some(_) if self.store.active_dir(&component.id).is_none() => {
+                ("corrupt", installed_version)
+            }
             Some(_) => {
                 let selected = match component.kind {
-                    Kind::SpeechModel => component.model.as_deref() == Some(usage.speech_model.as_str()),
-                    Kind::EnhanceModel => component.model.is_some() && component.model == usage.enhance_model,
+                    Kind::SpeechModel => {
+                        component.model.as_deref() == Some(usage.speech_model.as_str())
+                    }
+                    Kind::EnhanceModel => {
+                        component.model.is_some() && component.model == usage.enhance_model
+                    }
                     Kind::Engine | Kind::Cuda => true,
                 };
-                (if selected { "active" } else { "installed" }, installed_version)
+                (
+                    if selected { "active" } else { "installed" },
+                    installed_version,
+                )
             }
             None if inner.unverified.contains_key(&component.id) => ("unverified", None),
             None => ("available", None),
@@ -399,14 +456,20 @@ impl Components {
         let hardware = self.hardware();
         let inner = lock(&self.inner);
         let mut components = Vec::new();
-        let listed: Vec<Component> = inner.catalog.as_ref().map(|c| c.manifest.local().cloned().collect()).unwrap_or_default();
+        let listed: Vec<Component> = inner
+            .catalog
+            .as_ref()
+            .map(|c| c.manifest.local().cloned().collect())
+            .unwrap_or_default();
         for component in &listed {
             let (state, installed_version) = self.state_of(&inner, component, &usage);
             let job = inner.jobs.get(&component.id).map(Live::progress_json);
             let mut value = serde_json::to_value(component).unwrap_or(Value::Null);
             value["state"] = json!(state);
             value["installed_version"] = json!(installed_version);
-            value["update_available"] = json!(installed_version.as_ref().is_some_and(|v| *v != component.version));
+            value["update_available"] = json!(installed_version
+                .as_ref()
+                .is_some_and(|v| *v != component.version));
             value["in_use"] = json!(self.in_use(component, &usage));
             value["dependents"] = json!(self.dependents(&inner, &component.id));
             value["job"] = job.unwrap_or(Value::Null);
@@ -453,7 +516,11 @@ impl Components {
     // ---- jobs ----
 
     fn persist(&self, inner: &Inner) {
-        let records = inner.jobs.iter().map(|(id, live)| (id.clone(), live.record.clone())).collect();
+        let records = inner
+            .jobs
+            .iter()
+            .map(|(id, live)| (id.clone(), live.record.clone()))
+            .collect();
         if let Err(error) = jobs::save(&self.jobs_file, &records) {
             tracing::warn!(target: "murmur::components", "{error}");
         }
@@ -461,7 +528,9 @@ impl Components {
 
     fn require_catalog<'a>(&self, inner: &'a Inner) -> Result<&'a Catalog, ComponentError> {
         inner.catalog.as_ref().ok_or_else(|| {
-            inner.error.clone().unwrap_or_else(|| ComponentError::new(Reason::NotFound, "No component manifest is available"))
+            inner.error.clone().unwrap_or_else(|| {
+                ComponentError::new(Reason::NotFound, "No component manifest is available")
+            })
         })
     }
 
@@ -470,10 +539,20 @@ impl Components {
         let mut inner = lock(&self.inner);
         let catalog = self.require_catalog(&inner)?.clone();
         let mut order: Vec<Component> = Vec::new();
-        fn visit(catalog: &Manifest, id: &str, order: &mut Vec<Component>, depth: usize) -> Result<(), ComponentError> {
-            let component = catalog.find(id).ok_or_else(|| ComponentError::new(Reason::NotFound, format!("Unknown component {id}")))?;
+        fn visit(
+            catalog: &Manifest,
+            id: &str,
+            order: &mut Vec<Component>,
+            depth: usize,
+        ) -> Result<(), ComponentError> {
+            let component = catalog.find(id).ok_or_else(|| {
+                ComponentError::new(Reason::NotFound, format!("Unknown component {id}"))
+            })?;
             if depth > 8 {
-                return Err(ComponentError::new(Reason::ManifestInvalid, "Component dependencies form a cycle"));
+                return Err(ComponentError::new(
+                    Reason::ManifestInvalid,
+                    "Component dependencies form a cycle",
+                ));
             }
             for dependency in &component.depends {
                 visit(catalog, dependency, order, depth + 1)?;
@@ -487,11 +566,22 @@ impl Components {
             visit(&catalog.manifest, id, &mut order, 0)?;
         }
         for component in order {
-            let current = self.store.active(&component.id).is_some_and(|a| a.version == component.version)
+            let current = self
+                .store
+                .active(&component.id)
+                .is_some_and(|a| a.version == component.version)
                 && self.store.active_dir(&component.id).is_some()
-                && !inner.verdicts.get(&component.id).is_some_and(|v| *v != Verdict::Verified);
+                && !inner
+                    .verdicts
+                    .get(&component.id)
+                    .is_some_and(|v| *v != Verdict::Verified);
             let explicitly = ids.contains(&component.id);
-            if (current && !explicitly) || inner.jobs.get(&component.id).is_some_and(|j| !matches!(j.record.phase, Phase::Paused | Phase::Failed)) {
+            if (current && !explicitly)
+                || inner
+                    .jobs
+                    .get(&component.id)
+                    .is_some_and(|j| !matches!(j.record.phase, Phase::Paused | Phase::Failed))
+            {
                 continue;
             }
             let record = Record {
@@ -522,7 +612,10 @@ impl Components {
         let mut inner = lock(&self.inner);
         let running = inner.running.as_deref() == Some(id);
         let Some(job) = inner.jobs.get_mut(id) else {
-            return Err(ComponentError::new(Reason::NotFound, "No job for this component"));
+            return Err(ComponentError::new(
+                Reason::NotFound,
+                "No job for this component",
+            ));
         };
         if running {
             job.pause = pause;
@@ -548,7 +641,10 @@ impl Components {
     pub fn resume(&self, id: &str) -> Result<(), ComponentError> {
         let mut inner = lock(&self.inner);
         self.require_catalog(&inner)?;
-        let job = inner.jobs.get_mut(id).filter(|j| matches!(j.record.phase, Phase::Paused | Phase::Failed))
+        let job = inner
+            .jobs
+            .get_mut(id)
+            .filter(|j| matches!(j.record.phase, Phase::Paused | Phase::Failed))
             .ok_or_else(|| ComponentError::new(Reason::NotFound, "Nothing to resume"))?;
         job.record.phase = Phase::Queued;
         job.record.error = None;
@@ -566,9 +662,15 @@ impl Components {
     /// Forget a paused or failed job and delete its partial download.
     pub fn discard(&self, id: &str) -> Result<(), ComponentError> {
         let mut inner = lock(&self.inner);
-        let paused = inner.jobs.get(id).is_some_and(|j| matches!(j.record.phase, Phase::Paused | Phase::Failed));
+        let paused = inner
+            .jobs
+            .get(id)
+            .is_some_and(|j| matches!(j.record.phase, Phase::Paused | Phase::Failed));
         if !paused {
-            return Err(ComponentError::new(Reason::Busy, "Only paused or failed jobs can be discarded"));
+            return Err(ComponentError::new(
+                Reason::Busy,
+                "Only paused or failed jobs can be discarded",
+            ));
         }
         let job = inner.jobs.remove(id);
         self.discard_files(&inner, id, job.map(|j| j.record.version));
@@ -597,7 +699,11 @@ impl Components {
                         return;
                     }
                     if let Some(id) = inner.queue.pop_front() {
-                        let component = inner.catalog.as_ref().and_then(|c| c.manifest.find(&id)).cloned();
+                        let component = inner
+                            .catalog
+                            .as_ref()
+                            .and_then(|c| c.manifest.find(&id))
+                            .cloned();
                         match (component, inner.jobs.get_mut(&id)) {
                             (Some(component), Some(job)) => {
                                 job.record.phase = Phase::Downloading;
@@ -656,9 +762,16 @@ impl Components {
         }
     }
 
-    fn run_job(&self, component: &Component, cancel: &Arc<AtomicBool>) -> Result<(), ComponentError> {
+    fn run_job(
+        &self,
+        component: &Component,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<(), ComponentError> {
         let transport = (self.transport)()?;
-        let replace = lock(&self.inner).jobs.get(&component.id).is_some_and(|j| j.record.replace);
+        let replace = lock(&self.inner)
+            .jobs
+            .get(&component.id)
+            .is_some_and(|j| j.record.replace);
         let stop_engine = |c: &Component| {
             if matches!(c.kind, Kind::Engine | Kind::Cuda) {
                 (self.host.stop_engine)();
@@ -674,12 +787,16 @@ impl Components {
             now: (self.now)(),
             before_activate: &stop_engine,
         };
-        jobs::run(component, &ctx, &mut |phase, done, total| self.progress(&component.id, phase, done, total))
+        jobs::run(component, &ctx, &mut |phase, done, total| {
+            self.progress(&component.id, phase, done, total)
+        })
     }
 
     fn progress(&self, id: &str, phase: Phase, done: u64, total: u64) {
         let mut inner = lock(&self.inner);
-        let Some(job) = inner.jobs.get_mut(id) else { return };
+        let Some(job) = inner.jobs.get_mut(id) else {
+            return;
+        };
         let phase_changed = job.record.phase != phase;
         job.record.phase = phase;
         job.record.bytes_done = done;
@@ -687,8 +804,13 @@ impl Components {
         let elapsed = job.sample.0.elapsed();
         if elapsed >= Duration::from_secs(1) {
             let rate = done.saturating_sub(job.sample.1) as f64 / elapsed.as_secs_f64();
-            job.rate = if job.rate == 0.0 { rate } else { job.rate * 0.7 + rate * 0.3 };
-            job.eta = (job.rate > 1.0).then(|| (total.saturating_sub(done) as f64 / job.rate) as u64);
+            job.rate = if job.rate == 0.0 {
+                rate
+            } else {
+                job.rate * 0.7 + rate * 0.3
+            };
+            job.eta =
+                (job.rate > 1.0).then(|| (total.saturating_sub(done) as f64 / job.rate) as u64);
             job.sample = (Instant::now(), done);
         }
         if phase_changed || job.emitted.elapsed() >= Duration::from_millis(250) || done == total {
@@ -707,44 +829,67 @@ impl Components {
     pub fn remove(&self, id: &str) -> Result<(), ComponentError> {
         let usage = (self.host.usage)();
         let inner = lock(&self.inner);
-        if inner.jobs.get(id).is_some_and(|j| !matches!(j.record.phase, Phase::Paused | Phase::Failed)) {
-            return Err(ComponentError::new(Reason::Busy, "This component is being installed"));
+        if inner
+            .jobs
+            .get(id)
+            .is_some_and(|j| !matches!(j.record.phase, Phase::Paused | Phase::Failed))
+        {
+            return Err(ComponentError::new(
+                Reason::Busy,
+                "This component is being installed",
+            ));
         }
-        let active = self.store.active(id).ok_or_else(|| ComponentError::new(Reason::NotFound, "This component is not installed"))?;
+        let active = self.store.active(id).ok_or_else(|| {
+            ComponentError::new(Reason::NotFound, "This component is not installed")
+        })?;
         let dependents = self.dependents(&inner, id);
         if !dependents.is_empty() {
-            return Err(ComponentError::new(Reason::InUse, format!("{} needs this component. Remove it first.", dependents.join(", "))));
+            return Err(ComponentError::new(
+                Reason::InUse,
+                format!(
+                    "{} needs this component. Remove it first.",
+                    dependents.join(", ")
+                ),
+            ));
         }
-        let component = inner.catalog.as_ref().and_then(|c| c.manifest.find(id)).cloned().unwrap_or_else(|| Component {
-            id: id.into(),
-            version: active.version.clone(),
-            os: manifest::OS.into(),
-            arch: manifest::ARCH.into(),
-            kind: active.kind,
-            urls: vec![],
-            size_bytes: 0,
-            sha256: None,
-            installed_size_bytes: 0,
-            temp_size_bytes: 0,
-            archive: manifest::Archive::Zip,
-            files: vec![],
-            depends: vec![],
-            license: manifest::License { name: String::new(), url: String::new() },
-            provenance: manifest::Provenance {
-                kind: manifest::ProvenanceType::MurmurAttestedOnly,
-                source_url: String::new(),
-                source_revision: String::new(),
-                source_sha256: String::new(),
-                note: String::new(),
-            },
-            display_name: id.into(),
-            description: String::new(),
-            model: active.model.clone(),
-            quality: None,
-            speed: None,
-            memory_mb: None,
-            languages: None,
-        });
+        let component = inner
+            .catalog
+            .as_ref()
+            .and_then(|c| c.manifest.find(id))
+            .cloned()
+            .unwrap_or_else(|| Component {
+                id: id.into(),
+                version: active.version.clone(),
+                os: manifest::OS.into(),
+                arch: manifest::ARCH.into(),
+                kind: active.kind,
+                urls: vec![],
+                size_bytes: 0,
+                sha256: None,
+                installed_size_bytes: 0,
+                temp_size_bytes: 0,
+                archive: manifest::Archive::Zip,
+                files: vec![],
+                depends: vec![],
+                license: manifest::License {
+                    name: String::new(),
+                    url: String::new(),
+                },
+                provenance: manifest::Provenance {
+                    kind: manifest::ProvenanceType::MurmurAttestedOnly,
+                    source_url: String::new(),
+                    source_revision: String::new(),
+                    source_sha256: String::new(),
+                    note: String::new(),
+                },
+                display_name: id.into(),
+                description: String::new(),
+                model: active.model.clone(),
+                quality: None,
+                speed: None,
+                memory_mb: None,
+                languages: None,
+            });
         if let Some(reason) = self.in_use(&component, &usage) {
             return Err(ComponentError::new(Reason::InUse, reason));
         }
@@ -769,13 +914,23 @@ impl Components {
             self.require_catalog(&inner)?.manifest.find(id).cloned()
         }
         .ok_or_else(|| ComponentError::new(Reason::NotFound, "Unknown component"))?;
-        let dir = self.store.active_dir(id).ok_or_else(|| ComponentError::new(Reason::NotFound, "This component is not installed"))?;
+        let dir = self.store.active_dir(id).ok_or_else(|| {
+            ComponentError::new(Reason::NotFound, "This component is not installed")
+        })?;
         let installed = self.store.active(id).map(|a| a.version);
         let verdict = if installed.as_deref() != Some(component.version.as_str()) {
             // An older version: only the smoke test can be repeated.
-            if store::smoke_test(&component, &dir).is_ok() { Verdict::Verified } else { Verdict::Mismatch }
+            if store::smoke_test(&component, &dir).is_ok() {
+                Verdict::Verified
+            } else {
+                Verdict::Mismatch
+            }
         } else if component.files.is_empty() {
-            if store::smoke_test(&component, &dir).is_ok() { Verdict::Verified } else { Verdict::Mismatch }
+            if store::smoke_test(&component, &dir).is_ok() {
+                Verdict::Verified
+            } else {
+                Verdict::Mismatch
+            }
         } else {
             store::verify_files(&component, &dir, &AtomicBool::new(false))?
         };
@@ -791,12 +946,23 @@ impl Components {
         {
             let mut inner = lock(&self.inner);
             if inner.checking {
-                return Err(ComponentError::new(Reason::Busy, "Already checking for updates"));
+                return Err(ComponentError::new(
+                    Reason::Busy,
+                    "Already checking for updates",
+                ));
             }
             inner.checking = true;
         }
         self.emit_changed();
-        let result = (self.transport)().and_then(|t| catalog::fetch_and_admit(&root, &self.files, t.as_ref(), &catalog::base_url(), (self.now)()));
+        let result = (self.transport)().and_then(|t| {
+            catalog::fetch_and_admit(
+                &root,
+                &self.files,
+                t.as_ref(),
+                &catalog::base_url(),
+                (self.now)(),
+            )
+        });
         let mut inner = lock(&self.inner);
         inner.checking = false;
         let outcome = match result {
@@ -825,7 +991,9 @@ impl Components {
     /// moved into the store (same file system, no copy, no download); anything else is left
     /// where it is and shown as unverified. Nothing is deleted.
     pub fn migrate(&self) {
-        let Some(manifest) = self.manifest() else { return };
+        let Some(manifest) = self.manifest() else {
+            return;
+        };
         lock(&self.inner).migrating = true;
         self.emit_changed();
         let mut changed = Vec::new();
@@ -841,22 +1009,30 @@ impl Components {
                 }
                 _ => continue,
             };
-            if !manifest::safe_id(component.model.as_deref().unwrap_or("")) && component.kind == Kind::SpeechModel {
+            if !manifest::safe_id(component.model.as_deref().unwrap_or(""))
+                && component.kind == Kind::SpeechModel
+            {
                 continue;
             }
-            let Ok(meta) = fs::symlink_metadata(&legacy) else { continue };
+            let Ok(meta) = fs::symlink_metadata(&legacy) else {
+                continue;
+            };
             if !meta.is_dir() {
                 continue;
             }
-            let verdict = store::verify_files(component, &legacy, &self.stopping).unwrap_or(Verdict::Missing);
+            let verdict =
+                store::verify_files(component, &legacy, &self.stopping).unwrap_or(Verdict::Missing);
             if verdict != Verdict::Verified {
                 tracing::info!(target: "murmur::components", id = %component.id, ?verdict, "pre-0.5 model not verified; left in place");
-                lock(&self.inner).unverified.insert(component.id.clone(), legacy);
+                lock(&self.inner)
+                    .unverified
+                    .insert(component.id.clone(), legacy);
                 changed.push(component.kind);
                 continue;
             }
             let target = self.store.version_dir(&component.id, &component.version);
-            let moved = fs::create_dir_all(self.store.component_dir(&component.id)).is_ok() && store::rename(&legacy, &target).is_ok();
+            let moved = fs::create_dir_all(self.store.component_dir(&component.id)).is_ok()
+                && store::rename(&legacy, &target).is_ok();
             let record = store::Active {
                 version: component.version.clone(),
                 kind: component.kind,
@@ -884,18 +1060,12 @@ impl Components {
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
         {
-            let inner = lock(&self.inner);
-            for job in inner.jobs.values() {
-                job.cancel.store(true, Ordering::Release);
-            }
-        }
-        // A running job is cancelled, not paused; mark it paused so it can be resumed later.
-        {
+            // Mark jobs paused before cancelling, so the worker keeps their partial
+            // downloads: an interrupted job resumes later, it is not discarded.
             let mut inner = lock(&self.inner);
-            if let Some(id) = inner.running.clone() {
-                if let Some(job) = inner.jobs.get_mut(&id) {
-                    job.pause = true;
-                }
+            for job in inner.jobs.values_mut() {
+                job.pause = true;
+                job.cancel.store(true, Ordering::Release);
             }
         }
         self.wake.notify_all();
@@ -914,13 +1084,25 @@ impl Components {
 
 /// Headless `--install-component`: verify `manifest` + `signature` with the trust root in
 /// force, then install `path` (a zip, or a directory of model files) without the network.
-pub fn install_from_files(data: &Path, path: &Path, manifest_path: &Path, signature_path: &Path) -> Result<String, ComponentError> {
+pub fn install_from_files(
+    data: &Path,
+    path: &Path,
+    manifest_path: &Path,
+    signature_path: &Path,
+) -> Result<String, ComponentError> {
     let root = trust::load_root()?;
     let store_root = data.join("components");
     let files = Files::new(&store_root);
-    let bytes = fs::read(manifest_path).map_err(|_| ComponentError::new(Reason::Io, "Cannot read the manifest"))?;
-    let signature = fs::read(signature_path).map_err(|_| ComponentError::new(Reason::Io, "Cannot read the signature"))?;
-    let manifest = catalog::verify(&root, fs::read(&files.cert).ok().as_deref(), &bytes, &signature)?;
+    let bytes = fs::read(manifest_path)
+        .map_err(|_| ComponentError::new(Reason::Io, "Cannot read the manifest"))?;
+    let signature = fs::read(signature_path)
+        .map_err(|_| ComponentError::new(Reason::Io, "Cannot read the signature"))?;
+    let manifest = catalog::verify(
+        &root,
+        fs::read(&files.cert).ok().as_deref(),
+        &bytes,
+        &signature,
+    )?;
     let sha = catalog::digest(&bytes);
     let mut state = catalog::RollbackState::load(&files.state);
     state.admit(&manifest, &sha, catalog::now())?;
@@ -932,7 +1114,12 @@ pub fn install_from_files(data: &Path, path: &Path, manifest_path: &Path, signat
     let none: &dyn Fn(&Component) = &|_| {};
     struct Offline;
     impl Transport for Offline {
-        fn open(&self, _: &str, _: u64, _: &Arc<AtomicBool>) -> Result<fetch::Body, ComponentError> {
+        fn open(
+            &self,
+            _: &str,
+            _: u64,
+            _: &Arc<AtomicBool>,
+        ) -> Result<fetch::Body, ComponentError> {
             Err(ComponentError::new(Reason::NotAllowed, "Offline install"))
         }
     }
@@ -951,28 +1138,46 @@ pub fn install_from_files(data: &Path, path: &Path, manifest_path: &Path, signat
             .local()
             .filter(|c| !c.files.is_empty())
             .find(|c| store::verify_files(c, path, &cancel).ok() == Some(Verdict::Verified))
-            .ok_or_else(|| ComponentError::new(Reason::ChecksumMismatch, "The folder matches no component in the manifest"))?;
+            .ok_or_else(|| {
+                ComponentError::new(
+                    Reason::ChecksumMismatch,
+                    "The folder matches no component in the manifest",
+                )
+            })?;
         let staging = store.staging_dir(&component.id, &component.version);
         let _ = fs::remove_dir_all(&staging);
-        fs::create_dir_all(&staging).map_err(|_| ComponentError::new(Reason::Io, "Cannot stage the component"))?;
+        fs::create_dir_all(&staging)
+            .map_err(|_| ComponentError::new(Reason::Io, "Cannot stage the component"))?;
         for file in &component.files {
-            fs::copy(path.join(&file.name), staging.join(&file.name)).map_err(|_| ComponentError::new(Reason::Io, "Cannot copy the model"))?;
+            fs::copy(path.join(&file.name), staging.join(&file.name))
+                .map_err(|_| ComponentError::new(Reason::Io, "Cannot copy the model"))?;
         }
-        if let Err(error) = store::verify_files(component, &staging, &cancel).and_then(|v| match v {
-            Verdict::Verified => store::smoke_test(component, &staging),
-            _ => Err(ComponentError::new(Reason::ChecksumMismatch, "The copied files changed")),
-        }) {
+        if let Err(error) =
+            store::verify_files(component, &staging, &cancel).and_then(|v| match v {
+                Verdict::Verified => store::smoke_test(component, &staging),
+                _ => Err(ComponentError::new(
+                    Reason::ChecksumMismatch,
+                    "The copied files changed",
+                )),
+            })
+        {
             let _ = fs::remove_dir_all(&staging);
             return Err(error);
         }
         store.activate(component, &staging, true, catalog::now())?;
         return Ok(component.id.clone());
     }
-    let (size, digest) = fetch::hash_file(path, None).map_err(|_| ComponentError::new(Reason::Io, "Cannot read the archive"))?;
+    let (size, digest) = fetch::hash_file(path, None)
+        .map_err(|_| ComponentError::new(Reason::Io, "Cannot read the archive"))?;
     let component = manifest
         .local()
         .find(|c| c.sha256.as_deref() == Some(digest.as_str()) && c.size_bytes == size)
-        .ok_or_else(|| ComponentError::new(Reason::ChecksumMismatch, "The archive matches no component in the manifest"))?;
+        .ok_or_else(|| {
+            ComponentError::new(
+                Reason::ChecksumMismatch,
+                "The archive matches no component in the manifest",
+            )
+        })?;
     jobs::install_local(component, path, &ctx)?;
     Ok(component.id.clone())
 }

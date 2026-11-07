@@ -274,7 +274,10 @@ fn resolve_engine(
     if development {
         return Ok(EngineSource::Development);
     }
-    if let Some(engine) = store.map(|dir| dir.join(ENGINE_FILE)).filter(|p| p.is_file()) {
+    if let Some(engine) = store
+        .map(|dir| dir.join(ENGINE_FILE))
+        .filter(|p| p.is_file())
+    {
         return Ok(EngineSource::Executable(engine));
     }
     let packaged = packaged_engine(executable_dir);
@@ -302,7 +305,12 @@ fn sidecar_command(locate: &dyn Locate) -> Result<Command> {
     let executable = std::env::current_exe().context("Locate Murmur executable")?;
     let parent = executable.parent().context("Executable has no parent")?;
     let override_path = std::env::var_os(ENGINE_ENV).map(PathBuf::from);
-    match resolve_engine(override_path, parent, cfg!(debug_assertions), locate.engine_dir())? {
+    match resolve_engine(
+        override_path,
+        parent,
+        cfg!(debug_assertions),
+        locate.engine_dir(),
+    )? {
         EngineSource::Development => Ok(development_command()),
         EngineSource::Executable(path) => {
             let mut command = Command::new(path);
@@ -320,7 +328,11 @@ fn sidecar_command(locate: &dyn Locate) -> Result<Command> {
 
 /// CUDA libraries: the active GPU add-on component, else a packaged `lib/murmur/cuda`.
 #[cfg(target_os = "linux")]
-fn configure_linux_cuda(command: &mut Command, executable_dir: &Path, store: Option<PathBuf>) -> Result<()> {
+fn configure_linux_cuda(
+    command: &mut Command,
+    executable_dir: &Path,
+    store: Option<PathBuf>,
+) -> Result<()> {
     use std::{collections::HashSet, env, ffi::OsString};
     let cuda = match store.filter(|dir| dir.is_dir()) {
         Some(dir) => dir,
@@ -398,10 +410,17 @@ mod cuda_launch_tests {
         fs::create_dir_all(&component).unwrap();
         let mut command = Command::new(bin.join("murmur-engine"));
         configure_linux_cuda(&mut command, &bin, Some(component.clone())).unwrap();
-        let value = command.get_envs().find(|(n, _)| *n == "LD_LIBRARY_PATH").and_then(|(_, v)| v).unwrap();
+        let value = command
+            .get_envs()
+            .find(|(n, _)| *n == "LD_LIBRARY_PATH")
+            .and_then(|(_, v)| v)
+            .unwrap();
         let paths: Vec<_> = std::env::split_paths(value).collect();
         assert_eq!(paths[0], component);
-        assert!(!paths.contains(&packaged), "only one CUDA runtime on the loader path");
+        assert!(
+            !paths.contains(&packaged),
+            "only one CUDA runtime on the loader path"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
@@ -512,7 +531,10 @@ mod resolution_tests {
     #[test]
     fn missing_engine_is_classified_as_permanent() {
         let absent = anyhow::Error::new(EngineMissing(None));
-        assert_eq!(missing_engine(&absent).as_deref(), Some(super::MISSING_MESSAGE));
+        assert_eq!(
+            missing_engine(&absent).as_deref(),
+            Some(super::MISSING_MESSAGE)
+        );
         assert_eq!(missing_engine(&anyhow::anyhow!("spawn failed")), None);
     }
 
@@ -520,7 +542,10 @@ mod resolution_tests {
     fn release_without_engine_reports_missing() {
         let layout = Layout::new("absent");
         let error = resolve_engine(None, &layout.bin(), false, None).unwrap_err();
-        assert_eq!(error.to_string(), "Speech engine not installed — open Settings");
+        assert_eq!(
+            error.to_string(),
+            "Speech engine not installed — open Settings"
+        );
     }
 
     #[test]
@@ -530,13 +555,25 @@ mod resolution_tests {
         let store = layout.0.join("data/components/engine/0.5.0");
         fs::create_dir_all(&store).unwrap();
         // An engine directory without the executable is ignored.
-        assert_eq!(resolve_engine(None, &layout.bin(), false, Some(store.clone())).unwrap(), EngineSource::Executable(packaged));
+        assert_eq!(
+            resolve_engine(None, &layout.bin(), false, Some(store.clone())).unwrap(),
+            EngineSource::Executable(packaged)
+        );
         fs::write(store.join(ENGINE_FILE), b"engine").unwrap();
-        assert_eq!(resolve_engine(None, &layout.bin(), false, Some(store.clone())).unwrap(), EngineSource::Executable(store.join(ENGINE_FILE)));
-        assert_eq!(resolve_engine(None, &layout.bin(), true, Some(store.clone())).unwrap(), EngineSource::Development);
+        assert_eq!(
+            resolve_engine(None, &layout.bin(), false, Some(store.clone())).unwrap(),
+            EngineSource::Executable(store.join(ENGINE_FILE))
+        );
+        assert_eq!(
+            resolve_engine(None, &layout.bin(), true, Some(store.clone())).unwrap(),
+            EngineSource::Development
+        );
         let custom = layout.0.join("custom-engine");
         fs::write(&custom, b"engine").unwrap();
-        assert_eq!(resolve_engine(Some(custom.clone()), &layout.bin(), false, Some(store)).unwrap(), EngineSource::Executable(custom));
+        assert_eq!(
+            resolve_engine(Some(custom.clone()), &layout.bin(), false, Some(store)).unwrap(),
+            EngineSource::Executable(custom)
+        );
     }
 }
 pub struct Engine {
@@ -617,7 +654,9 @@ impl Engine {
                         Ok(Message::Request(request)) => {
                             let result = match process.as_mut() {
                                 Some(p) => p.call(&request, &app, &stop),
-                                None if held => Err(anyhow::anyhow!("The speech engine is being updated")),
+                                None if held => {
+                                    Err(anyhow::anyhow!("The speech engine is being updated"))
+                                }
                                 None => {
                                     Err(anyhow::anyhow!(missing.clone().unwrap_or_else(|| {
                                         "Engine unavailable after two failures; restart Murmur"
@@ -724,7 +763,11 @@ fn attach_model_path(locate: &dyn Locate, method: &str, params: &mut Value) {
     if !matches!(method, "status" | "warm" | "transcribe" | "partial") {
         return;
     }
-    if let Some(model) = params.get("model").and_then(Value::as_str).map(str::to_owned) {
+    if let Some(model) = params
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    {
         params["model_path"] = match locate.model_dir(&model) {
             Some(dir) => json!(dir.to_string_lossy()),
             None => Value::Null,
@@ -751,8 +794,12 @@ mod model_path_tests {
     use std::path::PathBuf;
     struct Fixed;
     impl Locate for Fixed {
-        fn engine_dir(&self) -> Option<PathBuf> { None }
-        fn cuda_dir(&self) -> Option<PathBuf> { None }
+        fn engine_dir(&self) -> Option<PathBuf> {
+            None
+        }
+        fn cuda_dir(&self) -> Option<PathBuf> {
+            None
+        }
         fn model_dir(&self, model: &str) -> Option<PathBuf> {
             (model == "tiny.en").then(|| PathBuf::from("/data/components/speech-tiny.en/abc"))
         }
@@ -764,7 +811,10 @@ mod model_path_tests {
         assert_eq!(params["model_path"], "/data/components/speech-tiny.en/abc");
         let mut params = json!({"model": "base.en"});
         attach_model_path(&Fixed, "warm", &mut params);
-        assert!(params["model_path"].is_null(), "unverified or absent: never a guessed path");
+        assert!(
+            params["model_path"].is_null(),
+            "unverified or absent: never a guessed path"
+        );
         let mut params = json!({"name": "tiny.en"});
         attach_model_path(&Fixed, "models.list", &mut params);
         assert!(params.get("model_path").is_none());

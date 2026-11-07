@@ -826,9 +826,13 @@ impl Controller {
                 }
                 if kind != Kind::EnhanceModel && !self.active {
                     match state.refresh_engine() {
-                        Ok(result) if result["model_available"].as_bool() == Some(true) => warm_engine(&state.app, &self.config),
+                        Ok(result) if result["model_available"].as_bool() == Some(true) => {
+                            warm_engine(&state.app, &self.config)
+                        }
                         Ok(_) => {}
-                        Err(error) => tracing::info!(%error, "Engine status after component change"),
+                        Err(error) => {
+                            tracing::info!(%error, "Engine status after component change")
+                        }
                     }
                 }
             }

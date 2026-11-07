@@ -50,18 +50,6 @@ pub fn allowed_url(url: &reqwest::Url) -> bool {
         && url.port().is_none_or(|p| p == 443)
 }
 
-/// URL without query or fragment, for logs and messages (signed CDN URLs carry tokens).
-pub fn redact(url: &str) -> String {
-    match reqwest::Url::parse(url) {
-        Ok(mut parsed) => {
-            parsed.set_query(None);
-            parsed.set_fragment(None);
-            parsed.to_string()
-        }
-        Err(_) => "<invalid URL>".into(),
-    }
-}
-
 pub struct Body {
     /// Bytes the server says follow (the rest after `offset`, or the whole file).
     pub length: Option<u64>,
@@ -73,7 +61,12 @@ pub struct Body {
 pub trait Transport: Send + Sync {
     /// GET `url` from byte `offset`. The reader fails with `TimedOut` when no byte arrives
     /// for the stall timeout and with `Interrupted` once `cancel` is set.
-    fn open(&self, url: &str, offset: u64, cancel: &Arc<AtomicBool>) -> Result<Body, ComponentError>;
+    fn open(
+        &self,
+        url: &str,
+        offset: u64,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Body, ComponentError>;
 }
 
 fn network(message: &str) -> ComponentError {
@@ -164,10 +157,18 @@ fn content_range_start(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 }
 
 impl Transport for Https {
-    fn open(&self, url: &str, offset: u64, cancel: &Arc<AtomicBool>) -> Result<Body, ComponentError> {
+    fn open(
+        &self,
+        url: &str,
+        offset: u64,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Body, ComponentError> {
         let parsed = reqwest::Url::parse(url).map_err(|_| network("Invalid download URL"))?;
         if !allowed_url(&parsed) {
-            return Err(ComponentError::new(Reason::NotAllowed, "Download location is not allowed"));
+            return Err(ComponentError::new(
+                Reason::NotAllowed,
+                "Download location is not allowed",
+            ));
         }
         let client = self.client.clone();
         let flag = cancel.clone();
@@ -337,7 +338,10 @@ pub struct Retry {
 }
 impl Default for Retry {
     fn default() -> Self {
-        Self { retries: 3, backoff: Duration::from_secs(2) }
+        Self {
+            retries: 3,
+            backoff: Duration::from_secs(2),
+        }
     }
 }
 
@@ -363,7 +367,8 @@ pub fn download(
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(), ComponentError> {
     let result = download_inner(target, transport, cancel, retry, progress);
-    if matches!(&result, Err(e) if matches!(e.reason, Reason::SizeMismatch | Reason::ChecksumMismatch)) {
+    if matches!(&result, Err(e) if matches!(e.reason, Reason::SizeMismatch | Reason::ChecksumMismatch))
+    {
         let _ = fs::remove_file(target.part);
     }
     result
@@ -387,27 +392,34 @@ fn download_inner(
         .open(target.part)
         .map_err(|_| io("Could not open the download file"))?;
     let mut hasher = Sha256::new();
-    let mut done = file.metadata().map_err(|_| io("Could not read the download file"))?.len();
+    let mut done = file
+        .metadata()
+        .map_err(|_| io("Could not read the download file"))?
+        .len();
     if done > target.size {
-        file.set_len(0).map_err(|_| io("Could not reset the download file"))?;
+        file.set_len(0)
+            .map_err(|_| io("Could not reset the download file"))?;
         done = 0;
     }
     // Resume: hash every byte already on disk again; nothing from a previous run is trusted.
     let mut buffer = vec![0u8; 1 << 20];
     if done > 0 {
-        file.seek(SeekFrom::Start(0)).map_err(|_| io("Could not read the download file"))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| io("Could not read the download file"))?;
         let mut remaining = done;
         while remaining > 0 {
             if cancel.load(Ordering::Acquire) {
                 return Err(cancelled());
             }
             let want = remaining.min(buffer.len() as u64) as usize;
-            file.read_exact(&mut buffer[..want]).map_err(|_| io("Could not read the download file"))?;
+            file.read_exact(&mut buffer[..want])
+                .map_err(|_| io("Could not read the download file"))?;
             hasher.update(&buffer[..want]);
             remaining -= want as u64;
         }
     }
-    file.seek(SeekFrom::Start(done)).map_err(|_| io("Could not read the download file"))?;
+    file.seek(SeekFrom::Start(done))
+        .map_err(|_| io("Could not read the download file"))?;
     progress(done, target.size);
     let mut failures = 0u32;
     let mut attempt = 0usize;
@@ -421,14 +433,19 @@ fn download_inner(
             let body = transport.open(url, done, cancel)?;
             if done > 0 && !body.resumed {
                 // The server ignored Range: start again from byte 0.
-                file.set_len(0).map_err(|_| io("Could not reset the download file"))?;
-                file.seek(SeekFrom::Start(0)).map_err(|_| io("Could not reset the download file"))?;
+                file.set_len(0)
+                    .map_err(|_| io("Could not reset the download file"))?;
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|_| io("Could not reset the download file"))?;
                 hasher = Sha256::new();
                 done = 0;
                 progress(0, target.size);
             }
             if body.length.is_some_and(|n| n != target.size - done) {
-                return Err(ComponentError::new(Reason::SizeMismatch, "The server reported an unexpected size"));
+                return Err(ComponentError::new(
+                    Reason::SizeMismatch,
+                    "The server reported an unexpected size",
+                ));
             }
             let mut reader = body.reader;
             loop {
@@ -444,9 +461,13 @@ fn download_inner(
                     return Ok(());
                 }
                 if done + n as u64 > target.size {
-                    return Err(ComponentError::new(Reason::SizeMismatch, "The download is larger than expected"));
+                    return Err(ComponentError::new(
+                        Reason::SizeMismatch,
+                        "The download is larger than expected",
+                    ));
                 }
-                file.write_all(&buffer[..n]).map_err(|_| io("Could not write the download (disk full?)"))?;
+                file.write_all(&buffer[..n])
+                    .map_err(|_| io("Could not write the download (disk full?)"))?;
                 hasher.update(&buffer[..n]);
                 done += n as u64;
                 progress(done, target.size);
@@ -457,7 +478,10 @@ fn download_inner(
                 // Clean end of stream before the expected size: the transfer was cut short.
                 failures += 1;
                 if failures > retry.retries {
-                    return Err(ComponentError::new(Reason::SizeMismatch, "The download ended early"));
+                    return Err(ComponentError::new(
+                        Reason::SizeMismatch,
+                        "The download ended early",
+                    ));
                 }
             }
             Ok(()) => {}
@@ -470,7 +494,9 @@ fn download_inner(
             Err(error) => return Err(error),
         }
         if done < target.size {
-            let wait = retry.backoff.saturating_mul(1 << (failures.saturating_sub(1)).min(6));
+            let wait = retry
+                .backoff
+                .saturating_mul(1 << (failures.saturating_sub(1)).min(6));
             let deadline = Instant::now() + wait;
             while Instant::now() < deadline {
                 if cancel.load(Ordering::Acquire) {
@@ -480,9 +506,14 @@ fn download_inner(
             }
         }
     }
-    file.flush().and_then(|_| file.sync_all()).map_err(|_| io("Could not save the download"))?;
+    file.flush()
+        .and_then(|_| file.sync_all())
+        .map_err(|_| io("Could not save the download"))?;
     if !hex(&hasher.finalize()).eq_ignore_ascii_case(target.sha256) {
-        return Err(ComponentError::new(Reason::ChecksumMismatch, "The download failed its SHA-256 check"));
+        return Err(ComponentError::new(
+            Reason::ChecksumMismatch,
+            "The download failed its SHA-256 check",
+        ));
     }
     Ok(())
 }
@@ -531,7 +562,9 @@ pub mod testserver {
                         if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
                             break;
                         }
-                        if let Some(value) = header.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        if let Some(value) =
+                            header.to_ascii_lowercase().strip_prefix("range: bytes=")
+                        {
                             range = value.trim().trim_end_matches('-').parse().ok();
                         }
                     }
@@ -552,7 +585,10 @@ pub mod testserver {
             format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{}/{}\r\nConnection: close\r\n\r\n",
                 slice.len(), body.len().saturating_sub(1), body.len())
         } else {
-            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", slice.len())
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                slice.len()
+            )
         };
         let _ = stream.write_all(header.as_bytes());
         let _ = stream.write_all(&slice[..limit.unwrap_or(slice.len()).min(slice.len())]);
@@ -568,7 +604,10 @@ mod tests {
         Https::new(Duration::from_millis(400)).unwrap()
     }
     fn fast() -> Retry {
-        Retry { retries: 3, backoff: Duration::from_millis(10) }
+        Retry {
+            retries: 3,
+            backoff: Duration::from_millis(10),
+        }
     }
     fn temp(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("murmur-fetch-{name}-{}", std::process::id()));
@@ -612,66 +651,127 @@ mod tests {
         ] {
             assert!(!allowed_url(&reqwest::Url::parse(bad).unwrap()), "{bad}");
         }
-        assert_eq!(redact("https://us.aws.cdn.hf.co/x?X-Amz-Signature=secret#f"), "https://us.aws.cdn.hf.co/x");
     }
 
     #[test]
     fn every_disallowed_redirect_class_is_refused() {
         let hops = Arc::new(Mutex::new(0u32));
         let counter = hops.clone();
-        let server = start(Arc::new(move |request: &Request, stream: &mut TcpStream| {
-            let location = match request.path.as_str() {
-                "/http" => "http://github.com/x".to_owned(),
-                "/host" => "https://example.com/x".to_owned(),
-                "/userinfo" => "https://u:p@github.com/x".to_owned(),
-                "/port" => "https://github.com:8443/x".to_owned(),
-                "/ip" => "https://140.82.112.3/x".to_owned(),
-                "/ipv6" => "https://[::1]/x".to_owned(),
-                "/wildcard" => "https://evil.hf.co/x".to_owned(),
-                "/scheme" => "file:///etc/passwd".to_owned(),
-                path => {
-                    // /loop/N → /loop/N+1: more than five hops.
-                    *counter.lock().unwrap() += 1;
-                    let n: u32 = path.trim_start_matches("/loop/").parse().unwrap_or(0);
-                    format!("/loop/{}", n + 1)
-                }
-            };
-            let _ = write!(stream, "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        }));
+        let server = start(Arc::new(
+            move |request: &Request, stream: &mut TcpStream| {
+                let location = match request.path.as_str() {
+                    "/http" => "http://github.com/x".to_owned(),
+                    "/host" => "https://example.com/x".to_owned(),
+                    "/userinfo" => "https://u:p@github.com/x".to_owned(),
+                    "/port" => "https://github.com:8443/x".to_owned(),
+                    "/ip" => "https://140.82.112.3/x".to_owned(),
+                    "/ipv6" => "https://[::1]/x".to_owned(),
+                    "/wildcard" => "https://evil.hf.co/x".to_owned(),
+                    "/scheme" => "file:///etc/passwd".to_owned(),
+                    path => {
+                        // /loop/N → /loop/N+1: more than five hops.
+                        *counter.lock().unwrap() += 1;
+                        let n: u32 = path.trim_start_matches("/loop/").parse().unwrap_or(0);
+                        format!("/loop/{}", n + 1)
+                    }
+                };
+                let _ = write!(stream, "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            },
+        ));
         let t = transport();
         let flag = Arc::new(AtomicBool::new(false));
-        for path in ["/http", "/host", "/userinfo", "/port", "/ip", "/ipv6", "/wildcard", "/scheme", "/loop/0"] {
-            let error = t.open(&format!("{}{path}", server.base), 0, &flag).err().unwrap_or_else(|| panic!("{path} followed"));
+        for path in [
+            "/http",
+            "/host",
+            "/userinfo",
+            "/port",
+            "/ip",
+            "/ipv6",
+            "/wildcard",
+            "/scheme",
+            "/loop/0",
+        ] {
+            let error = t
+                .open(&format!("{}{path}", server.base), 0, &flag)
+                .err()
+                .unwrap_or_else(|| panic!("{path} followed"));
             assert_eq!(error.reason, Reason::NotAllowed, "{path}: {error:?}");
         }
-        assert_eq!(*hops.lock().unwrap(), MAX_REDIRECTS as u32 + 1, "stops after five redirects");
+        assert_eq!(
+            *hops.lock().unwrap(),
+            MAX_REDIRECTS as u32 + 1,
+            "stops after five redirects"
+        );
     }
 
     #[test]
     fn complete_download_verifies_size_and_hash() {
         let data = Arc::new(body());
         let served = data.clone();
-        let server = start(Arc::new(move |r: &Request, s: &mut TcpStream| respond(s, &served, r.range, None)));
+        let server = start(Arc::new(move |r: &Request, s: &mut TcpStream| {
+            respond(s, &served, r.range, None)
+        }));
         let dir = temp("ok");
         let part = dir.join("x.part");
         let urls = vec![format!("{}/x", server.base)];
         let digest = sha(&data);
-        let target = Target { urls: &urls, size: data.len() as u64, sha256: &digest, part: &part };
+        let target = Target {
+            urls: &urls,
+            size: data.len() as u64,
+            sha256: &digest,
+            part: &part,
+        };
         let mut seen = 0;
-        download(&target, &transport(), &Arc::new(AtomicBool::new(false)), fast(), &mut |d, _| seen = d).unwrap();
+        download(
+            &target,
+            &transport(),
+            &Arc::new(AtomicBool::new(false)),
+            fast(),
+            &mut |d, _| seen = d,
+        )
+        .unwrap();
         assert_eq!(seen, data.len() as u64);
         assert_eq!(fs::read(&part).unwrap(), *data);
         // Wrong hash: verification failure deletes the part and is not retried.
         fs::remove_file(&part).unwrap();
         let wrong = "0".repeat(64);
-        let target = Target { sha256: &wrong, ..target };
+        let target = Target {
+            sha256: &wrong,
+            ..target
+        };
         let before = server.requests.lock().unwrap().len();
-        assert_eq!(download(&target, &transport(), &Arc::new(AtomicBool::new(false)), fast(), &mut |_, _| {}).unwrap_err().reason, Reason::ChecksumMismatch);
+        assert_eq!(
+            download(
+                &target,
+                &transport(),
+                &Arc::new(AtomicBool::new(false)),
+                fast(),
+                &mut |_, _| {}
+            )
+            .unwrap_err()
+            .reason,
+            Reason::ChecksumMismatch
+        );
         assert_eq!(server.requests.lock().unwrap().len(), before + 1);
         assert!(!part.exists());
         // Size mismatch reported by the server.
-        let target = Target { size: data.len() as u64 + 1, sha256: &digest, ..target };
-        assert_eq!(download(&target, &transport(), &Arc::new(AtomicBool::new(false)), fast(), &mut |_, _| {}).unwrap_err().reason, Reason::SizeMismatch);
+        let target = Target {
+            size: data.len() as u64 + 1,
+            sha256: &digest,
+            ..target
+        };
+        assert_eq!(
+            download(
+                &target,
+                &transport(),
+                &Arc::new(AtomicBool::new(false)),
+                fast(),
+                &mut |_, _| {}
+            )
+            .unwrap_err()
+            .reason,
+            Reason::SizeMismatch
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -679,23 +779,54 @@ mod tests {
     fn range_resume_rehashes_existing_bytes() {
         let data = Arc::new(body());
         let served = data.clone();
-        let server = start(Arc::new(move |r: &Request, s: &mut TcpStream| respond(s, &served, r.range, None)));
+        let server = start(Arc::new(move |r: &Request, s: &mut TcpStream| {
+            respond(s, &served, r.range, None)
+        }));
         let dir = temp("resume");
         let part = dir.join("x.part");
         let urls = vec![format!("{}/x", server.base)];
         let digest = sha(&data);
-        let target = Target { urls: &urls, size: data.len() as u64, sha256: &digest, part: &part };
+        let target = Target {
+            urls: &urls,
+            size: data.len() as u64,
+            sha256: &digest,
+            part: &part,
+        };
         // A genuine prefix resumes from its length with a Range request.
         fs::write(&part, &data[..300_000]).unwrap();
-        download(&target, &transport(), &Arc::new(AtomicBool::new(false)), fast(), &mut |_, _| {}).unwrap();
-        assert_eq!(server.requests.lock().unwrap().last().unwrap().1, Some(300_000));
+        download(
+            &target,
+            &transport(),
+            &Arc::new(AtomicBool::new(false)),
+            fast(),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            server.requests.lock().unwrap().last().unwrap().1,
+            Some(300_000)
+        );
         assert_eq!(fs::read(&part).unwrap(), *data);
         // A corrupted prefix is caught: bytes on disk are hashed again, not trusted.
         let mut corrupt = data[..300_000].to_vec();
         corrupt[10] ^= 1;
         fs::write(&part, &corrupt).unwrap();
-        assert_eq!(download(&target, &transport(), &Arc::new(AtomicBool::new(false)), fast(), &mut |_, _| {}).unwrap_err().reason, Reason::ChecksumMismatch);
-        assert!(!part.exists(), "a failed verification never leaves a resumable part");
+        assert_eq!(
+            download(
+                &target,
+                &transport(),
+                &Arc::new(AtomicBool::new(false)),
+                fast(),
+                &mut |_, _| {}
+            )
+            .unwrap_err()
+            .reason,
+            Reason::ChecksumMismatch
+        );
+        assert!(
+            !part.exists(),
+            "a failed verification never leaves a resumable part"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -704,14 +835,34 @@ mod tests {
         let data = Arc::new(body());
         let served = data.clone();
         // Every response stops after 250 kB: four attempts finish an 800 kB body.
-        let server = start(Arc::new(move |r: &Request, s: &mut TcpStream| respond(s, &served, r.range, Some(250_000))));
+        let server = start(Arc::new(move |r: &Request, s: &mut TcpStream| {
+            respond(s, &served, r.range, Some(250_000))
+        }));
         let dir = temp("retry");
         let part = dir.join("x.part");
         let urls = vec![format!("{}/x", server.base)];
         let digest = sha(&data);
-        let target = Target { urls: &urls, size: data.len() as u64, sha256: &digest, part: &part };
-        download(&target, &transport(), &Arc::new(AtomicBool::new(false)), fast(), &mut |_, _| {}).unwrap();
-        let ranges: Vec<_> = server.requests.lock().unwrap().iter().map(|r| r.1).collect();
+        let target = Target {
+            urls: &urls,
+            size: data.len() as u64,
+            sha256: &digest,
+            part: &part,
+        };
+        download(
+            &target,
+            &transport(),
+            &Arc::new(AtomicBool::new(false)),
+            fast(),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        let ranges: Vec<_> = server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.1)
+            .collect();
         assert_eq!(ranges, [None, Some(250_000), Some(500_000), Some(750_000)]);
         // A server that always fails uses exactly the retry budget: 1 + 3 attempts.
         let failing = start(Arc::new(|_: &Request, s: &mut TcpStream| {
@@ -719,8 +870,22 @@ mod tests {
         }));
         let urls = vec![format!("{}/x", failing.base)];
         fs::remove_file(&part).ok();
-        let target = Target { urls: &urls, ..target };
-        assert_eq!(download(&target, &transport(), &Arc::new(AtomicBool::new(false)), fast(), &mut |_, _| {}).unwrap_err().reason, Reason::Network);
+        let target = Target {
+            urls: &urls,
+            ..target
+        };
+        assert_eq!(
+            download(
+                &target,
+                &transport(),
+                &Arc::new(AtomicBool::new(false)),
+                fast(),
+                &mut |_, _| {}
+            )
+            .unwrap_err()
+            .reason,
+            Reason::Network
+        );
         assert_eq!(failing.requests.lock().unwrap().len(), 4);
         let _ = fs::remove_dir_all(dir);
     }
@@ -737,14 +902,33 @@ mod tests {
         let part = dir.join("x.part");
         let urls = vec![format!("{}/x", server.base)];
         let digest = sha(&data);
-        let target = Target { urls: &urls, size: data.len() as u64, sha256: &digest, part: &part };
-        let no_retry = Retry { retries: 0, backoff: Duration::from_millis(1) };
+        let target = Target {
+            urls: &urls,
+            size: data.len() as u64,
+            sha256: &digest,
+            part: &part,
+        };
+        let no_retry = Retry {
+            retries: 0,
+            backoff: Duration::from_millis(1),
+        };
         let started = Instant::now();
-        let error = download(&target, &transport(), &Arc::new(AtomicBool::new(false)), no_retry, &mut |_, _| {}).unwrap_err();
+        let error = download(
+            &target,
+            &transport(),
+            &Arc::new(AtomicBool::new(false)),
+            no_retry,
+            &mut |_, _| {},
+        )
+        .unwrap_err();
         assert_eq!(error.reason, Reason::Network);
         assert!(error.message.contains("stalled"), "{error:?}");
         assert!(started.elapsed() < Duration::from_secs(3));
-        assert_eq!(fs::metadata(&part).unwrap().len(), 100_000, "partial bytes kept for resume");
+        assert_eq!(
+            fs::metadata(&part).unwrap().len(),
+            100_000,
+            "partial bytes kept for resume"
+        );
         // Cancel mid-body: the flag stops the read promptly and the part stays.
         fs::remove_file(&part).unwrap();
         let flag = Arc::new(AtomicBool::new(false));

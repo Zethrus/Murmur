@@ -20,7 +20,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const ENGINE_FILE: &str = if cfg!(windows) { "murmur-engine.exe" } else { "murmur-engine" };
+pub const ENGINE_FILE: &str = if cfg!(windows) {
+    "murmur-engine.exe"
+} else {
+    "murmur-engine"
+};
 /// Files a speech model directory must contain for faster-whisper.
 pub const SPEECH_REQUIRED: &[&str] = &["model.bin", "config.json", "tokenizer.json"];
 
@@ -55,7 +59,9 @@ pub fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
             Ok(()) => return Ok(()),
             // ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32): a scanner or the
             // engine still holds a handle; give it a moment.
-            Err(error) if cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32)) && attempt < 8 => {
+            Err(error)
+                if cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32)) && attempt < 8 =>
+            {
                 std::thread::sleep(delay);
                 delay = delay.saturating_mul(2);
             }
@@ -103,8 +109,15 @@ impl Store {
                 .files
                 .iter()
                 .map(|f| {
-                    let done = self.downloads().join(format!("{}-{}", component.id, component.version)).join(&f.name);
-                    if done.is_file() { size(done) } else { size(self.part(component, Some(&f.name))) }
+                    let done = self
+                        .downloads()
+                        .join(format!("{}-{}", component.id, component.version))
+                        .join(&f.name);
+                    if done.is_file() {
+                        size(done)
+                    } else {
+                        size(self.part(component, Some(&f.name)))
+                    }
                 })
                 .sum()
         }
@@ -130,14 +143,23 @@ impl Store {
     }
     /// Move a smoke-tested staging directory into place and switch `active.json` to it.
     /// The previous version stays on disk unless `replace` asks to delete it afterwards.
-    pub fn activate(&self, component: &Component, staging: &Path, replace: bool, now: u64) -> Result<(), ComponentError> {
+    pub fn activate(
+        &self,
+        component: &Component,
+        staging: &Path,
+        replace: bool,
+        now: u64,
+    ) -> Result<(), ComponentError> {
         let target = self.version_dir(&component.id, &component.version);
         let previous = self.active(&component.id);
         let mut displaced = None;
         if target.exists() {
             // Reinstalling the same version: keep the old copy aside until the switch succeeds.
-            let aside = self.component_dir(&component.id).join(format!(".old-{}-{now}", component.version));
-            rename(&target, &aside).map_err(|_| io("Could not replace the installed version (is it in use?)"))?;
+            let aside = self
+                .component_dir(&component.id)
+                .join(format!(".old-{}-{now}", component.version));
+            rename(&target, &aside)
+                .map_err(|_| io("Could not replace the installed version (is it in use?)"))?;
             displaced = Some(aside);
         }
         if rename(staging, &target).is_err() {
@@ -170,7 +192,8 @@ impl Store {
                     // Files verified in place outside the store are never deleted by it.
                     Some(_) => {}
                     None => {
-                        let _ = fs::remove_dir_all(self.version_dir(&component.id, &previous.version));
+                        let _ =
+                            fs::remove_dir_all(self.version_dir(&component.id, &previous.version));
                     }
                 }
             }
@@ -187,7 +210,9 @@ impl Store {
     }
     /// Remove leftovers of interrupted activations; never touches active versions.
     pub fn sweep(&self, id: &str) {
-        let Ok(entries) = fs::read_dir(self.component_dir(id)) else { return };
+        let Ok(entries) = fs::read_dir(self.component_dir(id)) else {
+            return;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with(".staging-") || name.starts_with(".old-") {
@@ -201,11 +226,18 @@ impl Store {
 pub fn elf_needed(path: &Path) -> Option<Vec<String>> {
     let data = fs::read(path).ok()?;
     let u16_at = |o: usize| data.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
-    let u64_at = |o: usize| data.get(o..o + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+    let u64_at = |o: usize| {
+        data.get(o..o + 8)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+    };
     if data.get(0..4)? != b"\x7fELF" || *data.get(4)? != 2 || *data.get(5)? != 1 {
         return None;
     }
-    let (phoff, phentsize, phnum) = (u64_at(0x20)? as usize, u16_at(0x36)? as usize, u16_at(0x38)? as usize);
+    let (phoff, phentsize, phnum) = (
+        u64_at(0x20)? as usize,
+        u16_at(0x36)? as usize,
+        u16_at(0x38)? as usize,
+    );
     let mut loads = Vec::new();
     let mut dynamic = None;
     for i in 0..phnum {
@@ -232,7 +264,9 @@ pub fn elf_needed(path: &Path) -> Option<Vec<String>> {
         }
     }
     let strtab = strtab?;
-    let (vaddr, file_offset, _) = loads.iter().find(|(v, _, s)| strtab >= *v && strtab < v + s)?;
+    let (vaddr, file_offset, _) = loads
+        .iter()
+        .find(|(v, _, s)| strtab >= *v && strtab < v + s)?;
     let table = (strtab - vaddr + file_offset) as usize;
     needed
         .into_iter()
@@ -251,13 +285,19 @@ fn smoke_failed(message: impl Into<String>) -> ComponentError {
 /// Run `program` with a deadline; true when it exits successfully.
 fn runs(program: &Path, args: &[&str], timeout: Duration) -> bool {
     let mut command = Command::new(program);
-    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    let Ok(mut child) = command.spawn() else { return false };
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -278,10 +318,14 @@ pub fn smoke_test(component: &Component, dir: &Path) -> Result<(), ComponentErro
         Kind::Engine => {
             let engine = dir.join(ENGINE_FILE);
             if !engine.is_file() {
-                return Err(smoke_failed("The engine archive has no murmur-engine executable"));
+                return Err(smoke_failed(
+                    "The engine archive has no murmur-engine executable",
+                ));
             }
             if !runs(&engine, &["--help"], Duration::from_secs(120)) {
-                return Err(smoke_failed("The downloaded engine does not start on this computer"));
+                return Err(smoke_failed(
+                    "The downloaded engine does not start on this computer",
+                ));
             }
         }
         Kind::Cuda if cfg!(target_os = "linux") => {
@@ -295,12 +339,17 @@ pub fn smoke_test(component: &Component, dir: &Path) -> Result<(), ComponentErro
                 return Err(smoke_failed("The GPU add-on lacks cuBLAS"));
             }
             for library in &libraries {
-                let needed = elf_needed(&dir.join(library)).ok_or_else(|| smoke_failed(format!("{library} is not a valid library")))?;
+                let needed = elf_needed(&dir.join(library))
+                    .ok_or_else(|| smoke_failed(format!("{library} is not a valid library")))?;
                 for name in needed {
                     // CUDA libraries must resolve inside the add-on; libcuda is the driver's.
-                    if name.starts_with("libcu") && !name.starts_with("libcuda.so") || name.starts_with("libnv") {
+                    if name.starts_with("libcu") && !name.starts_with("libcuda.so")
+                        || name.starts_with("libnv")
+                    {
                         if !dir.join(&name).exists() {
-                            return Err(smoke_failed(format!("{library} needs {name}, which the add-on lacks")));
+                            return Err(smoke_failed(format!(
+                                "{library} needs {name}, which the add-on lacks"
+                            )));
                         }
                     }
                 }
@@ -308,7 +357,10 @@ pub fn smoke_test(component: &Component, dir: &Path) -> Result<(), ComponentErro
         }
         Kind::Cuda => {
             let has_dll = fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
-                e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("cublas64_")
+                e.file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with("cublas64_")
             });
             if !has_dll {
                 return Err(smoke_failed("The GPU add-on lacks cuBLAS"));
@@ -344,10 +396,16 @@ pub enum Verdict {
 }
 
 /// Hash each manifest file inside `dir` (multi-file components only).
-pub fn verify_files(component: &Component, dir: &Path, cancel: &std::sync::atomic::AtomicBool) -> Result<Verdict, ComponentError> {
+pub fn verify_files(
+    component: &Component,
+    dir: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Verdict, ComponentError> {
     for file in &component.files {
         let path = dir.join(&file.name);
-        let Ok(meta) = fs::metadata(&path) else { return Ok(Verdict::Missing) };
+        let Ok(meta) = fs::metadata(&path) else {
+            return Ok(Verdict::Missing);
+        };
         if meta.len() != file.size_bytes {
             return Ok(Verdict::Mismatch);
         }
@@ -355,7 +413,10 @@ pub fn verify_files(component: &Component, dir: &Path, cancel: &std::sync::atomi
             Ok((_, digest)) if digest.eq_ignore_ascii_case(&file.sha256) => {}
             Ok(_) => return Ok(Verdict::Mismatch),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                return Err(ComponentError::new(Reason::Cancelled, "Verification cancelled"))
+                return Err(ComponentError::new(
+                    Reason::Cancelled,
+                    "Verification cancelled",
+                ))
             }
             Err(_) => return Ok(Verdict::Missing),
         }
@@ -377,7 +438,14 @@ mod tests {
     fn model(id: &str, version: &str) -> Component {
         let mut value = component(id, "speech-model");
         value["version"] = serde_json::json!(version);
-        let manifest = Manifest::parse(&serde_json::to_vec(&crate::components::manifest::tests::manifest(1, vec![value])).unwrap()).unwrap();
+        let manifest = Manifest::parse(
+            &serde_json::to_vec(&crate::components::manifest::tests::manifest(
+                1,
+                vec![value],
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         manifest.components[0].clone()
     }
     fn stage(store: &Store, c: &Component, files: &[&str]) -> PathBuf {
@@ -400,11 +468,17 @@ mod tests {
         // Version 2 fails its smoke test: version 1 stays active and intact.
         let v2 = model("speech-x", "2");
         let staging = stage(&s, &v2, &["model.bin"]);
-        assert_eq!(smoke_test(&v2, &staging).unwrap_err().reason, Reason::SmokeTestFailed);
+        assert_eq!(
+            smoke_test(&v2, &staging).unwrap_err().reason,
+            Reason::SmokeTestFailed
+        );
         s.sweep("speech-x");
         assert!(!staging.exists());
         assert_eq!(s.active("speech-x").unwrap().version, "1");
-        assert_eq!(fs::read(s.active_dir("speech-x").unwrap().join("model.bin")).unwrap(), b"1");
+        assert_eq!(
+            fs::read(s.active_dir("speech-x").unwrap().join("model.bin")).unwrap(),
+            b"1"
+        );
         // A good version 2 replaces 1; with replace=false the old directory stays.
         let staging = stage(&s, &v2, SPEECH_REQUIRED);
         s.activate(&v2, &staging, false, 2).unwrap();
@@ -416,7 +490,10 @@ mod tests {
         s.activate(&v2, &staging, true, 3).unwrap();
         assert!(s.version_dir("speech-x", "1").is_dir());
         assert!(s.version_dir("speech-x", "2").join("config.json").is_file());
-        assert!(fs::read_dir(s.component_dir("speech-x")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".old-")));
+        assert!(fs::read_dir(s.component_dir("speech-x"))
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().starts_with(".old-")));
         // Version 3 with replace=true deletes the previously active version 2.
         let v3 = model("speech-x", "3");
         let staging = stage(&s, &v3, SPEECH_REQUIRED);
@@ -432,7 +509,11 @@ mod tests {
         let staging = stage(&s, &v1, SPEECH_REQUIRED);
         s.activate(&v1, &staging, false, 1).unwrap();
         let dir = s.component_dir("speech-y");
-        let names: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
         assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
         // A torn write cannot exist: a leftover temp file never replaces the record.
         fs::write(dir.join("active.json.tmp"), b"{garbage").unwrap();
@@ -448,7 +529,10 @@ mod tests {
         // The test binary itself is a dynamically linked ELF on Linux.
         if cfg!(target_os = "linux") {
             let needed = elf_needed(&std::env::current_exe().unwrap()).unwrap();
-            assert!(needed.iter().any(|n| n.starts_with("libc.so")), "{needed:?}");
+            assert!(
+                needed.iter().any(|n| n.starts_with("libc.so")),
+                "{needed:?}"
+            );
         }
         assert!(elf_needed(Path::new("/nonexistent")).is_none());
     }
@@ -458,7 +542,14 @@ mod tests {
         let s = store("engine");
         let mut value = component("engine", "engine");
         value["version"] = serde_json::json!("1");
-        let manifest = Manifest::parse(&serde_json::to_vec(&crate::components::manifest::tests::manifest(1, vec![value])).unwrap()).unwrap();
+        let manifest = Manifest::parse(
+            &serde_json::to_vec(&crate::components::manifest::tests::manifest(
+                1,
+                vec![value],
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         let engine = &manifest.components[0];
         let dir = s.staging_dir("engine", "1");
         fs::create_dir_all(&dir).unwrap();

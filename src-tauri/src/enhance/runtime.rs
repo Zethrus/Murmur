@@ -11,7 +11,6 @@ use crate::{app::AppState, config::Config, inject::InjectionPath, overlay, postp
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::{
-    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc, Arc, Mutex,
@@ -77,11 +76,14 @@ pub(super) fn accept_with(
 }
 
 impl Runtime {
-    pub fn new(app: &AppHandle, root: PathBuf, config: &Config, store: Arc<dyn super::ModelStore>) -> Result<Self> {
+    pub fn new(
+        app: &AppHandle,
+        config: &Config,
+        store: Arc<dyn super::ModelStore>,
+    ) -> Result<Self> {
         let emitter = app.clone();
         let worker_app = app.clone();
         let service = Enhance::with_store(
-            root,
             &config.enhance.model,
             config.enhance.threads,
             backend::default_backend(),

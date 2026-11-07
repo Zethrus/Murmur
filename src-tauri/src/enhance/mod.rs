@@ -2,6 +2,9 @@
 //! always delivered first; nothing here can block or fail dictation.
 pub mod backend;
 pub mod catalog;
+// The self-contained downloader predates the component manager; the app installs through
+// `components::adapters::EnhanceStore`. It stays as the `LegacyStore` used by tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub mod download;
 #[cfg(feature = "enhance-llama")]
 pub mod llama;
@@ -16,8 +19,10 @@ pub mod worker;
 use catalog::{Entry, InstallState};
 use serde::Serialize;
 use serde_json::{json, Value};
+#[cfg(test)]
+use std::path::Path;
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
@@ -122,11 +127,13 @@ pub trait ModelStore: Send + Sync {
     fn remove(&self, entry: &Entry) -> Result<(), EnhanceError>;
 }
 
+#[cfg(test)]
 pub struct LegacyStore {
     pub root: PathBuf,
     space: fn(&Path) -> Option<u64>,
     transport: Arc<dyn Fn() -> Result<Box<dyn download::Transport>, EnhanceError> + Send + Sync>,
 }
+#[cfg(test)]
 impl LegacyStore {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -136,6 +143,7 @@ impl LegacyStore {
         }
     }
 }
+#[cfg(test)]
 impl ModelStore for LegacyStore {
     fn state(&self, entry: &Entry) -> InstallState {
         catalog::local_state(entry, &self.root)
@@ -199,7 +207,6 @@ pub fn status_json(s: &Status) -> Value {
 
 /// Process-wide service: catalog/install state, the download operation, and the worker.
 pub struct Enhance {
-    pub root: PathBuf,
     pub shared: Arc<Shared>,
     pub worker: worker::Worker,
     next: AtomicU64,
@@ -216,6 +223,7 @@ pub struct InstallHooks {
 }
 
 impl Enhance {
+    #[cfg(test)]
     pub fn new(
         root: PathBuf,
         model_id: &str,
@@ -224,11 +232,10 @@ impl Enhance {
         emit: Emit,
         on_worker: Arc<dyn Fn(worker::WorkerEvent) + Send + Sync>,
     ) -> std::io::Result<Self> {
-        let store = Arc::new(LegacyStore::new(root.clone()));
-        Self::with_store(root, model_id, threads, backend, emit, on_worker, store)
+        let store = Arc::new(LegacyStore::new(root));
+        Self::with_store(model_id, threads, backend, emit, on_worker, store)
     }
     pub fn with_store(
-        root: PathBuf,
         model_id: &str,
         threads: u32,
         backend: Box<dyn backend::Backend + Send>,
@@ -296,7 +303,6 @@ impl Enhance {
         });
         let worker = worker::Worker::spawn(backend, sink)?;
         let service = Self {
-            root,
             shared,
             worker,
             next: AtomicU64::new(1),

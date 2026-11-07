@@ -60,9 +60,16 @@ impl ModelStore for EnhanceStore {
     fn model_path(&self, entry: &Entry) -> Option<PathBuf> {
         self.0.enhance_model_path(entry.id)
     }
-    fn install(&self, entry: &'static Entry, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(download::Phase, u64, u64)) -> Result<(), EnhanceError> {
+    fn install(
+        &self,
+        entry: &'static Entry,
+        cancel: &Arc<AtomicBool>,
+        progress: &mut dyn FnMut(download::Phase, u64, u64),
+    ) -> Result<(), EnhanceError> {
         let id = enhance_id(entry.id);
-        self.0.install(std::slice::from_ref(&id)).map_err(|e| enhance_error(e.reason, &e.message))?;
+        self.0
+            .install(std::slice::from_ref(&id))
+            .map_err(|e| enhance_error(e.reason, &e.message))?;
         loop {
             std::thread::sleep(Duration::from_millis(100));
             if cancel.load(Ordering::Acquire) {
@@ -70,18 +77,38 @@ impl ModelStore for EnhanceStore {
                 while self.0.job_running(&id) {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                return Err(EnhanceError::new(ErrorCode::Cancelled, "Download cancelled"));
+                return Err(EnhanceError::new(
+                    ErrorCode::Cancelled,
+                    "Download cancelled",
+                ));
             }
             match self.0.job(&id) {
                 None if self.0.enhance_model_path(entry.id).is_some() => return Ok(()),
-                None => return Err(EnhanceError::new(ErrorCode::DownloadFailed, "The Enhance model install did not complete")),
+                None => {
+                    return Err(EnhanceError::new(
+                        ErrorCode::DownloadFailed,
+                        "The Enhance model install did not complete",
+                    ))
+                }
                 Some(job) => match job.phase {
                     Phase::Failed => {
                         let reason = job.reason.unwrap_or(Reason::Io);
-                        return Err(enhance_error(reason, job.error.as_deref().unwrap_or("Download failed")));
+                        return Err(enhance_error(
+                            reason,
+                            job.error.as_deref().unwrap_or("Download failed"),
+                        ));
                     }
-                    Phase::Paused => return Err(EnhanceError::new(ErrorCode::Cancelled, "Download paused in Components")),
-                    Phase::Queued | Phase::Downloading => progress(download::Phase::Downloading, job.bytes_done, job.bytes_total),
+                    Phase::Paused => {
+                        return Err(EnhanceError::new(
+                            ErrorCode::Cancelled,
+                            "Download paused in Components",
+                        ))
+                    }
+                    Phase::Queued | Phase::Downloading => progress(
+                        download::Phase::Downloading,
+                        job.bytes_done,
+                        job.bytes_total,
+                    ),
                     _ => progress(download::Phase::Verifying, job.bytes_total, job.bytes_total),
                 },
             }
@@ -92,6 +119,8 @@ impl ModelStore for EnhanceStore {
         if self.0.store.active(&id).is_none() {
             return Ok(());
         }
-        self.0.remove(&id).map_err(|e| enhance_error(e.reason, &e.message))
+        self.0
+            .remove(&id)
+            .map_err(|e| enhance_error(e.reason, &e.message))
     }
 }

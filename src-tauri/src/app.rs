@@ -145,13 +145,20 @@ impl AppState {
             "murmur starting"
         );
         let components = Components::new(
-            components::Options::production(paths.data.clone(), paths.models.clone(), paths.enhance_models.clone()),
+            components::Options::production(
+                paths.data.clone(),
+                paths.models.clone(),
+                paths.enhance_models.clone(),
+            ),
             component_host(&app),
         );
-        let engine = Arc::new(Engine::new(paths.models.clone(), app.clone(), components.clone())?);
+        let engine = Arc::new(Engine::new(
+            paths.models.clone(),
+            app.clone(),
+            components.clone(),
+        )?);
         let enhance = enhance::runtime::Runtime::new(
             &app,
-            paths.enhance_models.clone(),
             &config,
             Arc::new(components::adapters::EnhanceStore(components.clone())),
         )
@@ -543,7 +550,10 @@ fn component_host(app: &AppHandle) -> components::Host {
                 .and_then(|state| state.config().ok())
                 .map(|config| components::Usage {
                     speech_model: config.engine.model.clone(),
-                    enhance_model: config.enhance.auto_rewrite.then(|| config.enhance.model.clone()),
+                    enhance_model: config
+                        .enhance
+                        .auto_rewrite
+                        .then(|| config.enhance.model.clone()),
                 })
                 .unwrap_or_default()
         }),

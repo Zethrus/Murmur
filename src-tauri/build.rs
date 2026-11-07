@@ -22,7 +22,10 @@ fn embed() {
             let mut signature = manifest.clone().into_os_string();
             signature.push(".sig");
             let signature = PathBuf::from(signature);
-            assert!(manifest.is_file() && signature.is_file(), "MURMUR_EMBED_MANIFEST needs the manifest and its .sig");
+            assert!(
+                manifest.is_file() && signature.is_file(),
+                "MURMUR_EMBED_MANIFEST needs the manifest and its .sig"
+            );
             println!("cargo:rerun-if-changed={}", manifest.display());
             println!("cargo:rerun-if-changed={}", signature.display());
             format!("Some(({}, {}))", literal(&manifest), literal(&signature))

@@ -62,15 +62,26 @@ pub fn digest(bytes: &[u8]) -> String {
 
 impl RollbackState {
     pub fn load(path: &Path) -> Self {
-        fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
     }
     pub fn save(&self, path: &Path) -> Result<(), ComponentError> {
         write_atomic(path, &serde_json::to_vec_pretty(self).unwrap_or_default())
     }
     /// Freshness and anti-rollback rules; records the manifest when accepted.
-    pub fn admit(&mut self, manifest: &Manifest, sha256: &str, now: u64) -> Result<(), ComponentError> {
+    pub fn admit(
+        &mut self,
+        manifest: &Manifest,
+        sha256: &str,
+        now: u64,
+    ) -> Result<(), ComponentError> {
         if self.primary_revoked {
-            return Err(ComponentError::new(Reason::PrimaryRevoked, "Murmur's release key has been revoked; component installs are disabled."));
+            return Err(ComponentError::new(
+                Reason::PrimaryRevoked,
+                "Murmur's release key has been revoked; component installs are disabled.",
+            ));
         }
         let issued = manifest.issued_at()?;
         if now < issued || now < self.newest_issued_at {
@@ -80,17 +91,32 @@ impl RollbackState {
             ));
         }
         if manifest.expires_at()? < now {
-            return Err(ComponentError::new(Reason::Expired, "The component manifest has expired. Use Check for updates."));
+            return Err(ComponentError::new(
+                Reason::Expired,
+                "The component manifest has expired. Use Check for updates.",
+            ));
         }
         if let Some(seen) = self.channels.get(&manifest.channel) {
             if manifest.serial < seen.serial {
-                return Err(ComponentError::new(Reason::Rollback, "Refused an older component manifest (rollback)"));
+                return Err(ComponentError::new(
+                    Reason::Rollback,
+                    "Refused an older component manifest (rollback)",
+                ));
             }
             if manifest.serial == seen.serial && seen.sha256 != sha256 {
-                return Err(ComponentError::new(Reason::Rollback, "Refused a different manifest with an already used serial number"));
+                return Err(ComponentError::new(
+                    Reason::Rollback,
+                    "Refused a different manifest with an already used serial number",
+                ));
             }
         }
-        self.channels.insert(manifest.channel.clone(), Seen { serial: manifest.serial, sha256: sha256.into() });
+        self.channels.insert(
+            manifest.channel.clone(),
+            Seen {
+                serial: manifest.serial,
+                sha256: sha256.into(),
+            },
+        );
         self.newest_issued_at = self.newest_issued_at.max(issued);
         Ok(())
     }
@@ -117,20 +143,31 @@ impl Files {
 
 /// The certificate in force for a manifest issued at `issued_at`: the root, updated by a
 /// previously accepted newer certificate when that still satisfies the update rule.
-fn effective_cert(root: &TrustRoot, cached: Option<&[u8]>, issued_at: u64) -> Result<sequoia_openpgp::Cert, ComponentError> {
+fn effective_cert(
+    root: &TrustRoot,
+    cached: Option<&[u8]>,
+    issued_at: u64,
+) -> Result<sequoia_openpgp::Cert, ComponentError> {
     if let Some(bytes) = cached {
         match trust::accept_update(&root.cert, bytes, trust::unix(issued_at)) {
             Ok(Some(cert)) => return Ok(cert),
             Ok(None) => {}
             Err(error) if error.reason == Reason::PrimaryRevoked => return Err(error),
-            Err(_) => tracing::warn!(target: "murmur::components", "Ignoring a stored certificate update that no longer verifies"),
+            Err(_) => {
+                tracing::warn!(target: "murmur::components", "Ignoring a stored certificate update that no longer verifies")
+            }
         }
     }
     Ok(root.cert.clone())
 }
 
 /// Verify `manifest` + `signature` and parse. Nothing is used unless this returns Ok.
-pub fn verify(root: &TrustRoot, cert_update: Option<&[u8]>, manifest: &[u8], signature: &[u8]) -> Result<Manifest, ComponentError> {
+pub fn verify(
+    root: &TrustRoot,
+    cert_update: Option<&[u8]>,
+    manifest: &[u8],
+    signature: &[u8],
+) -> Result<Manifest, ComponentError> {
     let parsed = Manifest::parse(manifest)?;
     let issued_at = parsed.issued_at()?;
     let cert = effective_cert(root, cert_update, issued_at)?;
@@ -147,16 +184,35 @@ pub fn now() -> u64 {
 
 /// Load the best trusted manifest available offline: embedded and cached copies are verified
 /// on every load; the higher serial that passes the rollback rules wins.
-pub fn load_offline(root: &TrustRoot, files: &Files, embedded: Option<(&[u8], &[u8])>, now: u64) -> Result<Catalog, ComponentError> {
+pub fn load_offline(
+    root: &TrustRoot,
+    files: &Files,
+    embedded: Option<(&[u8], &[u8])>,
+    now: u64,
+) -> Result<Catalog, ComponentError> {
     let mut state = RollbackState::load(&files.state);
     let cert_update = fs::read(&files.cert).ok();
-    let cached = fs::read(&files.manifest).ok().zip(fs::read(&files.signature).ok());
+    let cached = fs::read(&files.manifest)
+        .ok()
+        .zip(fs::read(&files.signature).ok());
     let mut candidates = Vec::new();
     let mut last_error = None;
-    for (source, pair) in [(Source::Cached, cached.as_ref().map(|(m, s)| (m.as_slice(), s.as_slice()))), (Source::Embedded, embedded)] {
-        let Some((bytes, signature)) = pair else { continue };
+    for (source, pair) in [
+        (
+            Source::Cached,
+            cached.as_ref().map(|(m, s)| (m.as_slice(), s.as_slice())),
+        ),
+        (Source::Embedded, embedded),
+    ] {
+        let Some((bytes, signature)) = pair else {
+            continue;
+        };
         match verify(root, cert_update.as_deref(), bytes, signature) {
-            Ok(manifest) => candidates.push(Catalog { sha256: digest(bytes), manifest, source }),
+            Ok(manifest) => candidates.push(Catalog {
+                sha256: digest(bytes),
+                manifest,
+                source,
+            }),
             Err(error) => {
                 if error.reason == Reason::PrimaryRevoked {
                     state.primary_revoked = true;
@@ -180,28 +236,51 @@ pub fn load_offline(root: &TrustRoot, files: &Files, embedded: Option<(&[u8], &[
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| ComponentError::new(Reason::NotFound, "No component manifest is available yet. Use Check for updates.")))
+    Err(last_error.unwrap_or_else(|| {
+        ComponentError::new(
+            Reason::NotFound,
+            "No component manifest is available yet. Use Check for updates.",
+        )
+    }))
 }
 
 /// Read a small file over HTTPS into memory.
-pub fn fetch_small(transport: &dyn Transport, url: &str, cancel: &Arc<AtomicBool>) -> Result<Vec<u8>, ComponentError> {
+pub fn fetch_small(
+    transport: &dyn Transport,
+    url: &str,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Vec<u8>, ComponentError> {
     let body = transport.open(url, 0, cancel)?;
     if body.length.is_some_and(|n| n > MAX_SMALL) {
-        return Err(ComponentError::new(Reason::SizeMismatch, "Manifest download is too large"));
+        return Err(ComponentError::new(
+            Reason::SizeMismatch,
+            "Manifest download is too large",
+        ));
     }
     let mut bytes = Vec::new();
     body.reader
         .take(MAX_SMALL + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| ComponentError::new(Reason::Network, "The manifest download was interrupted"))?;
+        .map_err(|_| {
+            ComponentError::new(Reason::Network, "The manifest download was interrupted")
+        })?;
     if bytes.len() as u64 > MAX_SMALL {
-        return Err(ComponentError::new(Reason::SizeMismatch, "Manifest download is too large"));
+        return Err(ComponentError::new(
+            Reason::SizeMismatch,
+            "Manifest download is too large",
+        ));
     }
     Ok(bytes)
 }
 
 /// Fetch manifest, signature and certificate together; trust all or nothing; persist on success.
-pub fn fetch_and_admit(root: &TrustRoot, files: &Files, transport: &dyn Transport, base: &str, now: u64) -> Result<Catalog, ComponentError> {
+pub fn fetch_and_admit(
+    root: &TrustRoot,
+    files: &Files,
+    transport: &dyn Transport,
+    base: &str,
+    now: u64,
+) -> Result<Catalog, ComponentError> {
     let cancel = Arc::new(AtomicBool::new(false));
     let manifest = fetch_small(transport, &format!("{base}{MANIFEST_FILE}"), &cancel)?;
     let signature = fetch_small(transport, &format!("{base}{SIGNATURE_FILE}"), &cancel)?;
@@ -221,7 +300,11 @@ pub fn fetch_and_admit(root: &TrustRoot, files: &Files, transport: &dyn Transpor
         }
     };
     let stored = fs::read(&files.cert).ok();
-    let cert_bytes = if update.is_some() { Some(cert.clone()) } else { stored };
+    let cert_bytes = if update.is_some() {
+        Some(cert.clone())
+    } else {
+        stored
+    };
     let manifest_parsed = verify(root, cert_bytes.as_deref(), &manifest, &signature)?;
     let sha = digest(&manifest);
     state.admit(&manifest_parsed, &sha, now)?;
@@ -232,7 +315,11 @@ pub fn fetch_and_admit(root: &TrustRoot, files: &Files, transport: &dyn Transpor
     write_atomic(&files.signature, &signature)?;
     state.save(&files.state)?;
     debug_assert_eq!(manifest_parsed.channel, CHANNEL);
-    Ok(Catalog { manifest: manifest_parsed, sha256: sha, source: Source::Fetched })
+    Ok(Catalog {
+        manifest: manifest_parsed,
+        sha256: sha,
+        source: Source::Fetched,
+    })
 }
 
 /// Manifest location: the release, or an override for development and tests.
@@ -241,7 +328,11 @@ pub fn base_url() -> String {
         || std::env::var(trust::DEV_TRUST_ROOT_ACK_ENV).as_deref() == Ok(trust::DEV_TRUST_ACK);
     match std::env::var(URL_ENV) {
         Ok(url) if allowed && !url.is_empty() => {
-            if url.ends_with('/') { url } else { format!("{url}/") }
+            if url.ends_with('/') {
+                url
+            } else {
+                format!("{url}/")
+            }
         }
         _ => RELEASE_BASE.into(),
     }
@@ -276,7 +367,11 @@ pub mod tests {
         Signer::new(SystemTime::now() - Duration::from_secs(400 * 86_400), 3650)
     }
     fn sign_at(signer: &Signer, data: &[u8], at: u64) -> Vec<u8> {
-        signer.sign_at(data, trust::unix(at), sequoia_openpgp::types::HashAlgorithm::SHA512)
+        signer.sign_at(
+            data,
+            trust::unix(at),
+            sequoia_openpgp::types::HashAlgorithm::SHA512,
+        )
     }
 
     #[test]
@@ -285,19 +380,55 @@ pub mod tests {
         let mut state = RollbackState::default();
         let five = parse(&manifest(5, vec![component("engine", "engine")]));
         state.admit(&five, "a", NOW).unwrap();
-        assert_eq!(state.admit(&parse(&manifest(4, vec![component("engine", "engine")])), "b", NOW).unwrap_err().reason, Reason::Rollback);
-        assert_eq!(state.admit(&five, "different", NOW).unwrap_err().reason, Reason::Rollback, "same serial, different bytes");
+        assert_eq!(
+            state
+                .admit(
+                    &parse(&manifest(4, vec![component("engine", "engine")])),
+                    "b",
+                    NOW
+                )
+                .unwrap_err()
+                .reason,
+            Reason::Rollback
+        );
+        assert_eq!(
+            state.admit(&five, "different", NOW).unwrap_err().reason,
+            Reason::Rollback,
+            "same serial, different bytes"
+        );
         state.admit(&five, "a", NOW).unwrap();
-        state.admit(&parse(&manifest(6, vec![component("engine", "engine")])), "c", NOW).unwrap();
+        state
+            .admit(
+                &parse(&manifest(6, vec![component("engine", "engine")])),
+                "c",
+                NOW,
+            )
+            .unwrap();
         let mut expired = manifest(7, vec![component("engine", "engine")]);
         expired["expires_at"] = json!("2026-11-02T00:00:00Z");
-        assert_eq!(state.admit(&parse(&expired), "d", NOW).unwrap_err().reason, Reason::Expired);
+        assert_eq!(
+            state.admit(&parse(&expired), "d", NOW).unwrap_err().reason,
+            Reason::Expired
+        );
         // Clock earlier than a manifest already seen (issued 2026-11-01).
-        assert_eq!(state.admit(&parse(&manifest(8, vec![])), "e", 1_790_000_000).unwrap_err().reason, Reason::ClockError);
+        assert_eq!(
+            state
+                .admit(&parse(&manifest(8, vec![])), "e", 1_790_000_000)
+                .unwrap_err()
+                .reason,
+            Reason::ClockError
+        );
         let mut fresh = RollbackState::default();
-        assert_eq!(fresh.admit(&five, "a", 1_790_000_000).unwrap_err().reason, Reason::ClockError, "manifest from the future");
+        assert_eq!(
+            fresh.admit(&five, "a", 1_790_000_000).unwrap_err().reason,
+            Reason::ClockError,
+            "manifest from the future"
+        );
         fresh.primary_revoked = true;
-        assert_eq!(fresh.admit(&five, "a", NOW).unwrap_err().reason, Reason::PrimaryRevoked);
+        assert_eq!(
+            fresh.admit(&five, "a", NOW).unwrap_err().reason,
+            Reason::PrimaryRevoked
+        );
     }
 
     #[test]
@@ -309,18 +440,29 @@ pub mod tests {
         let embedded = bytes(&manifest(3, vec![component("engine", "engine")]));
         let embedded_sig = sign_at(&signer, &embedded, NOW - 86_400);
         let catalog = load_offline(&root, &files, Some((&embedded, &embedded_sig)), NOW).unwrap();
-        assert_eq!((catalog.source, catalog.manifest.serial), (Source::Embedded, 3));
+        assert_eq!(
+            (catalog.source, catalog.manifest.serial),
+            (Source::Embedded, 3)
+        );
         // A tampered embedded manifest is not trusted.
         let mut tampered = embedded.clone();
         let pos = tampered.iter().position(|b| *b == b'3').unwrap();
         tampered[pos] = b'4';
-        assert_eq!(load_offline(&root, &files, Some((&tampered, &embedded_sig)), NOW).unwrap_err().reason, Reason::SignatureInvalid);
+        assert_eq!(
+            load_offline(&root, &files, Some((&tampered, &embedded_sig)), NOW)
+                .unwrap_err()
+                .reason,
+            Reason::SignatureInvalid
+        );
         // A cached newer manifest wins; then an embedded older one is not a rollback error.
         let cached = bytes(&manifest(9, vec![component("engine", "engine")]));
         write_atomic(&files.manifest, &cached).unwrap();
         write_atomic(&files.signature, &sign_at(&signer, &cached, NOW - 3600)).unwrap();
         let catalog = load_offline(&root, &files, Some((&embedded, &embedded_sig)), NOW).unwrap();
-        assert_eq!((catalog.source, catalog.manifest.serial), (Source::Cached, 9));
+        assert_eq!(
+            (catalog.source, catalog.manifest.serial),
+            (Source::Cached, 9)
+        );
         // Signed by a stranger: refused, nothing trusted.
         let stranger = Signer::new(SystemTime::now() - Duration::from_secs(86_400), 30);
         let other = bytes(&manifest(10, vec![]));
@@ -340,15 +482,20 @@ pub mod tests {
         let files = Files::new(&d);
         let served: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::default();
         let content = served.clone();
-        let server = testserver::start(Arc::new(move |request: &testserver::Request, stream: &mut TcpStream| {
-            match content.lock().unwrap().get(request.path.trim_start_matches('/')) {
+        let server = testserver::start(Arc::new(
+            move |request: &testserver::Request, stream: &mut TcpStream| match content
+                .lock()
+                .unwrap()
+                .get(request.path.trim_start_matches('/'))
+            {
                 Some(body) => testserver::respond(stream, body, None, None),
                 None => {
                     use std::io::Write;
-                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
                 }
-            }
-        }));
+            },
+        ));
         let base = format!("{}/", server.base);
         let transport = Https::new(Duration::from_secs(2)).unwrap();
         let publish = |serial: u64, signature: Option<Vec<u8>>| {
@@ -371,10 +518,20 @@ pub mod tests {
         // Bad signature: refused; the cached manifest is untouched.
         publish(5, Some(b"garbage".to_vec()));
         assert!(fetch_and_admit(&root, &files, &transport, &base, NOW).is_err());
-        assert_eq!(Manifest::parse(&fs::read(&files.manifest).unwrap()).unwrap().serial, 4);
+        assert_eq!(
+            Manifest::parse(&fs::read(&files.manifest).unwrap())
+                .unwrap()
+                .serial,
+            4
+        );
         // Rollback to serial 3 is refused.
         publish(3, None);
-        assert_eq!(fetch_and_admit(&root, &files, &transport, &base, NOW).unwrap_err().reason, Reason::Rollback);
+        assert_eq!(
+            fetch_and_admit(&root, &files, &transport, &base, NOW)
+                .unwrap_err()
+                .reason,
+            Reason::Rollback
+        );
         let _ = fs::remove_dir_all(d);
     }
 
@@ -391,10 +548,16 @@ pub mod tests {
         write_atomic(&files.cert, &signer.public()).unwrap();
         write_atomic(&files.manifest, &m).unwrap();
         write_atomic(&files.signature, &sig).unwrap();
-        assert_eq!(load_offline(&root, &files, None, NOW).unwrap_err().reason, Reason::PrimaryRevoked);
+        assert_eq!(
+            load_offline(&root, &files, None, NOW).unwrap_err().reason,
+            Reason::PrimaryRevoked
+        );
         // Even after the revoked certificate disappears, the state keeps refusing.
         fs::remove_file(&files.cert).unwrap();
-        assert_eq!(load_offline(&root, &files, None, NOW).unwrap_err().reason, Reason::PrimaryRevoked);
+        assert_eq!(
+            load_offline(&root, &files, None, NOW).unwrap_err().reason,
+            Reason::PrimaryRevoked
+        );
         let _ = fs::remove_dir_all(d);
     }
 }

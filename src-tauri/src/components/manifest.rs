@@ -153,7 +153,9 @@ fn check_urls(urls: &[String], what: &str) -> Result<(), ComponentError> {
         let parsed =
             reqwest::Url::parse(url).map_err(|_| invalid(format!("{what} has an invalid URL")))?;
         if !allowed_url(&parsed) {
-            return Err(invalid(format!("{what} names a host Murmur does not download from")));
+            return Err(invalid(format!(
+                "{what} names a host Murmur does not download from"
+            )));
         }
     }
     Ok(())
@@ -173,7 +175,9 @@ impl Component {
     fn validate(&self) -> Result<(), ComponentError> {
         let what = format!("Component {}", self.id);
         if !safe_id(&self.id) || !safe_version(&self.version) {
-            return Err(invalid("Component identifier or version is not a safe name"));
+            return Err(invalid(
+                "Component identifier or version is not a safe name",
+            ));
         }
         if !matches!(self.os.as_str(), "linux" | "windows" | "any") || self.arch != ARCH {
             return Err(invalid(format!("{what} targets an unknown platform")));
@@ -185,12 +189,16 @@ impl Component {
             Archive::Zip => {
                 check_urls(&self.urls, &what)?;
                 if !self.files.is_empty() || !self.sha256.as_deref().is_some_and(sha256_hex) {
-                    return Err(invalid(format!("{what}: a zip needs one SHA-256 and no file list")));
+                    return Err(invalid(format!(
+                        "{what}: a zip needs one SHA-256 and no file list"
+                    )));
                 }
             }
             Archive::None => {
                 if self.files.is_empty() || !self.urls.is_empty() || self.sha256.is_some() {
-                    return Err(invalid(format!("{what}: a file component needs a file list")));
+                    return Err(invalid(format!(
+                        "{what}: a file component needs a file list"
+                    )));
                 }
                 let mut names = HashSet::new();
                 let mut total: u64 = 0;
@@ -271,13 +279,18 @@ impl Manifest {
             return Err(invalid("The component manifest is for another channel"));
         }
         if self.issued_at()? >= self.expires_at()? {
-            return Err(invalid("The component manifest expires before it is issued"));
+            return Err(invalid(
+                "The component manifest expires before it is issued",
+            ));
         }
         let mut keys = BTreeSet::new();
         for component in &self.components {
             component.validate()?;
             if !keys.insert((&component.id, &component.os, &component.arch)) {
-                return Err(invalid(format!("Component {} is listed twice", component.id)));
+                return Err(invalid(format!(
+                    "Component {} is listed twice",
+                    component.id
+                )));
             }
         }
         let any = "any".to_owned();
@@ -321,14 +334,35 @@ pub fn parse_rfc3339(value: &str) -> Option<u64> {
             .flatten()
     };
     let mut d = date.split('-');
-    let (year, month, day) = (number(d.next()?, 4)?, number(d.next()?, 2)?, number(d.next()?, 2)?);
+    let (year, month, day) = (
+        number(d.next()?, 4)?,
+        number(d.next()?, 2)?,
+        number(d.next()?, 2)?,
+    );
     let mut t = time.split(':');
-    let (hour, minute, second) = (number(t.next()?, 2)?, number(t.next()?, 2)?, number(t.next()?, 2)?);
+    let (hour, minute, second) = (
+        number(t.next()?, 2)?,
+        number(t.next()?, 2)?,
+        number(t.next()?, 2)?,
+    );
     if d.next().is_some() || t.next().is_some() {
         return None;
     }
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let days_in_month = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let days_in_month = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     if !(1970..=9999).contains(&year)
         || !(1..=12).contains(&month)
         || day < 1
@@ -350,7 +384,8 @@ pub fn parse_rfc3339(value: &str) -> Option<u64> {
     u64::try_from(days * 86_400 + hour * 3600 + minute * 60 + second).ok()
 }
 
-/// Unix seconds → `YYYY-MM-DDTHH:MM:SSZ`.
+/// Unix seconds → `YYYY-MM-DDTHH:MM:SSZ` (round-trip check for the parser).
+#[cfg(test)]
 pub fn format_rfc3339(seconds: u64) -> String {
     let days = (seconds / 86_400) as i64;
     let rest = seconds % 86_400;
@@ -417,8 +452,16 @@ pub mod tests {
         cuda["depends"] = json!(["engine"]);
         let mut other = component("engine", "engine");
         other["os"] = json!(if OS == "linux" { "windows" } else { "linux" });
-        let m = parse(&manifest(3, vec![component("engine", "engine"), cuda, other,
-            component("speech-tiny.en", "speech-model")])).unwrap();
+        let m = parse(&manifest(
+            3,
+            vec![
+                component("engine", "engine"),
+                cuda,
+                other,
+                component("speech-tiny.en", "speech-model"),
+            ],
+        ))
+        .unwrap();
         assert_eq!(m.local().count(), 3);
         assert_eq!(m.find("cuda").unwrap().depends, ["engine"]);
         assert_eq!(m.issued_at().unwrap(), 1_793_491_200);
@@ -444,7 +487,10 @@ pub mod tests {
             Box::new(|v| v["components"][0]["depends"] = json!(["cuda"])),
             Box::new(|v| v["components"][0]["size_bytes"] = json!(0)),
             Box::new(|v| v["components"][0]["provenance"]["type"] = json!("trust_me")),
-            Box::new(|v| { let first = v["components"][0].clone(); v["components"].as_array_mut().unwrap().push(first) }),
+            Box::new(|v| {
+                let first = v["components"][0].clone();
+                v["components"].as_array_mut().unwrap().push(first)
+            }),
         ];
         for (index, mutate) in cases.iter().enumerate() {
             let mut value = manifest(1, vec![component("engine", "engine")]);
@@ -459,17 +505,29 @@ pub mod tests {
         assert!(parse(&manifest(1, vec![model])).is_err());
         let mut model = component("speech-x", "speech-model");
         model["size_bytes"] = json!(11);
-        assert!(parse(&manifest(1, vec![model])).is_err(), "file sizes must add up");
+        assert!(
+            parse(&manifest(1, vec![model])).is_err(),
+            "file sizes must add up"
+        );
     }
 
     #[test]
     fn time_round_trip() {
-        for (text, seconds) in [("1970-01-01T00:00:00Z", 0), ("2000-02-29T12:34:56Z", 951_827_696),
-            ("2026-11-06T23:59:59.5Z", 1_794_009_599)] {
+        for (text, seconds) in [
+            ("1970-01-01T00:00:00Z", 0),
+            ("2000-02-29T12:34:56Z", 951_827_696),
+            ("2026-11-06T23:59:59.5Z", 1_794_009_599),
+        ] {
             assert_eq!(parse_rfc3339(text), Some(seconds), "{text}");
         }
         assert_eq!(format_rfc3339(951_827_696), "2000-02-29T12:34:56Z");
-        for bad in ["2026-02-30T00:00:00Z", "2026-11-06 00:00:00Z", "2026-11-06T24:00:00Z", "2026-11-06T00:00:00", "2026-11-06T00:00:00.Z"] {
+        for bad in [
+            "2026-02-30T00:00:00Z",
+            "2026-11-06 00:00:00Z",
+            "2026-11-06T24:00:00Z",
+            "2026-11-06T00:00:00",
+            "2026-11-06T00:00:00.Z",
+        ] {
             assert_eq!(parse_rfc3339(bad), None, "{bad}");
         }
     }

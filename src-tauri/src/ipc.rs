@@ -78,23 +78,40 @@ pub async fn components_snapshot(app: AppHandle) -> Reply<Value> {
 }
 /// Queue installs. Called only from an explicit click in Settings.
 #[tauri::command]
-pub fn components_install(window: WebviewWindow, state: State<'_, AppState>, ids: Vec<String>) -> Reply<()> {
+pub fn components_install(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Reply<()> {
     require_window(&window, "settings")?;
     state.components.install(&ids).map_err(component_error)
 }
 /// Cancel (discard partial download) or pause (keep it) a queued or running job.
 #[tauri::command]
-pub fn components_stop(window: WebviewWindow, state: State<'_, AppState>, id: String, pause: bool) -> Reply<()> {
+pub fn components_stop(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+    pause: bool,
+) -> Reply<()> {
     require_window(&window, "settings")?;
     state.components.stop(&id, pause).map_err(component_error)
 }
 #[tauri::command]
-pub fn components_resume(window: WebviewWindow, state: State<'_, AppState>, id: String) -> Reply<()> {
+pub fn components_resume(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> Reply<()> {
     require_window(&window, "settings")?;
     state.components.resume(&id).map_err(component_error)
 }
 #[tauri::command]
-pub fn components_discard(window: WebviewWindow, state: State<'_, AppState>, id: String) -> Reply<()> {
+pub fn components_discard(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> Reply<()> {
     require_window(&window, "settings")?;
     state.components.discard(&id).map_err(component_error)
 }
@@ -115,7 +132,11 @@ pub async fn components_remove(app: AppHandle, window: WebviewWindow, id: String
 pub async fn components_verify(app: AppHandle, window: WebviewWindow, id: String) -> Reply<Value> {
     require_window(&window, "settings")?;
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<AppState>().components.verify(&id).map(|v| json!({"verdict": v})).map_err(component_error)
+        app.state::<AppState>()
+            .components
+            .verify(&id)
+            .map(|v| json!({"verdict": v}))
+            .map_err(component_error)
     })
     .await
     .map_err(error)?
@@ -124,9 +145,14 @@ pub async fn components_verify(app: AppHandle, window: WebviewWindow, id: String
 #[tauri::command]
 pub async fn components_check_updates(app: AppHandle, window: WebviewWindow) -> Reply<()> {
     require_window(&window, "settings")?;
-    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().components.check_updates().map_err(component_error))
-        .await
-        .map_err(error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>()
+            .components
+            .check_updates()
+            .map_err(component_error)
+    })
+    .await
+    .map_err(error)?
 }
 #[tauri::command]
 pub async fn test_engine(app: AppHandle) -> Reply<Value> {

@@ -57,7 +57,10 @@ struct File {
 
 /// Load persisted jobs; anything that was running when Murmur stopped becomes Paused.
 pub fn load(path: &Path) -> BTreeMap<String, Record> {
-    let file: File = fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let file: File = fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     file.jobs
         .into_iter()
         .filter(|(id, record)| super::manifest::safe_id(id) && *id == record.id)
@@ -83,7 +86,11 @@ pub fn format_bytes(bytes: u64) -> String {
         value /= 1000.0;
         unit += 1;
     }
-    if unit == 0 { format!("{bytes} bytes") } else { format!("{value:.1} {}", UNITS[unit]) }
+    if unit == 0 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 /// Free space needed before a job may start.
@@ -124,36 +131,67 @@ fn cancelled() -> ComponentError {
 }
 
 /// Download (or reuse) every file of `component`, then stage, test and activate it.
-pub fn run(component: &Component, ctx: &Context<'_>, progress: &mut dyn FnMut(Phase, u64, u64)) -> Result<(), ComponentError> {
+pub fn run(
+    component: &Component,
+    ctx: &Context<'_>,
+    progress: &mut dyn FnMut(Phase, u64, u64),
+) -> Result<(), ComponentError> {
     check_space(component, ctx.free)?;
     let total = component.size_bytes;
     let staging = ctx.store.staging_dir(&component.id, &component.version);
     ctx.store.sweep(&component.id);
-    let result = (|| {
-        match component.archive {
-            Archive::Zip => {
-                let part = ctx.store.part(component, None);
-                let sha = component.sha256.as_deref().unwrap_or_default();
-                let target = Target { urls: &component.urls, size: total, sha256: sha, part: &part };
-                fetch::download(&target, ctx.transport, ctx.cancel, ctx.retry, &mut |done, all| progress(Phase::Downloading, done, all))?;
-                install_zip(component, &part, ctx, progress)
-            }
-            Archive::None => {
-                let folder = ctx.store.downloads().join(format!("{}-{}", component.id, component.version));
-                let mut offset = 0u64;
-                for file in &component.files {
-                    let done = folder.join(&file.name);
-                    if !(done.is_file() && fs::metadata(&done).map(|m| m.len()).ok() == Some(file.size_bytes)) {
-                        let part = ctx.store.part(component, Some(&file.name));
-                        let target = Target { urls: &file.urls, size: file.size_bytes, sha256: &file.sha256, part: &part };
-                        fetch::download(&target, ctx.transport, ctx.cancel, ctx.retry, &mut |d, _| progress(Phase::Downloading, offset + d, total))?;
-                        store::rename(&part, &done).map_err(|_| ComponentError::new(Reason::Io, "Could not save the download"))?;
-                    }
-                    offset += file.size_bytes;
-                    progress(Phase::Downloading, offset, total);
+    let result = (|| match component.archive {
+        Archive::Zip => {
+            let part = ctx.store.part(component, None);
+            let sha = component.sha256.as_deref().unwrap_or_default();
+            let target = Target {
+                urls: &component.urls,
+                size: total,
+                sha256: sha,
+                part: &part,
+            };
+            fetch::download(
+                &target,
+                ctx.transport,
+                ctx.cancel,
+                ctx.retry,
+                &mut |done, all| progress(Phase::Downloading, done, all),
+            )?;
+            install_zip(component, &part, ctx, progress)
+        }
+        Archive::None => {
+            let folder = ctx
+                .store
+                .downloads()
+                .join(format!("{}-{}", component.id, component.version));
+            let mut offset = 0u64;
+            for file in &component.files {
+                let done = folder.join(&file.name);
+                if !(done.is_file()
+                    && fs::metadata(&done).map(|m| m.len()).ok() == Some(file.size_bytes))
+                {
+                    let part = ctx.store.part(component, Some(&file.name));
+                    let target = Target {
+                        urls: &file.urls,
+                        size: file.size_bytes,
+                        sha256: &file.sha256,
+                        part: &part,
+                    };
+                    fetch::download(
+                        &target,
+                        ctx.transport,
+                        ctx.cancel,
+                        ctx.retry,
+                        &mut |d, _| progress(Phase::Downloading, offset + d, total),
+                    )?;
+                    store::rename(&part, &done).map_err(|_| {
+                        ComponentError::new(Reason::Io, "Could not save the download")
+                    })?;
                 }
-                install_files(component, &folder, ctx, progress)
+                offset += file.size_bytes;
+                progress(Phase::Downloading, offset, total);
             }
+            install_files(component, &folder, ctx, progress)
         }
     })();
     if result.is_err() {
@@ -162,7 +200,12 @@ pub fn run(component: &Component, ctx: &Context<'_>, progress: &mut dyn FnMut(Ph
     result
 }
 
-fn finish(component: &Component, staging: &Path, ctx: &Context<'_>, progress: &mut dyn FnMut(Phase, u64, u64)) -> Result<(), ComponentError> {
+fn finish(
+    component: &Component,
+    staging: &Path,
+    ctx: &Context<'_>,
+    progress: &mut dyn FnMut(Phase, u64, u64),
+) -> Result<(), ComponentError> {
     let total = component.size_bytes;
     progress(Phase::Testing, total, total);
     store::smoke_test(component, staging)?;
@@ -171,34 +214,51 @@ fn finish(component: &Component, staging: &Path, ctx: &Context<'_>, progress: &m
     }
     progress(Phase::Activating, total, total);
     (ctx.before_activate)(component);
-    ctx.store.activate(component, staging, ctx.replace, ctx.now)?;
+    ctx.store
+        .activate(component, staging, ctx.replace, ctx.now)?;
     ctx.store.discard_parts(component);
     Ok(())
 }
 
 /// A verified zip on disk: extract, test, activate.
-pub fn install_zip(component: &Component, zip: &Path, ctx: &Context<'_>, progress: &mut dyn FnMut(Phase, u64, u64)) -> Result<(), ComponentError> {
+pub fn install_zip(
+    component: &Component,
+    zip: &Path,
+    ctx: &Context<'_>,
+    progress: &mut dyn FnMut(Phase, u64, u64),
+) -> Result<(), ComponentError> {
     let total = component.size_bytes;
     let staging = ctx.store.staging_dir(&component.id, &component.version);
     let _ = fs::remove_dir_all(&staging);
     progress(Phase::Extracting, total, total);
-    let limit = component.installed_size_bytes.saturating_add(component.installed_size_bytes / 20);
+    let limit = component
+        .installed_size_bytes
+        .saturating_add(component.installed_size_bytes / 20);
     archive::extract(zip, &staging, limit, ctx.cancel)?;
     finish(component, &staging, ctx, progress)
 }
 
-fn install_files(component: &Component, folder: &Path, ctx: &Context<'_>, progress: &mut dyn FnMut(Phase, u64, u64)) -> Result<(), ComponentError> {
+fn install_files(
+    component: &Component,
+    folder: &Path,
+    ctx: &Context<'_>,
+    progress: &mut dyn FnMut(Phase, u64, u64),
+) -> Result<(), ComponentError> {
     let total = component.size_bytes;
     let staging = ctx.store.staging_dir(&component.id, &component.version);
     let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).map_err(|_| ComponentError::new(Reason::Io, "Could not create the staging folder"))?;
+    fs::create_dir_all(&staging)
+        .map_err(|_| ComponentError::new(Reason::Io, "Could not create the staging folder"))?;
     progress(Phase::Verifying, total, total);
     // Completed files may have waited on disk across restarts: hash them all again.
     match store::verify_files(component, folder, ctx.cancel)? {
         Verdict::Verified => {}
         _ => {
             ctx.store.discard_parts(component);
-            return Err(ComponentError::new(Reason::ChecksumMismatch, "A downloaded file changed on disk; download it again"));
+            return Err(ComponentError::new(
+                Reason::ChecksumMismatch,
+                "A downloaded file changed on disk; download it again",
+            ));
         }
     }
     for file in &component.files {
@@ -210,17 +270,35 @@ fn install_files(component: &Component, folder: &Path, ctx: &Context<'_>, progre
 
 /// Install from a local zip (offline tests, `--install-component`): verify size and SHA-256
 /// against the trusted manifest before anything is extracted.
-pub fn install_local(component: &Component, zip: &Path, ctx: &Context<'_>) -> Result<(), ComponentError> {
+pub fn install_local(
+    component: &Component,
+    zip: &Path,
+    ctx: &Context<'_>,
+) -> Result<(), ComponentError> {
     if component.archive != Archive::Zip {
-        return Err(ComponentError::new(Reason::NotAllowed, "Only zip components can be installed from a file"));
+        return Err(ComponentError::new(
+            Reason::NotAllowed,
+            "Only zip components can be installed from a file",
+        ));
     }
     check_space(component, ctx.free)?;
-    let (size, digest) = fetch::hash_file(zip, Some(ctx.cancel)).map_err(|_| ComponentError::new(Reason::Io, "Could not read the archive"))?;
+    let (size, digest) = fetch::hash_file(zip, Some(ctx.cancel))
+        .map_err(|_| ComponentError::new(Reason::Io, "Could not read the archive"))?;
     if size != component.size_bytes {
-        return Err(ComponentError::new(Reason::SizeMismatch, "The archive size does not match the manifest"));
+        return Err(ComponentError::new(
+            Reason::SizeMismatch,
+            "The archive size does not match the manifest",
+        ));
     }
-    if !component.sha256.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(&digest)) {
-        return Err(ComponentError::new(Reason::ChecksumMismatch, "The archive failed its SHA-256 check"));
+    if !component
+        .sha256
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case(&digest))
+    {
+        return Err(ComponentError::new(
+            Reason::ChecksumMismatch,
+            "The archive failed its SHA-256 check",
+        ));
     }
     let result = install_zip(component, zip, ctx, &mut |_, _, _| {});
     if result.is_err() {
