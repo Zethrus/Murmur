@@ -15,7 +15,19 @@ import tempfile
 import time
 import wave
 
-from linux_cuda_runtime import CUDA, sha256, verify
+from linux_cuda_runtime import CUDA, REQUIRED, sha256, verify
+
+ENGINE = Path("usr/lib/murmur/engine/murmur-engine")
+# Every GPU precision Murmur offers, with Silero VAD on and off.
+MATRIX = [(compute, vad) for compute in ("int8_float16", "float16", "float32", "int8") for vad in (False, True)]
+
+
+def _engine_gate():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("check_engine_imports", Path(__file__).with_name("check-engine-imports.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.check
 
 
 def fixture_pcm(path):
@@ -58,7 +70,7 @@ def loaded_libraries(pid):
     return sorted(paths)
 
 
-def run_engine(engine, models, model, pcm, library_path, device, runs, home, hidden=False):
+def run_engine(engine, models, model, pcm, library_path, device, runs, home, hidden=False, matrix=()):
     env = {key: value for key, value in os.environ.items()
            if key not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH", "CUDA_HOME", "CUDA_PATH")}
     env.update(HOME=str(home), XDG_CACHE_HOME=str(home / "cache"),
@@ -99,8 +111,16 @@ def run_engine(engine, models, model, pcm, library_path, device, runs, home, hid
             raise RuntimeError(f"{device} fixture produced no transcript")
         times = [request("transcribe", params)["infer_ms"] for _ in range(runs)]
         status = request("status", {"model": model, "device": device, "compute_type": "auto"})
+        combinations = []
+        for compute, vad in matrix:
+            reply = request("transcribe", dict(params, compute_type=compute, vad=vad))
+            loaded = request("status", {})
+            if not reply["text"].strip() or loaded["device"] != device or loaded["compute"] != compute:
+                raise RuntimeError(f"{device} {compute} vad={vad} failed: {loaded}")
+            combinations.append({"compute": compute, "vad": vad, "infer_ms": reply["infer_ms"],
+                                 "transcript_sha256": hashlib.sha256(reply["text"].encode()).hexdigest()})
         libraries = loaded_libraries(process.pid)
-        return {"status": status, "startup_and_first_infer_ms": startup_ms,
+        return {"status": status, "startup_and_first_infer_ms": startup_ms, "matrix": combinations,
                 "cold_infer_ms": first["infer_ms"],
                 "warm_median_ms": statistics.median(times), "warm_runs_ms": times,
                 "libraries": libraries, "transcript_sha256": hashlib.sha256(first["text"].encode()).hexdigest()}
@@ -116,22 +136,21 @@ def run_engine(engine, models, model, pcm, library_path, device, runs, home, hid
 
 def check_origin(result, cuda):
     loaded = result["libraries"]
-    for prefix in ("libcublas.so",):
+    for prefix in ("libcublas.so", "libcublasLt.so"):
         matches = [path for path in loaded if Path(path).name.startswith(prefix)]
         if not matches or any(not Path(path).is_relative_to(cuda) for path in matches):
             raise RuntimeError(f"{prefix} did not load solely from package: {matches}")
-    for path in loaded:
-        name = Path(path).name
-        if name.startswith(("libnvrtc.so", "libcublasLt.so", "libcudnn_")) and not Path(path).is_relative_to(cuda):
-            raise RuntimeError(f"CUDA library loaded outside package: {path}")
+    unexpected = [path for path in loaded if Path(path).name.startswith(("libcudnn", "libnvrtc"))]
+    if unexpected:
+        raise RuntimeError(f"cuDNN/NVRTC loaded although Murmur ships cuBLAS only: {unexpected}")
     drivers = [path for path in loaded if Path(path).name.startswith("libcuda.so")]
     if not drivers or any(Path(path).is_relative_to(cuda) for path in drivers):
         raise RuntimeError(f"Host driver origin invalid: {drivers}")
 
 
 def probe_runtime_origin(cuda):
-    """Resolve late-loadable cuDNN and NVRTC from a clean child loader environment."""
-    names = ("libcublas.so.12", "libcudnn.so.9", "libnvrtc.so.12")
+    """Resolve the shipped CUDA libraries from a clean child loader environment."""
+    names = tuple(sorted(REQUIRED))
     program = """import ctypes, json, os
 names = json.loads(os.environ['MURMUR_PROBE_LIBRARIES'])
 handles = [ctypes.CDLL(name) for name in names]
@@ -168,11 +187,13 @@ def check(artifacts, models, model, fixture, runs, baseline_engine=None, baselin
         subprocess.run([str(image), "--appimage-extract"], cwd=work, check=True, stdout=subprocess.DEVNULL)
         appdir = work / "squashfs-root"
         verify(appdir)
-        engine = appdir / "usr/bin/murmur-engine"
+        engine = appdir / ENGINE
+        _engine_gate()(engine.parent)
         cuda = appdir / CUDA
         search = os.pathsep.join((str(cuda), str(appdir / "usr/lib")))
         pcm = fixture_pcm(fixture)
-        gpu = run_engine(engine, models, model, pcm, search, "cuda", runs, work / "gpu")
+        # Forced CUDA sees only the shipped cuBLAS directory: proves nothing else is needed.
+        gpu = run_engine(engine, models, model, pcm, str(cuda), "cuda", runs, work / "gpu", matrix=MATRIX)
         if gpu["status"]["device"] != "cuda" or gpu["status"]["cpu_fallback"]:
             raise RuntimeError(f"Forced CUDA did not remain on GPU: {gpu['status']}")
         check_origin(gpu, cuda)

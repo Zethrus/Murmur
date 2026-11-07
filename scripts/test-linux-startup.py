@@ -24,9 +24,23 @@ def visible_settings():
 
 
 def launch_timeout(executable):
-    # Extract-and-run unpacks the full CUDA runtime on every invocation,
+    # Extract-and-run unpacks the engine and cuBLAS on every invocation,
     # including second-instance launches. Keep the extracted-app check tight.
     return 180 if executable.suffix == '.AppImage' else 25
+
+
+def engine_running(session):
+    """True once the packaged onedir engine runs inside the app's session."""
+    for stat in Path('/proc').glob('[0-9]*/stat'):
+        try:
+            fields = stat.read_text().rsplit(')', 1)[1].split()
+            command = (stat.parent / 'cmdline').read_bytes().split(b'\0')[0]
+        except (OSError, IndexError):
+            continue
+        # Fields after the command name: state, ppid, pgrp, session, ...
+        if int(fields[3]) == session and command.endswith(b'/lib/murmur/engine/murmur-engine'):
+            return True
+    return False
 
 
 def wait_for(condition, app, message, timeout=25):
@@ -83,7 +97,8 @@ def exercise(executable, background):
                 else:
                     wait_for(visible_settings, app, 'Manual launch did not open Settings', timeout)
                     assert not entry.exists() and not legacy.exists(), 'Disabled autostart entries remain'
-                print(('Login, autostart migration, and manual relaunch' if background else 'Manual launch') + ': passed', flush=True)
+                    wait_for(lambda: engine_running(app.pid), app, 'Packaged speech engine did not start', timeout)
+                print(('Login, autostart migration, and manual relaunch' if background else 'Manual launch and engine') + ': passed', flush=True)
             except Exception:
                 log.flush()
                 print((profile / 'stderr.log').read_text(), flush=True)
