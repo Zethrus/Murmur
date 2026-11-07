@@ -535,9 +535,9 @@ fn component_host(app: &AppHandle) -> components::Host {
             let _ = emitter.emit(name, value);
         }),
         stop_engine: Box::new(move || {
-            if let Some(state) = stopper.try_state::<AppState>() {
-                state.engine.stop_and_wait();
-            }
+            stopper
+                .try_state::<AppState>()
+                .is_none_or(|state| state.engine.stop_and_wait())
         }),
         changed: Box::new(move |kind| {
             if let Some(state) = notifier.try_state::<AppState>() {

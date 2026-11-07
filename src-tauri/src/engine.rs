@@ -701,12 +701,15 @@ impl Engine {
             failure,
         })
     }
-    /// Stop the engine and keep it stopped until `restart` (blocking, bounded).
-    pub fn stop_and_wait(&self) {
+    /// Stop the engine and keep it stopped until `restart` (blocking, bounded at 20 s).
+    /// True once the supervisor confirms no engine process is left (it waits for the child to
+    /// exit), or when the supervisor is gone and so is its child.
+    pub fn stop_and_wait(&self) -> bool {
         let (done, wait) = mpsc::channel();
-        if self.sender.send(Message::Stop(done)).is_ok() {
-            let _ = wait.recv_timeout(Duration::from_secs(20));
+        if self.sender.send(Message::Stop(done)).is_err() {
+            return true;
         }
+        wait.recv_timeout(Duration::from_secs(20)).is_ok()
     }
     /// Spawn again with the current files: the reset path after a component change.
     pub fn restart(&self) {
