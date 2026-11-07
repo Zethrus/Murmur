@@ -946,3 +946,66 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+mod network_tests {
+    //! Real hosts, opt-in: `cargo test -- --ignored real_hosts`. Exercises the production
+    //! redirect chain (github.com → release-assets.githubusercontent.com, huggingface.co →
+    //! its CDN) with the same allowlist, Range and hash checks the app uses.
+    use super::*;
+
+    #[test]
+    #[ignore = "downloads ~75 MB from GitHub and Hugging Face"]
+    fn real_hosts_follow_only_allowlisted_redirects() {
+        let dir = std::env::temp_dir().join(format!("murmur-real-hosts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let transport = Https::new(Duration::from_secs(30)).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        // tiny.en model.bin, pinned commit and digest from scripts/components/provenance.toml.
+        let urls = vec!["https://huggingface.co/Systran/faster-whisper-tiny.en/resolve/0d3d19a32d3338f10357c0889762bd8d64bbdeba/model.bin".to_owned()];
+        let part = dir.join("model.bin.part");
+        let target = Target {
+            urls: &urls,
+            size: 75_537_502,
+            sha256: "1a5afae06a4db91c975c9a9d78be5cc110ee4ea022ad57d55492e4550e936b2a",
+            part: &part,
+        };
+        // Stop after ~10 MB, then resume with Range from the kept bytes.
+        let stop = cancel.clone();
+        let first = download(
+            &target,
+            &transport,
+            &cancel,
+            Retry::default(),
+            &mut |done, _| {
+                if done > 10_000_000 {
+                    stop.store(true, Ordering::Release);
+                }
+            },
+        );
+        assert_eq!(first.unwrap_err().reason, Reason::Cancelled);
+        let kept = fs::metadata(&part).unwrap().len();
+        assert!(kept > 10_000_000 && kept < 75_537_502);
+        let cancel = Arc::new(AtomicBool::new(false));
+        download(
+            &target,
+            &transport,
+            &cancel,
+            Retry::default(),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        // A GitHub release asset (redirects to release-assets.githubusercontent.com).
+        let body = transport
+            .open(
+                "https://github.com/Zethrus/Murmur/releases/download/v0.4.7/SHA256SUMS",
+                0,
+                &cancel,
+            )
+            .unwrap();
+        let mut text = String::new();
+        body.reader.take(1 << 20).read_to_string(&mut text).unwrap();
+        assert!(text.contains("Murmur_0.4.7_amd64.AppImage"), "{text}");
+        let _ = fs::remove_dir_all(dir);
+    }
+}
