@@ -58,8 +58,38 @@ a signed list, and installs it into your data folder. Measured sizes are in
 - **Blocked on the release key.** Until the owner creates Murmur's offline
   release key ([signing](signing.md)), builds refuse to install components
   ("Release trust root missing") and tag builds upload nothing.
-- Windows builds remain unverified on Windows hardware; Windows engine and GPU
-  components are not built yet, and the GPU option stays hidden on Windows.
+- **Windows is a preview that has not run on Windows hardware.** Everything
+  below was compiled (GNU cross-check) and reviewed, not executed; the self-hosted
+  Windows runner is still being set up. Windows builds are **unsigned**
+  (SmartScreen warns).
+
+## Windows (preview, unverified on hardware)
+
+- **Small per-user installer and portable zip** with the app only; the engine
+  downloads on first run like on Linux. The installer needs no administrator
+  rights and installs WebView2 if missing (that step needs an internet
+  connection). Requires Windows 10 1809+ x64.
+- **Windows engine and GPU components** in the signed manifest: the engine
+  frozen from hash-locked win_amd64 wheels, and a cuBLAS-only GPU add-on
+  (`cublas64_12.dll`, `cublasLt64_12.dll`). The GPU option stays hidden on Windows
+  until it passes validation on Windows hardware.
+- **Text is never typed where it cannot arrive.** Windows running as
+  administrator (when Murmur is not), the UAC prompt and the lock screen are
+  detected; the text is held with Copy/Discard and the overlay says why.
+- **Window identity** is the window handle plus its process and the process's
+  start time, so a reused handle never counts as the original window.
+- **Modifiers are released before typing**, and clicking the overlay's buttons
+  no longer risks taking keyboard focus from the target app.
+- **Microphone privacy:** when Windows blocks desktop apps from the microphone,
+  Settings → Audio explains which switch is off and opens the right Windows
+  Settings page.
+- See [the focus contract](focus-contract.md) and
+  [Windows troubleshooting](troubleshooting.md#windows).
+
+## Behaviour change on all platforms
+
+- With **When focus changes: Insert anyway**, a transcript whose target window
+  cannot be identified is now held instead of failing with an error.
 
 # Murmur 0.4.7
 

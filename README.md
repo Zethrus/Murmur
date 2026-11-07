@@ -46,10 +46,34 @@ release key before it is used ([components](docs/components.md)). A typical
 CPU setup is about 490 MB in total instead of 2 GB with 0.4.7. Sizes and how they
 were measured: [size report](docs/size-report.md).
 
-The Android APK is planned for **November 6, 2026**. Windows builds are deferred
-until **November 6 or 7**. These are targets, subject to
-build and device testing. Neither platform is included in today's release.
-See [the roadmap](docs/roadmap.md).
+The Android APK is planned for **November 6, 2026**. These are targets, subject to
+build and device testing. See [the roadmap](docs/roadmap.md).
+
+### Windows (preview, not yet tested on Windows hardware)
+
+Windows support is implemented but **has not run on a Windows PC yet**: it was
+compiled and reviewed, and the Windows CI runner that will build and test it is
+still being set up ([CI and runner](docs/ci-windows.md)). Until a release lists
+Windows assets, there is no Windows download. When it does:
+
+| Download | Expected size | Use it for |
+| --- | ---: | --- |
+| `Murmur_<ver>_x64-setup.exe` | ~15–25 MB (estimate) | Per-user installer, no administrator rights; installs WebView2 if missing |
+| `murmur-windows-x86_64.zip` | ~10–20 MB (estimate) | Portable: `murmur.exe` and a README |
+
+- **Requirements:** Windows 10 1809 or later (x64) and the Microsoft Edge WebView2
+  Runtime (included in Windows 11 and current Windows 10). The installer embeds
+  Microsoft's WebView2 bootstrapper, which **needs an internet connection** when
+  WebView2 is missing.
+- **First run downloads the engine,** like Linux: setup shows the sizes first,
+  and every component is verified against Murmur's signed list. The NVIDIA GPU
+  option stays hidden on Windows until it has been validated on Windows hardware.
+- **Unsigned.** There is no Authenticode certificate yet, so SmartScreen warns
+  "Windows protected your PC". Check the SHA-256 against `SHA256SUMS` from the
+  same release before choosing *More info → Run anyway*.
+- Murmur cannot type into windows running as administrator unless Murmur is
+  too; it holds the text with Copy/Discard instead
+  ([troubleshooting](docs/troubleshooting.md#windows)).
 
 ## Install and dictate
 
@@ -164,6 +188,8 @@ or app data.
 | [Release audit](docs/release-audit.md) | Findings, test results, and remaining checks |
 | [Release process](docs/releases.md) | Required downloads, checksums, and publishing |
 | [Roadmap](docs/roadmap.md) | Android and Windows plans |
+| [Focus contract](docs/focus-contract.md) | When dictation is typed, held or copied |
+| [Windows CI](docs/ci-windows.md) | The Edison runner, variables and the GPU gate |
 | [Security](SECURITY.md) | Reporting a vulnerability |
 
 The desktop app uses Tauri 2, Rust, and TypeScript. A separate Python process runs
