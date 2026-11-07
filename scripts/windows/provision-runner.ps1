@@ -21,7 +21,7 @@ param(
     [string]$ModelRoot = 'C:\murmur-release-models',
     [string]$ServiceUser = 'murmur-ci',
     [int]$MinimumFreeGB = 60,
-    [int]$MinimumDriver = 525,
+    [string]$MinimumDriver = '528.33',
     [switch]$VerifyOnly
 )
 Set-StrictMode -Version Latest
@@ -30,6 +30,9 @@ $Log = Join-Path $env:ProgramData 'murmur-provision.log'
 Start-Transcript -Path $Log -Append | Out-Null
 
 function Step([string]$Text) { Write-Host "`n=== $Text ===" -ForegroundColor Cyan }
+# For commands WITHOUT secrets only: the error message repeats every argument, and this script
+# runs under Start-Transcript. Commands that take the password or the runner token are called
+# directly with a fixed error message (see cmdkey and config.cmd below).
 function Invoke-Native {
     param([string]$File, [string[]]$NativeArgs, [int[]]$Ok = @(0))
     & $File @NativeArgs
@@ -110,7 +113,8 @@ try {
     if ([int]$Os.BuildNumber -lt 19044) { throw "Windows 10 21H2 (build 19044) or later required; found $($Os.BuildNumber)" }
     if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) { throw 'nvidia-smi not found: install the NVIDIA driver first (owner decision; this script never installs drivers).' }
     $Driver = (nvidia-smi --query-gpu=driver_version --format=csv,noheader | Select-Object -First 1).Trim()
-    if ([int]($Driver.Split('.')[0]) -lt $MinimumDriver) { throw "NVIDIA driver $Driver is older than R$MinimumDriver; ask the owner before upgrading." }
+    # R528.33 is the Windows minimum for CUDA 12.x runtime libraries; compare as a version (551.86).
+    if ([version]$Driver -lt [version]$MinimumDriver) { throw "NVIDIA driver $Driver is older than R$MinimumDriver; ask the owner before upgrading." }
     $Drive = Get-PSDrive ($RunnerRoot.Substring(0, 1))
     if ($Drive.Free / 1GB -lt $MinimumFreeGB) { throw ("Only {0:N0} GB free on {1}: (need {2} GB); pick another -RunnerRoot drive." -f ($Drive.Free / 1GB), $Drive.Name, $MinimumFreeGB) }
     Write-Host "OK: $($Os.Caption) build $($Os.BuildNumber), driver $Driver, $([int]($Drive.Free / 1GB)) GB free"
@@ -135,7 +139,9 @@ try {
     }
     if (Get-LocalGroupMember -Group 'Administrators' -Member $ServiceUser -ErrorAction SilentlyContinue) { throw "$ServiceUser must not be an administrator" }
     if ($Password) {
-        Invoke-Native 'cmdkey' @("/add:murmur-ci-runner", "/user:$ServiceUser", "/pass:$Password") | Out-Null
+        # Secret argument: direct call, output discarded, fixed error message (never the arguments).
+        & cmdkey "/add:murmur-ci-runner" "/user:$ServiceUser" "/pass:$Password" *> $null
+        if ($LASTEXITCODE -ne 0) { throw "cmdkey could not store the $ServiceUser password (exit code $LASTEXITCODE)" }
         Write-Host 'Password stored in Credential Manager (murmur-ci-runner).'
     }
     # Log on as a service (SeServiceLogonRight) through secedit export/import.
@@ -222,9 +228,12 @@ snapshot_download("Systran/faster-distil-whisper-small.en", local_dir=r"$Model",
         Invoke-Native 'icacls' @($RunnerRoot, '/grant', "${ServiceUser}:(OI)(CI)M", '/T', '/Q') | Out-Null
         Push-Location $RunnerRoot
         try {
-            Invoke-Native '.\config.cmd' @('--url', $RepositoryUrl, '--token', $RunnerToken, '--name', $RunnerName,
-                '--labels', $Labels, '--work', '_work', '--runasservice', '--windowslogonaccount', $ServiceUser,
-                '--windowslogonpassword', $Password, '--unattended', '--replace')
+            # Secret arguments (token, password): direct call with a fixed error message, so a
+            # failure never writes them into the transcript. config.cmd does not echo them.
+            & .\config.cmd --url $RepositoryUrl --token $RunnerToken --name $RunnerName `
+                --labels $Labels --work _work --runasservice --windowslogonaccount $ServiceUser `
+                --windowslogonpassword $Password --unattended --replace
+            if ($LASTEXITCODE -ne 0) { throw "Runner registration (config.cmd) failed with exit code $LASTEXITCODE; see its output above" }
         } finally { Pop-Location }
         Get-Service 'actions.runner.*' | Set-Service -StartupType Automatic
         Get-Service 'actions.runner.*' | Where-Object Status -ne 'Running' | Start-Service
