@@ -98,3 +98,89 @@ class EngineImportGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def fake_pe(imports=(), delay_imports=(), pe32=False):
+    """Minimal PE image with an import and a delay-import table in one section."""
+    import struct
+    optional_size = (96 if pe32 else 112) + 16 * 8
+    image = bytearray(0x400)
+    image[0:2] = b"MZ"
+    struct.pack_into("<I", image, 0x3C, 0x40)
+    image[0x40:0x44] = b"PE\0\0"
+    struct.pack_into("<HHIIIHH", image, 0x44, 0x14C if pe32 else 0x8664, 1, 0, 0, 0, optional_size, 0x22)
+    optional = 0x58
+    struct.pack_into("<H", image, optional, 0x10B if pe32 else 0x20B)
+    directories = optional + (96 if pe32 else 112)
+    section = optional + optional_size
+    image[section:section + 8] = b".rdata\0\0"
+    struct.pack_into("<IIII", image, section + 8, 0x1000, 0x1000, 0x200, 0x200)  # vsize, rva, raw size, raw ptr
+    rva = lambda offset: 0x1000 + offset - 0x200  # noqa: E731 - file offset in the section -> RVA
+    names = 0x300
+    descriptor = 0x200
+    struct.pack_into("<II", image, directories + 8, rva(descriptor), 20 * (len(imports) + 1))
+    for name in imports:
+        image[names:names + len(name)] = name.encode()
+        struct.pack_into("<IIIII", image, descriptor, 0, 0, 0, rva(names), 0)
+        descriptor += 20
+        names += len(name) + 1
+    delay = 0x280
+    struct.pack_into("<II", image, directories + 8 * 13, rva(delay), 32 * (len(delay_imports) + 1))
+    for name in delay_imports:
+        image[names:names + len(name)] = name.encode()
+        struct.pack_into("<II", image, delay, 1, rva(names))
+        delay += 32
+        names += len(name) + 1
+    return bytes(image)
+
+
+class PortableExecutableTests(unittest.TestCase):
+    def test_import_and_delay_import_tables_are_read(self):
+        for pe32 in (False, True):
+            with self.subTest(pe32=pe32):
+                image = fake_pe(["KERNEL32.dll", "cublas64_12.dll"], ["cublasLt64_12.dll"], pe32=pe32)
+                self.assertEqual(gate.pe_imports_builtin(image),
+                                 {"KERNEL32.dll", "cublas64_12.dll", "cublasLt64_12.dll"})
+
+    def test_not_pe_gives_nothing(self):
+        self.assertEqual(gate.pe_imports_builtin(b"\x7fELF" + bytes(100)), set())
+        self.assertEqual(gate.pe_imports_builtin(b"MZ" + bytes(100)), set())
+
+    def test_windows_engine_with_cudnn_import_fails_on_any_host(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            engine = Path(temporary) / "murmur-engine"
+            internal = engine / "_internal" / "ctranslate2"
+            internal.mkdir(parents=True)
+            (internal / "ctranslate2.dll").write_bytes(fake_pe(["cublas64_12.dll", "KERNEL32.dll"]))
+            (engine / "murmur-engine.exe").write_bytes(fake_pe(["KERNEL32.dll"]))
+            self.assertEqual(gate.check(engine, platform="linux"), 2)
+            (internal / "ctranslate2.dll").write_bytes(fake_pe(["cublas64_12.dll"], ["cudnn64_9.dll"]))
+            with self.assertRaisesRegex(RuntimeError, "cudnn64_9.dll"):
+                gate.check(engine, platform="linux")
+
+    def test_import_names_reach_the_gate_even_if_the_string_scan_misses_them(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ctranslate2.dll"
+            path.write_bytes(fake_pe(["KERNEL32.dll"]))
+            with patch.object(gate, "_pe_imports", return_value={"CUDNN64_9.DLL"}) as imports:
+                self.assertEqual(gate.references(path, platform="win32"), {"cudnn64_9.dll"})
+            imports.assert_called_once_with(path, require_pefile=True)
+
+    def test_windows_requires_pefile_and_merges_its_tables(self):
+        import sys
+        import types
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "a.dll"
+            path.write_bytes(fake_pe(["KERNEL32.dll"]))
+            with patch.dict(sys.modules, {"pefile": None}):
+                with self.assertRaisesRegex(RuntimeError, "pefile is required"):
+                    gate._pe_imports(path, require_pefile=True)
+                self.assertEqual(gate._pe_imports(path), {"KERNEL32.dll"})
+            entry = types.SimpleNamespace(dll=b"nvrtc64_120_0.dll")
+            fake = types.ModuleType("pefile")
+            fake.PEFormatError = ValueError
+            fake.DIRECTORY_ENTRY = {"IMAGE_DIRECTORY_ENTRY_IMPORT": 1, "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT": 13}
+            fake.PE = lambda *a, **k: types.SimpleNamespace(parse_data_directories=lambda **k: None,
+                                                             DIRECTORY_ENTRY_DELAY_IMPORT=[entry])
+            with patch.dict(sys.modules, {"pefile": fake}):
+                self.assertEqual(gate._pe_imports(path, require_pefile=True), {"KERNEL32.dll", "nvrtc64_120_0.dll"})

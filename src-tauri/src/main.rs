@@ -209,8 +209,32 @@ fn install_component_cli(args: &[std::ffi::OsString]) -> Option<i32> {
     }
 }
 
+/// `--version` / `--help`: print and exit before any window, tray or single-instance handoff, so
+/// CI can smoke-test a build (Windows release builds use the GUI subsystem; output still reaches
+/// a redirected stdout).
+fn info_cli(args: &[std::ffi::OsString]) -> Option<String> {
+    let flag = args.get(1)?.to_str()?;
+    match flag {
+        "--version" | "-V" => Some(format!("murmur {}", env!("CARGO_PKG_VERSION"))),
+        "--help" | "-h" => Some(format!(
+            "murmur {} — local, private dictation\n\n\
+             Usage: murmur [--background]\n\
+             \x20 --background   start in the tray without opening Settings (login start)\n\
+             \x20 --version      print the version\n\
+             \x20 --help         print this help\n\n\
+             The speech engine and models are downloaded by the first-run setup.",
+            env!("CARGO_PKG_VERSION")
+        )),
+        _ => None,
+    }
+}
+
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    if let Some(text) = info_cli(&args) {
+        println!("{text}");
+        return;
+    }
     if let Some(code) = install_component_cli(&args) {
         std::process::exit(code);
     }
@@ -328,5 +352,29 @@ fn main() {
             eprintln!("Murmur failed to start: {error:#}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::info_cli;
+    use std::ffi::OsString;
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+    #[test]
+    fn version_and_help_print_without_starting_the_app() {
+        let version = info_cli(&args(&["murmur", "--version"])).unwrap();
+        assert_eq!(version, format!("murmur {}", env!("CARGO_PKG_VERSION")));
+        assert!(info_cli(&args(&["murmur", "--help"]))
+            .unwrap()
+            .contains("--background"));
+        assert_eq!(info_cli(&args(&["murmur"])), None);
+        assert_eq!(info_cli(&args(&["murmur", "--background"])), None);
+        // Only the first argument counts: `--install-component x --help` is not help.
+        assert_eq!(
+            info_cli(&args(&["murmur", "--install-component", "--help"])),
+            None
+        );
     }
 }

@@ -7,7 +7,8 @@ would fail on user machines without those libraries, so the build must stop.
 
 Every file in the frozen directory is scanned for library names (NEEDED entries
 and dlopen literals in native code). Linux ELF files are also checked with
-`readelf -d`; Windows PE files with pefile when it is installed.
+`readelf -d`; Windows PE files with a built-in import + delay-import table parser
+on any host, and additionally with pefile (required when running on Windows).
 
 Python source inside PyInstaller's PYZ archive is zlib-compressed, so a
 `ctypes.CDLL("libcudnn.so.9")` in Python would be invisible there. Pass
@@ -42,17 +43,94 @@ def _elf_needed(path):
     return set(re.findall(r"\(NEEDED\).*\[([^]]+)\]", result.stdout)) if result.returncode == 0 else set()
 
 
-def _pe_imports(path):
+def _rva_offset(sections, rva):
+    for virtual, size, raw, raw_size in sections:
+        if virtual <= rva < virtual + max(size, raw_size):
+            return raw + rva - virtual
+    return None
+
+
+def _c_string(data, offset):
+    end = data.find(b"\0", offset, offset + 512)
+    return data[offset:end].decode("ascii", "replace") if offset is not None and end > offset else None
+
+
+def pe_imports_builtin(data):
+    """DLL names from a PE image's import and delay-load import tables (no third-party code).
+
+    Delay-loaded DLLs matter: a CUDA library CTranslate2 only loads on first use is still a
+    hard dependency of that code path. Returns an empty set for anything that is not PE."""
+    import struct
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return set()
+    pe, = struct.unpack_from("<I", data, 0x3C)
+    if data[pe:pe + 4] != b"PE\0\0":
+        return set()
+    count, = struct.unpack_from("<H", data, pe + 6)
+    optional_size, = struct.unpack_from("<H", data, pe + 20)
+    optional = pe + 24
+    magic, = struct.unpack_from("<H", data, optional)
+    if magic == 0x20B:
+        image_base, = struct.unpack_from("<Q", data, optional + 24)
+        directories = optional + 112
+    elif magic == 0x10B:
+        image_base, = struct.unpack_from("<I", data, optional + 28)
+        directories = optional + 96
+    else:
+        return set()
+    sections = []
+    for index in range(count):
+        entry = optional + optional_size + 40 * index
+        size, virtual, raw_size, raw = struct.unpack_from("<IIII", data, entry + 8)
+        sections.append((virtual, size, raw, raw_size))
+    names = set()
+
+    def directory(index):
+        return struct.unpack_from("<II", data, directories + 8 * index)
+
+    rva, size = directory(1)  # IMAGE_DIRECTORY_ENTRY_IMPORT: 20-byte descriptors
+    offset = _rva_offset(sections, rva) if rva else None
+    while offset is not None and offset + 20 <= len(data):
+        descriptor = struct.unpack_from("<IIIII", data, offset)
+        if not any(descriptor):
+            break
+        if (name := _c_string(data, _rva_offset(sections, descriptor[3]))):
+            names.add(name)
+        offset += 20
+    rva, size = directory(13)  # IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT: 32-byte descriptors
+    offset = _rva_offset(sections, rva) if rva else None
+    while offset is not None and offset + 32 <= len(data):
+        attributes, name_rva = struct.unpack_from("<II", data, offset)
+        if not name_rva:
+            break
+        # Old-style (attributes bit 0 clear) descriptors hold virtual addresses.
+        name_rva = name_rva if attributes & 1 else name_rva - image_base
+        if (name := _c_string(data, _rva_offset(sections, name_rva))):
+            names.add(name)
+        offset += 32
+    return names
+
+
+def _pe_imports(path, require_pefile=False):
+    """Import and delay-import DLL names: the built-in parser, plus pefile when installed.
+    Windows builds pass require_pefile so a missing pefile cannot silently weaken the gate."""
+    with path.open("rb") as stream:
+        names = pe_imports_builtin(stream.read())
     try:
         import pefile
-    except ImportError:  # String scan above still covers import names.
-        return set()
+    except ImportError:
+        if require_pefile:
+            raise RuntimeError("pefile is required for the Windows engine gate (pip install pefile)")
+        return names
     try:
         image = pefile.PE(str(path), fast_load=True)
-        image.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+        image.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
+                                                  pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT"]])
     except pefile.PEFormatError:
-        return set()
-    return {entry.dll.decode(errors="replace") for entry in getattr(image, "DIRECTORY_ENTRY_IMPORT", ())}
+        return names
+    for table in ("DIRECTORY_ENTRY_IMPORT", "DIRECTORY_ENTRY_DELAY_IMPORT"):
+        names.update(entry.dll.decode(errors="replace") for entry in getattr(image, table, ()))
+    return names
 
 
 def references(path, platform=sys.platform):
@@ -62,8 +140,9 @@ def references(path, platform=sys.platform):
         magic = stream.read(4)
     if platform.startswith("linux") and magic == b"\x7fELF":
         linked = _elf_needed(path)
-    elif platform == "win32" and magic[:2] == b"MZ":
-        linked = _pe_imports(path)
+    elif magic[:2] == b"MZ":
+        # PE files are parsed on every host, so a Windows engine can be checked anywhere.
+        linked = _pe_imports(path, require_pefile=platform == "win32")
     else:
         linked = set()
     found.update(name.lower() for name in linked if re.search(r"cudnn|nvrtc", name, re.IGNORECASE))
@@ -74,7 +153,13 @@ def references(path, platform=sys.platform):
 PACKAGES = ("ctranslate2", "faster_whisper", "onnxruntime", "murmur_engine")
 # onnxruntime's preload_dlls() lists cuDNN/NVRTC file names but is never called at import,
 # and the CPU wheel has no CUDA provider to use them. Allowed only while that holds.
-BENIGN = {"onnxruntime/__init__.py"}
+BENIGN = {"onnxruntime/__init__.py",
+          # The Windows CTranslate2 4.6.3 wheel bundles the 266 KB cuDNN 9 dispatcher shim
+          # (imports only KERNEL32). ctranslate2.dll has no cuDNN import, symbol or string
+          # (inspected 2026-11-07); the shim is pruned from the freeze
+          # (scripts/components/windows_components.py prune-engine), so the frozen-directory
+          # scan above still fails if it ever ships.
+          "ctranslate2/cudnn64_9.dll"}
 CUDA_PROVIDER = re.compile(r"onnxruntime_providers_cuda", re.IGNORECASE)
 
 
@@ -111,7 +196,7 @@ def check_sources(site_packages, platform=sys.platform):
              if path.is_file() and not path.is_symlink() and path.suffix != ".pyc"]
     if any(CUDA_PROVIDER.search(path.name) for path in files):
         raise RuntimeError("onnxruntime ships a CUDA provider; the CPU-only wheel is required")
-    problems = _problems((path for path in files if str(path.relative_to(site_packages)) not in BENIGN),
+    problems = _problems((path for path in files if path.relative_to(site_packages).as_posix() not in BENIGN),
                          site_packages, platform)
     if problems:
         details = "\n".join(f"  {name}: {', '.join(found)}" for name, found in problems.items())

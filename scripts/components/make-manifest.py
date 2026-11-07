@@ -3,8 +3,10 @@
 
 Zip components (engine, CUDA add-on) take size, SHA-256 and installed size from the files in
 --components; file components (speech and Enhance models) take pinned files from
-provenance.toml. Platform entries whose zip is absent and that are marked `placeholder` are
-skipped (Windows until PR-C). Sign the output with sign-manifest.sh.
+provenance.toml. Entries marked `optional_platform` (Windows) are skipped unless
+--windows-inputs is given: then the Windows zips must be present and match the hashes the
+Windows build recorded (components-windows-inputs.json). Each entry may name its own
+`lock` (hash-locked requirements) and `cuda_lock`. Sign the output with sign-manifest.sh.
 """
 import argparse
 import datetime
@@ -42,8 +44,23 @@ def git_revision():
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def build(provenance, components_dir, version, base_url, serial, issued, expires, lock):
+def check_windows_inputs(inputs, components_dir, version):
+    """The Windows zips present here are byte-for-byte what the Windows build recorded."""
+    if inputs.get("version") != version or inputs.get("os") != "windows":
+        raise SystemExit("Windows manifest input is for another version or platform")
+    for kind in ("engine", "cuda"):
+        entry = inputs.get("components", {}).get(kind) or {}
+        path = components_dir / entry.get("zip", "")
+        if not entry.get("zip") or "/" in entry["zip"] or not path.is_file():
+            raise SystemExit(f"Windows {kind} zip missing: {entry.get('zip')}")
+        if path.stat().st_size != entry.get("size_bytes") or sha256(path) != entry.get("sha256"):
+            raise SystemExit(f"{path.name} differs from the Windows build's manifest input")
+
+
+def build(provenance, components_dir, version, base_url, serial, issued, expires, lock, windows_inputs=None):
     entries = []
+    if windows_inputs is not None:
+        check_windows_inputs(windows_inputs, components_dir, version)
     for key, spec in provenance["components"].items():
         component_id = spec.get("id", key)
         base = {
@@ -61,19 +78,21 @@ def build(provenance, components_dir, version, base_url, serial, issued, expires
         if spec["archive"] == "zip":
             name = spec["zip"].format(version=version)
             path = components_dir / name
+            if spec.get("optional_platform") and windows_inputs is None:
+                # Only zips the Windows build vouched for (by hash) are ever signed.
+                print(f"skipping {key}: Windows not part of this manifest", file=sys.stderr)
+                continue
             if not path.is_file():
-                if spec.get("placeholder"):
-                    print(f"skipping placeholder {key}: {name} not built", file=sys.stderr)
-                    continue
                 raise SystemExit(f"Missing component archive: {path}")
             with zipfile.ZipFile(path) as archive:
                 installed = sum(info.file_size for info in archive.infolist())
             base.update(urls=[base_url + name], size_bytes=path.stat().st_size, sha256=sha256(path),
                         installed_size_bytes=installed, temp_size_bytes=0)
+            entry_lock = ROOT / spec["lock"] if "lock" in spec else lock
             if spec["kind"] == "engine":
-                provenance_entry.update(source_revision=git_revision(), source_sha256=sha256(lock))
+                provenance_entry.update(source_revision=git_revision(), source_sha256=sha256(entry_lock))
             elif spec["kind"] == "cuda":
-                cublas_version, wheel = lock_entry(lock, "nvidia-cublas-cu12")
+                cublas_version, wheel = lock_entry(entry_lock, "nvidia-cublas-cu12")
                 provenance_entry.update(source_revision=f"nvidia-cublas-cu12=={cublas_version}", source_sha256=wheel)
         else:
             files = [{"name": f["name"], "urls": [f["url"]], "size_bytes": f["size_bytes"], "sha256": f["sha256"]}
@@ -98,6 +117,8 @@ def main():
     parser.add_argument("--valid-days", type=int, default=180)
     parser.add_argument("--lock", type=Path, default=ROOT / "engine/requirements-linux-release.txt")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--windows-inputs", type=Path,
+                        help="components-windows-inputs.json from windows-build.yml; Windows entries become required")
     args = parser.parse_args()
     issued = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
     base = args.base_url or f"https://github.com/Zethrus/Murmur/releases/download/v{args.version}/"
@@ -105,7 +126,8 @@ def main():
         parser.error("--base-url must be an https://github.com/ release URL ending in /")
     manifest = build(tomllib.loads(args.provenance.read_text()), args.components, args.version, base,
                      args.serial or int(issued.timestamp()), issued,
-                     issued + datetime.timedelta(days=args.valid_days), args.lock)
+                     issued + datetime.timedelta(days=args.valid_days), args.lock,
+                     json.loads(args.windows_inputs.read_text()) if args.windows_inputs else None)
     args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(f"{args.output}: serial {manifest['serial']}, {len(manifest['components'])} components")
 
