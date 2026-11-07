@@ -20,9 +20,8 @@ numpy==1.26.4 --hash=sha256:675d61ffbfa78604709862923189bad94014bef562cc35cf61d3
 # PyPI wheel: nvidia_cublas_cu12-12.9.3.13-py3-none-manylinux_2_27_x86_64.whl
 nvidia-cublas-cu12==12.9.3.13 --hash=sha256:d7d51055f161b317c7105ddaae90e71eda059026074ffef93cf7cde2886bfe72
 # PyPI wheel: nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl
+# Build-time only: a pip dependency of nvidia-cublas-cu12. NVRTC is not shipped.
 nvidia-cuda-nvrtc-cu12==12.9.86 --hash=sha256:210cf05005a447e29214e9ce50851e83fc5f4358df8b453155d5e1918094dcb4
-# PyPI wheel: nvidia_cudnn_cu12-9.27.0.42-py3-none-manylinux_2_27_x86_64.whl
-nvidia-cudnn-cu12==9.27.0.42 --hash=sha256:0a4aa3a7d2264256506c6857fc41fc0c499982f78d70195b1cfcc9055c1957cd
 onnxruntime==1.31.1 --hash=sha256:1f3dea47f2f0e5117c2404cea7d21fd253ae7836a3bf167a501cdfbb2600d536
 packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
 protobuf==7.36.2 --hash=sha256:89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2

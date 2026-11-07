@@ -97,6 +97,16 @@ foreground executable names. Explicit lists, including empty ones, are preserved
 fractional x/y position. Let the app write these fields. Zero monitor dimensions
 mean that no custom placement is saved.
 
+## Environment variables
+
+These are for development, testing and unusual installs. Normal installs need
+neither.
+
+| Variable | Read by | Meaning |
+| --- | --- | --- |
+| `MURMUR_ENGINE` | App | Speech engine to launch: the `murmur-engine` executable, or a directory containing it. Checked first; if it names nothing usable the app reports "Speech engine is not installed" instead of falling back. Without it, debug builds run the checkout's Python engine and release builds use `<app dir>/../lib/murmur/engine/murmur-engine` on Linux or `<app dir>\engine\murmur-engine.exe` on Windows. |
+| `MURMUR_CUDA_DIR` | Engine (Windows) | Absolute directory with the CUDA DLLs; added to the DLL search path at engine start. Ignored if missing or relative. On Linux the app instead prepends `<app dir>/../lib/murmur/cuda` to the engine's `LD_LIBRARY_PATH`. |
+
 [Back to the README](../README.md)
 
 Manual launches open Settings. Login entries pass `--background` to keep the

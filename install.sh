@@ -65,14 +65,6 @@ exec "$ROOT/.venv/bin/python" -m murmur_engine "$@"
 LAUNCH
 chmod 755 "$SIDECAR"
 bash -n "$SIDECAR"
-TARGET="$(rustc -vV | while IFS=' ' read -r key value; do
-  [[ "$key" != host: ]] || printf '%s' "$value"
-done)"
-[[ -n "$TARGET" ]] || { printf 'Cannot determine Rust host target.\n' >&2; exit 1; }
-# tauri.conf declares externalBin, so the bundle needs a file with the target suffix; the launcher
-# is that file (a few hundred bytes) instead of a ~1.6 GB frozen interpreter.
-mkdir -p src-tauri/binaries
-cp "$SIDECAR" "src-tauri/binaries/murmur-engine-$TARGET"
 "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'
 printf '[4/5] Building Murmur and Linux bundles...\n'
 # Tauri runs npm run build through beforeBuildCommand.
