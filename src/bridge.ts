@@ -94,7 +94,9 @@ export interface Hardware { ram_mb: number | null; avx2: boolean; gpus: Gpu[]; c
 export interface Recommendation { english: string; multilingual: string; compute: "cpu" | "cuda"; reason: string }
 export interface ComponentsSnapshot {
   trust: { ok: boolean; development: boolean; reason: string | null; message: string | null };
-  manifest: { serial: number; issued_at: string; expires_at: string; source: "embedded" | "cached" | "fetched" } | null;
+  manifest: { serial: number; issued_at: string; expires_at: string; source: "embedded" | "cached" | "fetched"; stale: boolean } | null;
+  /** The signed list has expired: shown, verified and removable, but nothing new installs until Check for updates. */
+  stale: boolean;
   hardware: Hardware; recommendation: Recommendation; components: ComponentInfo[];
   migrating: boolean; checking: boolean; engine_installed: boolean;
 }

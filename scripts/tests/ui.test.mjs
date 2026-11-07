@@ -82,6 +82,23 @@ test("missing trust root explains what needs what and disables installs",async()
   assert.match(h.root.textContent,/no release signing key/);assert.match(h.root.textContent,/Dictation needs the speech engine and one speech model/);
   assert.equal(button(component(h.root,"engine"),"Install").disabled,true);h.unload();
 });
+test("expired component list stays listed, explains itself and gates new installs",async()=>{
+  const fixture=componentsFixture({stale:true});
+  Object.assign(fixture.components.find(c=>c.id==="cuda"),{state:"paused",job:{id:"cuda",phase:"paused",bytes_done:1e8,bytes_total:470e6,rate:0,eta:null,error:null,reason:null}});
+  const h=await settings({componentsFixture:fixture});await button(h.root,"Components").dispatch("click");await settle();await settle();
+  assert.match(h.root.textContent,/Component list expired — Check for updates/);assert.match(h.root.textContent,/expired 2027-05-06/);
+  assert.equal(button(component(h.root,"speech-tiny.en"),"Install").disabled,true);
+  assert.equal(button(component(h.root,"cuda"),"Resume").disabled,true);
+  assert.equal(button(component(h.root,"engine"),"Verify").disabled,false);assert.equal(button(component(h.root,"engine"),"Remove").disabled,false);
+  await button(h.root,"Check for updates").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_check_updates"));h.unload();
+});
+test("setup still opens with an expired list but cannot install, and says why",async()=>{
+  const h=await settings({componentsFixture:componentsFixture({engine:false,stale:true})});
+  assert.equal(h.root.querySelector(".setup-layer").hidden,false);
+  for(let i=0;i<4;i++)await button(h.root,"Next").dispatch("click");
+  assert.equal(button(h.root,"Download and install").disabled,true);assert.match(h.root.textContent,/Component list expired — Check for updates/);
+  assert.ok(!h.calls.some(c=>c.name==="components_install"));h.unload();
+});
 
 // ---- First-run setup ----
 const stepTitle=h=>h.root.querySelector(".setup-title").textContent;

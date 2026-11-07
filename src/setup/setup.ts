@@ -2,7 +2,7 @@ import {call, type ComponentInfo, type ComponentJob, type ComponentsSnapshot, ty
 import {el, button} from "../settings/widgets/row";
 import {toggle} from "../settings/widgets/toggle";
 import {progress} from "../settings/widgets/progress";
-import {formatBytes, jobText, stateLabel} from "../settings/widgets/component";
+import {STALE_NOTICE, formatBytes, jobText, stateLabel} from "../settings/widgets/component";
 
 export interface SetupHooks {
   config: Config;
@@ -114,6 +114,7 @@ export function setupWizard(hooks: SetupHooks): HTMLElement {
       const items: HTMLElement[] = [table, totals];
       if (short) items.push(el("p", "field-error", `Not enough free disk space: about ${formatBytes(download + installed + temporary + MARGIN)} is needed.`));
       if (!snapshot.trust.ok) items.push(el("p", "field-error", snapshot.trust.message ?? "Components cannot be verified, so nothing can be installed."));
+      else if (snapshot.stale && ids.length) items.push(el("p", "field-error", `${STALE_NOTICE} Check for updates is in Settings → Components.`));
       items.push(el("p", "hint", ids.length ? `Selecting Download and install downloads ${formatBytes(download)} from GitHub Releases and Hugging Face. Nothing else is sent.` : "Everything you chose is already installed."));
       return items;
     },
@@ -160,7 +161,7 @@ export function setupWizard(hooks: SetupHooks): HTMLElement {
         await call("components_install", {ids});
         installing = ids; step = 5; snapshot = await call("components_snapshot"); render(true);
       }, "primary");
-      go.disabled = ids.length > 0 && !snapshot.trust.ok;
+      go.disabled = ids.length > 0 && (!snapshot.trust.ok || snapshot.stale);
       footer.append(go);
     }
     if (step === 5) {

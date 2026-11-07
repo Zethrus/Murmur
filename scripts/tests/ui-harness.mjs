@@ -20,10 +20,10 @@ export function fixture() {
 const part=(id,kind,extra={})=>({id,kind,display_name:id,description:`${id} description`,version:"1.0.0",installed_version:null,state:"available",update_available:false,
   size_bytes:100e6,installed_size_bytes:250e6,temp_size_bytes:0,depends:[],in_use:null,dependents:[],job:null,...extra});
 /** Component snapshot: engine and distil-small.en active, everything else available. */
-export function componentsFixture({engine=true,gpu=false,trust=true}={}) {
+export function componentsFixture({engine=true,gpu=false,trust=true,stale=false}={}) {
   const model=(name,languages,extra={})=>part(`speech-${name}`,"speech-model",{model:name,display_name:name,languages,quality:"Good",speed:"Fast",memory_mb:600,...extra});
   return {trust:{ok:trust,development:false,reason:trust?null:"trust_root_missing",message:trust?null:"Release trust root missing"},
-    manifest:trust?{serial:3,issued_at:"2026-11-06T00:00:00Z",expires_at:"2027-05-06T00:00:00Z",source:"embedded"}:null,
+    manifest:trust?{serial:3,issued_at:"2026-11-06T00:00:00Z",expires_at:"2027-05-06T00:00:00Z",source:"embedded",stale}:null,stale:trust&&stale,
     hardware:{ram_mb:16384,avx2:true,gpus:gpu?[{name:"NVIDIA GeForce RTX 4060 Laptop GPU",vram_mb:8188,driver:"580.178.04"}]:[],cuda_offered:gpu,free_bytes:50e9},
     recommendation:{english:gpu?"distil-large-v3":"distil-small.en",multilingual:"large-v3-turbo",compute:gpu?"cuda":"cpu",reason:"Test hardware."},
     components:[part("engine","engine",engine?{state:"active",installed_version:"1.0.0"}:{}),part("cuda","cuda",{size_bytes:470e6,installed_size_bytes:855e6,depends:["engine"]}),

@@ -40,7 +40,7 @@ export interface RowHooks {
   fail(message: string): void;
   /** Extra buttons for this component (e.g. "Use model"). */
   extra?(info: ComponentInfo): HTMLElement[];
-  /** Installs are refused while the trust root or manifest is unavailable. */
+  /** Installs (and resuming them) are refused while the trust root or manifest is unavailable or expired. */
   canInstall: boolean;
 }
 
@@ -76,8 +76,10 @@ export function componentRow(info: ComponentInfo, hooks: RowHooks): {element: HT
     case "available": actions.append(install("Install")); break;
     case "queued": case "installing":
       actions.append(act("Pause", () => call("components_stop", {id: info.id, pause: true})), act("Cancel", () => call("components_stop", {id: info.id, pause: false}), "quiet danger")); break;
-    case "paused": actions.append(act("Resume", () => call("components_resume", {id: info.id}), "primary"), act("Discard", () => call("components_discard", {id: info.id}), "quiet danger")); break;
-    case "failed": actions.append(act("Retry", () => call("components_resume", {id: info.id}), "primary"), act("Discard", () => call("components_discard", {id: info.id}), "quiet danger")); break;
+    case "paused": case "failed": {
+      const resume = act(info.state === "paused" ? "Resume" : "Retry", () => call("components_resume", {id: info.id}), "primary"); resume.disabled = !hooks.canInstall;
+      actions.append(resume, act("Discard", () => call("components_discard", {id: info.id}), "quiet danger")); break;
+    }
     case "unverified": actions.append(install("Reinstall")); break;
     case "corrupt": actions.append(install("Reinstall"), remove); break;
     default:
@@ -97,9 +99,10 @@ export function componentRow(info: ComponentInfo, hooks: RowHooks): {element: HT
   return {element: box, progress: update};
 }
 
+export const STALE_NOTICE = "Component list expired — Check for updates. Installed components keep working and can be verified or removed; nothing new is installed until the list is renewed.";
 /** Why installs are unavailable, in words a user can act on. */
 export function trustNotice(snapshot: ComponentsSnapshot): string | null {
-  if (snapshot.trust.ok) return null;
+  if (snapshot.trust.ok) return snapshot.stale ? STALE_NOTICE : null;
   const reason = snapshot.trust.reason;
   if (reason === "trust_root_missing") return "This build has no release signing key, so it cannot verify or install components. Dictation needs the speech engine and a speech model; use an official Murmur release.";
   if (reason === "primary_revoked") return snapshot.trust.message ?? "Murmur's release key was revoked. Installs are disabled.";
