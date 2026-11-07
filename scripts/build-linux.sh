@@ -42,8 +42,15 @@ if [[ -z "${MURMUR_SIGNING_SUBKEY:-}" ]]; then
   scripts/components/dev-key.sh "$KEYHOME" >/dev/null
   sleep 1
 fi
+# A release with Windows enabled signs the Windows zips too: MURMUR_WINDOWS_COMPONENTS names a
+# folder with the Windows zips and components-windows-inputs.json from windows-build.yml.
+WINDOWS_ARGS=()
+if [[ -n "${MURMUR_WINDOWS_COMPONENTS:-}" ]]; then
+  cp "$MURMUR_WINDOWS_COMPONENTS"/murmur-*-windows-x86_64-"$VERSION".zip "$COMPONENTS/"
+  WINDOWS_ARGS=(--windows-inputs "$MURMUR_WINDOWS_COMPONENTS/components-windows-inputs.json")
+fi
 python3 scripts/components/make-manifest.py --components "$COMPONENTS" --version "$VERSION" \
-  --output "$COMPONENTS/components-manifest.json"
+  --output "$COMPONENTS/components-manifest.json" "${WINDOWS_ARGS[@]}"
 if [[ -n "${MURMUR_SIGNING_SUBKEY:-}" ]]; then
   scripts/components/sign-manifest.sh "$COMPONENTS/components-manifest.json" "$COMPONENTS/murmur-release.asc"
 else

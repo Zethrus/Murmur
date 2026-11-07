@@ -176,7 +176,8 @@ def check(artifacts, components, models, model, fixture, runs, baseline_engine=N
             if gpu["warm_median_ms"] > limit:
                 raise RuntimeError(f"Packaged GPU median {gpu['warm_median_ms']} ms exceeds baseline limit {limit} ms")
         assets = {path.name: sha256(path) for directory in (artifacts, components) for path in directory.iterdir()
-                  if path.is_file() and path.name not in ("GPU-VALIDATION.json", linux_components.SIGNATURE, linux_components.CERTIFICATE)}
+                  if path.is_file() and path.name not in ("GPU-VALIDATION.json", linux_components.SIGNATURE, linux_components.CERTIFICATE)
+                  and "-windows-" not in path.name}
         return {"assets": assets, "model": model, "fixture_sha256": sha256(fixture),
                 "origin_validated": True, "runtime_probe": runtime_probe,
                 "gpu": gpu, "auto": auto, "cpu": cpu, "cpu_auto": cpu_auto,

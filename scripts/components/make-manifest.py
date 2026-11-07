@@ -57,11 +57,15 @@ def check_windows_inputs(inputs, components_dir, version):
             raise SystemExit(f"{path.name} differs from the Windows build's manifest input")
 
 
-def build(provenance, components_dir, version, base_url, serial, issued, expires, lock, windows_inputs=None):
+def build(provenance, components_dir, version, base_url, serial, issued, expires, lock, windows_inputs=None,
+          systems=("linux", "windows")):
+    """`systems` limits platform-specific entries (a Windows-only test manifest); `any` stays."""
     entries = []
     if windows_inputs is not None:
         check_windows_inputs(windows_inputs, components_dir, version)
     for key, spec in provenance["components"].items():
+        if spec["os"] != "all" and spec["os"] not in systems:
+            continue
         component_id = spec.get("id", key)
         base = {
             "id": component_id, "version": spec.get("version", version), "kind": spec["kind"],
@@ -117,6 +121,8 @@ def main():
     parser.add_argument("--valid-days", type=int, default=180)
     parser.add_argument("--lock", type=Path, default=ROOT / "engine/requirements-linux-release.txt")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--os", action="append", choices=("linux", "windows"), dest="systems",
+                        help="platforms to list (repeatable); default both")
     parser.add_argument("--windows-inputs", type=Path,
                         help="components-windows-inputs.json from windows-build.yml; Windows entries become required")
     args = parser.parse_args()
@@ -127,7 +133,8 @@ def main():
     manifest = build(tomllib.loads(args.provenance.read_text()), args.components, args.version, base,
                      args.serial or int(issued.timestamp()), issued,
                      issued + datetime.timedelta(days=args.valid_days), args.lock,
-                     json.loads(args.windows_inputs.read_text()) if args.windows_inputs else None)
+                     json.loads(args.windows_inputs.read_text()) if args.windows_inputs else None,
+                     tuple(args.systems or ("linux", "windows")))
     args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(f"{args.output}: serial {manifest['serial']}, {len(manifest['components'])} components")
 
