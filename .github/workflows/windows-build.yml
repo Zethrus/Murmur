@@ -56,6 +56,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Allow Windows PowerShell scripts for the runner user
+        # actions/setup-python and setup-node run their setup.ps1 through Windows PowerShell 5.1,
+        # whose default policy on client Windows is Restricted ("running scripts is disabled on
+        # this system"). pwsh 7 keeps its own policy, so set 5.1's CurrentUser value directly;
+        # CurrentUser beats LocalMachine and only a Group Policy can override it.
+        shell: pwsh
+        run: |
+          $Key = 'HKCU:\Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell'
+          New-Item -Path $Key -Force | Out-Null
+          Set-ItemProperty -Path $Key -Name ExecutionPolicy -Value RemoteSigned
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command 'Get-ExecutionPolicy -List'
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

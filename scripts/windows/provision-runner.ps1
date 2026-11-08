@@ -159,6 +159,10 @@ try {
     Remove-Item $Policy, (Join-Path $env:TEMP 'murmur-secpol.sdb') -ErrorAction SilentlyContinue
 
     Step '2. Toolchain (winget, machine-wide)'
+    # GitHub's setup-* actions run setup.ps1 through Windows PowerShell 5.1, which refuses every
+    # script under the client default (Restricted). RemoteSigned still blocks unsigned downloads.
+    & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command 'Set-ExecutionPolicy -Scope LocalMachine RemoteSigned -Force'
+    Write-Host 'Windows PowerShell 5.1 execution policy (LocalMachine): RemoteSigned'
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'winget is unavailable; install App Installer from the Microsoft Store (or report and use Chocolatey by hand).' }
     foreach ($Id in $Packages.Keys) {
         $Listed = winget list --id $Id --exact --accept-source-agreements 2>$null | Out-String
