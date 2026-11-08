@@ -1,4 +1,4 @@
-# Linux download size report
+# Download size report (Linux and Windows)
 
 Units: MB = 10⁶ bytes, MiB = 2²⁰ bytes. "Download" is the file a user fetches;
 "unpacked" is what an AppImage expands to; "installed" is the `.deb`
@@ -181,3 +181,22 @@ MiB; the "App, WebKitGTK…" row above (88.9 MB) is what remains.
   31 MB binary includes it.
 - **Engine (≈297 MB unpacked)**: CTranslate2 (≈136 MB), onnxruntime for Silero
   VAD (≈59 MB), OpenBLAS in NumPy (≈37 MB), tokenizers and Python itself.
+
+## Windows (PR-C): measured on Edison
+
+Measured by `check-release.py sizes` in the green Edison run (2026-11-08, run
+42502808128, version 0.4.7). Unpacked = sum of zip entries (the installer is
+reported as its own size).
+
+| Artifact | Download | Unpacked | Budget |
+| --- | ---: | ---: | ---: |
+| `Murmur_<ver>_x64-setup.exe` (NSIS, per-user, embedded WebView2 bootstrapper) | 10.6 MiB | — | 35 MiB |
+| `murmur-windows-x86_64.zip` (portable `murmur.exe` + README) | 11.2 MiB | 29.2 MiB | 35 MiB |
+| `murmur-engine-windows-x86_64-<ver>.zip` | 42.8 MiB | 178.6 MiB | 130 MiB |
+| `murmur-cuda-windows-x86_64-<ver>.zip` (cuBLAS 12.9.2.10 only) | 429.9 MiB | 735.5 MiB | 520 MiB |
+
+Removed from what the Windows CTranslate2 wheel would otherwise bring along:
+`cudnn64_9.dll` (266 KB dispatcher shim; `ctranslate2.dll` never references
+cuDNN) and, from the cuBLAS wheel, `nvblas64_12.dll`, headers and import
+libraries. Typical Windows CPU setup: installer 11.1 MB + engine 44.9 MB + `distil-small.en`
+335.5 MB ≈ 392 MB; GPU adds 450.8 MB.

@@ -2,8 +2,10 @@
 import importlib.util
 import json
 import pathlib
+import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'audit-llama-cpu.py'
 spec = importlib.util.spec_from_file_location('cpu_audit', SCRIPT)
@@ -24,7 +26,7 @@ FLAGS = '-m64 -march=x86-64 -mavx -mavx2 -mfma -mf16c -mbmi2 -msse4.2'
 class AuditTests(unittest.TestCase):
     def test_effective_compiler_arguments(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             flags = cache.parent / 'flags.make'
             (cache.parent / 'extra.rsp').write_text('-mavx512f')
@@ -45,7 +47,7 @@ class AuditTests(unittest.TestCase):
 
     def test_quoted_and_conflicting_response_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
+            root = pathlib.Path(tmp).resolve()
             cache = root / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             directory = root / 'CMakeFiles' / 'cpu.dir'
@@ -69,7 +71,7 @@ class AuditTests(unittest.TestCase):
 
     def test_compile_commands_working_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
+            root = pathlib.Path(tmp).resolve()
             cache = root / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             directory = root / 'other'
@@ -93,7 +95,7 @@ class AuditTests(unittest.TestCase):
 
     def test_independent_baseline_options(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             (cache.parent / 'flags.make').write_text('CXX_FLAGS = ' + FLAGS)
             for missing in REQUIRED_ON + REQUIRED_OFF:
                 with self.subTest(missing=missing):
@@ -103,7 +105,7 @@ class AuditTests(unittest.TestCase):
 
     def test_unsupported_instruction_families(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             flags = cache.parent / 'flags.make'
             for flag in ('-msse3', '-mssse3', '-mpopcnt', '-maes', '-march=x86-64-v2',
@@ -122,7 +124,7 @@ class AuditTests(unittest.TestCase):
 
     def test_contract_regressions_in_both_directions(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             flags = cache.parent / 'flags.make'
             flags.write_text('CXX_FLAGS = ' + FLAGS)
             for name, old, new in [(name, 'ON', 'OFF') for name in REQUIRED_ON] + [
@@ -142,7 +144,7 @@ class AuditTests(unittest.TestCase):
 
     def test_all_flag_sources_are_audited(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
+            root = pathlib.Path(tmp).resolve()
             cache = root / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             (root / 'flags.make').write_text('CXX_FLAGS = ' + FLAGS)
@@ -167,11 +169,35 @@ class AuditTests(unittest.TestCase):
         # ggml emits /arch:AVX2 for MSVC instead of -march=x86-64; the audit must accept it
         # and still reject an AVX-512 or missing architecture switch.
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             flags = cache.parent / 'flags.make'
             flags.write_text('CXX_FLAGS = /arch:AVX2 /O2 /EHsc')
             self.assertEqual(audit.audit_cache(cache, windows=True), 1)
+            # Ninja + MSVC compile commands select the runtime with -MD/-MT; GCC writes -MD -MF.
+            flags.write_text('CXX_FLAGS = -MD -MDd -MT -MTd /arch:AVX2 /O2 -MF x.d')
+            self.assertEqual(audit.audit_cache(cache, windows=True), 1)
+            flags.write_text('CXX_FLAGS = /arch:AVX2 -mavx512f')
+            with self.assertRaisesRegex(ValueError, 'unsupported CPU flag -mavx512f'):
+                audit.audit_cache(cache, windows=True)
+            flags.write_text('CXX_FLAGS = /arch:AVX2 /O2 /EHsc')
+            # MSVC caches have no FMA, F16C or AMX entries (ggml declares them only for
+            # non-MSVC); accepted on Windows, still required elsewhere.
+            msvc = '\n'.join(line for line in CONTRACT.splitlines()
+                              if not line.startswith(('GGML_FMA:', 'GGML_F16C:', 'GGML_AMX')))
+            cache.write_text(msvc)
+            self.assertEqual(audit.audit_cache(cache, windows=True), 1)
+            # Implied FMA/F16C need /arch:AVX2 itself; -march=x86-64 implies neither.
+            flags.write_text('CXX_FLAGS = -march=x86-64 /O2')
+            with self.assertRaisesRegex(ValueError, 'implied only by /arch:AVX2'):
+                audit.audit_cache(cache, windows=True)
+            flags.write_text('CXX_FLAGS = /arch:AVX2 /O2 /EHsc')
+            with self.assertRaisesRegex(ValueError, 'GGML_FMA must be ON'):
+                audit.audit_cache(cache, windows=False)
+            cache.write_text(msvc + '\nGGML_FMA:BOOL=OFF')
+            with self.assertRaisesRegex(ValueError, 'GGML_FMA must be ON'):
+                audit.audit_cache(cache, windows=True)
+            cache.write_text(CONTRACT)
             flags.write_text('CXX_FLAGS = /arch:AVX512')
             with self.assertRaisesRegex(ValueError, 'unsupported CPU flag'):
                 audit.audit_cache(cache, windows=True)
@@ -181,7 +207,7 @@ class AuditTests(unittest.TestCase):
 
     def test_stale_newer_cache_is_not_selected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
+            root = pathlib.Path(tmp).resolve()
             fp = root / '.fingerprint'
             deps = root / 'deps'
             deps.mkdir()
@@ -209,6 +235,52 @@ class AuditTests(unittest.TestCase):
             (stale / 'CMakeCache.txt').write_text('GGML_AVX2:BOOL=OFF')
             self.assertEqual(audit.linked_cache(root, artifact), cache)
             self.assertEqual(audit.audit_cache(cache), 1)
+            # target/<profile>/murmur after `tauri build` patched the bundle type still matches
+            # its Cargo binary; any other difference does not.
+            artifact.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_UNK end')
+            bundled = root / ('murmur.exe' if audit.sys.platform == 'win32' else 'murmur')
+            bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_NSS end')
+            self.assertEqual(audit.linked_cache(root, bundled), cache)
+            # windows-msvc: deps/murmur.exe has no hash; the newest bin-murmur fingerprint wins.
+            import os
+            unhashed_root = root / 'msvc'
+            shutil.copytree(root, unhashed_root, ignore=shutil.ignore_patterns('msvc'))
+            name = 'murmur.exe' if audit.sys.platform == 'win32' else 'murmur'
+            (unhashed_root / 'deps' / artifact.name).rename(unhashed_root / 'deps' / name)
+            stale_fp = unhashed_root / '.fingerprint' / 'murmur-ffffffffffffffff'
+            stale_fp.mkdir()
+            (stale_fp / 'bin-murmur').write_text('00')
+            (stale_fp / 'bin-murmur.json').write_text(json.dumps({'deps': [[0, 'llama_cpp_sys_2', False, 99]]}))
+            # Linked at t=1000; Cargo's record follows within a second; a cache-restored record is
+            # older and a later `cargo check` record (decoy, pointing elsewhere) is newer.
+            good = unhashed_root / '.fingerprint' / 'murmur-0123456789abcdef' / 'bin-murmur'
+            good.write_text('11')
+            decoy = unhashed_root / '.fingerprint' / 'murmur-eeeeeeeeeeeeeeee'
+            decoy.mkdir()
+            (decoy / 'bin-murmur').write_text('22')
+            (decoy / 'bin-murmur.json').write_text(json.dumps({'deps': [[0, 'llama_cpp_sys_2', False, 98]]}))
+            os.utime(stale_fp / 'bin-murmur', (1, 1))
+            os.utime(good, (1001, 1001))
+            os.utime(decoy / 'bin-murmur', (5000, 5000))
+            os.utime(unhashed_root / 'deps' / name, (1001, 1001))
+            exe = unhashed_root / name
+            exe.write_bytes((unhashed_root / 'deps' / name).read_bytes())
+            cache_msvc = unhashed_root / 'build' / run.parent.name / 'out' / 'build' / 'CMakeCache.txt'
+            # The link time is the creation time on Windows; these files were created just now.
+            with mock.patch.object(audit, '_linked_at', lambda path: path.stat().st_mtime):
+                self.assertEqual(audit.linked_cache(unhashed_root, exe), cache_msvc.resolve())
+                # Two records inside the window: ambiguous, refused.
+                os.utime(decoy / 'bin-murmur', (1000, 1000))
+                with self.assertRaisesRegex(ValueError, 'Expected one Cargo fingerprint'):
+                    audit.linked_cache(unhashed_root, exe)
+            # A few patched bytes elsewhere (Windows rewrites a PE section) still match ...
+            bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_NSS enD')
+            self.assertEqual(audit.linked_cache(root, bundled), cache)
+            # ... a different build of the same size does not.
+            artifact.write_bytes(bytes(200))
+            bundled.write_bytes(bytes(range(200)))
+            with self.assertRaisesRegex(ValueError, 'Cannot uniquely match.*bytes differ'):
+                audit.linked_cache(root, bundled)
             cache.write_text(cache.read_text().replace('GGML_AVX2:BOOL=ON', 'GGML_AVX2:BOOL=OFF'))
             with self.assertRaisesRegex(ValueError, 'GGML_AVX2 must be ON'):
                 audit.audit_cache(audit.linked_cache(root, artifact))

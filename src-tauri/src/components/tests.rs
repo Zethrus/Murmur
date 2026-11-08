@@ -18,6 +18,8 @@ struct Fixture {
     content: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     usage: Arc<Mutex<Usage>>,
     stops: Arc<AtomicUsize>,
+    /// What the fake engine reports when asked to stop (false = still running).
+    engine_stops: Arc<std::sync::atomic::AtomicBool>,
     changes: Arc<Mutex<Vec<Kind>>>,
     free: u64,
 }
@@ -67,6 +69,7 @@ impl Fixture {
                 enhance_model: None,
             })),
             stops: Arc::default(),
+            engine_stops: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             changes: Arc::default(),
             free: u64::MAX,
         }
@@ -99,6 +102,7 @@ impl Fixture {
         let free = self.free;
         let usage = self.usage.clone();
         let stops = self.stops.clone();
+        let engine_stops = self.engine_stops.clone();
         let changes = self.changes.clone();
         Components::new(
             Options {
@@ -121,6 +125,7 @@ impl Fixture {
                 emit: Arc::new(|_, _| {}),
                 stop_engine: Box::new(move || {
                     stops.fetch_add(1, Ordering::Relaxed);
+                    engine_stops.load(Ordering::Relaxed)
                 }),
                 changed: Box::new(move |kind| changes.lock().unwrap().push(kind)),
                 usage: Box::new(move || usage.lock().unwrap().clone()),
@@ -140,11 +145,12 @@ impl Fixture {
     fn engine_zip(&self, script: &str) -> serde_json::Value {
         let zip = self.data.join("engine.zip");
         let mode = 0o755;
+        let program = fake_engine(script);
         archive::tests::build(
             &zip,
             &[archive::tests::Item::File(
                 store::ENGINE_FILE,
-                script.as_bytes(),
+                &program,
                 mode,
             )],
         );
@@ -154,8 +160,61 @@ impl Fixture {
         value["urls"] = json!([self.url("engine.zip")]);
         value["size_bytes"] = json!(bytes.len());
         value["sha256"] = json!(sha(&bytes));
-        value["installed_size_bytes"] = json!(script.len());
+        value["installed_size_bytes"] = json!(program.len());
         value
+    }
+}
+
+/// The fake engine executable for a test script. Unix runs the `#!/bin/sh` script itself;
+/// Windows cannot, so a tiny real program with the same outcome is compiled once with the
+/// toolchain running the tests: scripts containing `exit <non-zero>` fail, the rest succeed
+/// for `--help` (which is all the smoke test asks).
+fn fake_engine(script: &str) -> Vec<u8> {
+    #[cfg(not(windows))]
+    {
+        script.as_bytes().to_vec()
+    }
+    #[cfg(windows)]
+    {
+        use std::sync::OnceLock;
+        static PROGRAMS: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+        let (passes, fails) = PROGRAMS.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("murmur-fake-engine-{}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            let build = |name: &str, body: &str| {
+                let source = dir.join(format!("{name}.rs"));
+                let exe = dir.join(format!("{name}.exe"));
+                fs::write(&source, body).unwrap();
+                let rustc = Path::new(env!("CARGO")).with_file_name("rustc.exe");
+                let status = std::process::Command::new(&rustc)
+                    .args(["-O", "-C", "debuginfo=0", "-o"])
+                    .arg(&exe)
+                    .arg(&source)
+                    .status()
+                    .unwrap_or_else(|e| panic!("cannot run {}: {e}", rustc.display()));
+                assert!(status.success(), "rustc failed for the fake engine");
+                fs::read(&exe).unwrap()
+            };
+            let programs = (
+                build(
+                    "passes",
+                    "fn main() { std::process::exit(if std::env::args().nth(1).as_deref() == Some(\"--help\") { 0 } else { 2 }) }",
+                ),
+                build("fails", "fn main() { std::process::exit(1) }"),
+            );
+            let _ = fs::remove_dir_all(&dir);
+            programs
+        });
+        let failing = script.lines().any(|line| {
+            line.trim()
+                .strip_prefix("exit ")
+                .is_some_and(|code| code.trim() != "0")
+        });
+        if failing {
+            fails.clone()
+        } else {
+            passes.clone()
+        }
     }
 }
 impl Drop for Fixture {
@@ -591,7 +650,7 @@ fn missing_trust_root_refuses_installs_but_runs() {
         },
         Host {
             emit: Arc::new(|_, _| {}),
-            stop_engine: Box::new(|| {}),
+            stop_engine: Box::new(|| true),
             changed: Box::new(|_| {}),
             usage: Box::new(Usage::default),
         },
@@ -832,6 +891,38 @@ fn failed_removal_restarts_the_stopped_engine() {
         f.changes.lock().unwrap().as_slice(),
         [Kind::Engine],
         "restart requested after the failed removal"
+    );
+    components.shutdown();
+}
+
+#[test]
+fn engine_files_are_never_switched_or_deleted_while_the_engine_runs() {
+    let f = Fixture::new("engine-alive");
+    f.publish(vec![f.engine_zip("#!/bin/sh\nexit 0\n")]);
+    let components = f.start();
+    // The engine does not confirm it stopped: activation is refused, nothing becomes active.
+    f.engine_stops.store(false, Ordering::Relaxed);
+    components.install(&["engine".into()]).unwrap();
+    let state = wait(&components, "engine");
+    assert_eq!(state["state"], "failed", "{state}");
+    assert!(components.engine_dir().is_none());
+    // Once it stops, the install goes through.
+    f.engine_stops.store(true, Ordering::Relaxed);
+    components.install(&["engine".into()]).unwrap();
+    assert_eq!(wait(&components, "engine")["state"], "active");
+    let dir = components.engine_dir().unwrap();
+    // Removal while the engine stays alive is refused and keeps the files.
+    f.engine_stops.store(false, Ordering::Relaxed);
+    f.changes.lock().unwrap().clear();
+    assert_eq!(
+        components.remove("engine").unwrap_err().reason,
+        Reason::Busy
+    );
+    assert!(dir.join(store::ENGINE_FILE).is_file());
+    assert_eq!(
+        f.changes.lock().unwrap().as_slice(),
+        [Kind::Engine],
+        "the stop request is released again"
     );
     components.shutdown();
 }

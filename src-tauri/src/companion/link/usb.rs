@@ -187,11 +187,19 @@ mod tests {
             assert!(master >= 0, "posix_openpt failed");
             assert_eq!(libc::grantpt(master), 0, "grantpt failed");
             assert_eq!(libc::unlockpt(master), 0, "unlockpt failed");
-            let name = libc::ptsname(master);
-            assert!(!name.is_null(), "ptsname failed");
+            // ptsname_r: ptsname() returns a shared static buffer that a parallel test can
+            // overwrite, which once left "/dev/pts/" (a directory) as the device path.
+            let mut name = [0 as libc::c_char; 128];
+            assert_eq!(
+                libc::ptsname_r(master, name.as_mut_ptr(), name.len()),
+                0,
+                "ptsname_r failed"
+            );
             (
                 master,
-                std::ffi::CStr::from_ptr(name).to_string_lossy().to_string(),
+                std::ffi::CStr::from_ptr(name.as_ptr())
+                    .to_string_lossy()
+                    .to_string(),
             )
         }
     }

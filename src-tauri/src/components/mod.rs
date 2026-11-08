@@ -128,11 +128,20 @@ pub struct Usage {
 
 pub type Emit = Arc<dyn Fn(&str, Value) + Send + Sync>;
 
+fn engine_busy() -> ComponentError {
+    ComponentError::new(
+        Reason::Busy,
+        "The speech engine did not stop in time. Try again in a moment.",
+    )
+}
+
 /// Callbacks into the app; all may be called from the job thread.
 pub struct Host {
     pub emit: Emit,
     /// Stop the speech engine before its files (engine or CUDA) are replaced or removed.
-    pub stop_engine: Box<dyn Fn() + Send + Sync>,
+    /// Returns false when the engine process is not confirmed gone; nothing is then switched or
+    /// deleted (Windows cannot replace files an engine process still has open).
+    pub stop_engine: Box<dyn Fn() -> bool + Send + Sync>,
     /// A component of this kind was installed, removed or migrated.
     pub changed: Box<dyn Fn(Kind) + Send + Sync>,
     pub usage: Box<dyn Fn() -> Usage + Send + Sync>,
@@ -810,11 +819,14 @@ impl Components {
             .jobs
             .get(&component.id)
             .is_some_and(|j| j.record.replace);
-        let stop_engine = |c: &Component| {
+        let stop_engine = |c: &Component| -> Result<(), ComponentError> {
             if matches!(c.kind, Kind::Engine | Kind::Cuda) {
                 stopped.store(true, Ordering::Release);
-                (self.host.stop_engine)();
+                if !(self.host.stop_engine)() {
+                    return Err(engine_busy());
+                }
             }
+            Ok(())
         };
         let ctx = jobs::Context {
             store: &self.store,
@@ -934,8 +946,11 @@ impl Components {
             return Err(ComponentError::new(Reason::InUse, reason));
         }
         drop(inner);
-        if matches!(active.kind, Kind::Engine | Kind::Cuda) {
-            (self.host.stop_engine)();
+        if matches!(active.kind, Kind::Engine | Kind::Cuda) && !(self.host.stop_engine)() {
+            // Never delete files a live engine process may still use.
+            (self.host.changed)(active.kind);
+            self.emit_changed();
+            return Err(engine_busy());
         }
         if let Err(error) = self.store.remove(id) {
             // The engine was stopped for this: let it start again with whatever is left.
@@ -1162,7 +1177,7 @@ pub fn install_from_files(
     write_atomic(&files.signature, &signature)?;
     let store = Store::new(store_root);
     let cancel = Arc::new(AtomicBool::new(false));
-    let none: &dyn Fn(&Component) = &|_| {};
+    let none: &dyn Fn(&Component) -> Result<(), ComponentError> = &|_| Ok(());
     struct Offline;
     impl Transport for Offline {
         fn open(

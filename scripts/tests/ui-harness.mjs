@@ -65,7 +65,7 @@ export async function harness(overrides={}) {
   const bridge=new vm.SyntheticModule(["call","on","appVersion","startOverlayDrag"],function(){this.setExport("call",call);this.setExport("on",on);this.setExport("appVersion",async()=>"0.1.0");
     this.setExport("startOverlayDrag",async()=>{drags.push(true);if(overrides.startOverlayDrag) await overrides.startOverlayDrag();});},{context});
   const cache=new Map();
-  async function load(file){file=resolve(file);if(file.endsWith("src/bridge.ts"))return bridge;if(cache.has(file))return cache.get(file);
+  async function load(file){file=resolve(file);if(file.split("\\").join("/").endsWith("src/bridge.ts"))return bridge;if(cache.has(file))return cache.get(file);
     const source=await readFile(file,"utf8"),code=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
     const mod=new vm.SourceTextModule(code,{context,identifier:file});cache.set(file,mod);await mod.link((specifier)=>load(resolve(dirname(file),specifier+".ts")));return mod;}
   return {root,document,calls,emit,timers,events,config,status,components,enhanceModel,enhanceStatus,snapshot,observers,drags,window,async module(file){const mod=await load(resolve("src",file));await mod.evaluate();return mod.namespace;},unload(){unloads.forEach(fn=>fn());}};

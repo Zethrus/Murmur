@@ -458,6 +458,26 @@ test("behavior saves focus-change mode and the insert-held shortcut",async()=>{
   const capture=h.document.getElementById("field-insert-held-text-shortcut");await capture.dispatch("click");
   await capture.dispatch("keydown",{key:"I",code:"KeyI",ctrlKey:true,altKey:true});assert.equal(h.config.injection.insert_held_hotkey,"Ctrl+Alt+I");h.unload();
 });
+test("overlay buttons never take focus on mouse down but still act on click (Windows B7)",async()=>{
+  const h=await overlay();h.emit("state",{state:"done"});h.emit("overlay-update",snap(1,READY));await settle();
+  for(const selector of [".accept-button",".discard-button",".held-insert",".held-copy",".held-discard"]){
+    const target=h.root.querySelector(selector);let prevented=false;await target.dispatch("mousedown",{button:0,preventDefault(){prevented=true;}});
+    assert.ok(prevented,`${selector} keeps focus where it was`);}
+  await h.root.querySelector(".discard-button").dispatch("click");await settle();assert.ok(h.calls.some(c=>c.name==="discard_enhancement"));h.unload();
+});
+test("audio explains a Windows microphone privacy block and opens its Settings page",async()=>{
+  const h=await settings({microphone_access:async()=>({blocked:"desktop_apps",settings_available:true})});await button(h.root,"Audio").dispatch("click");await settle();await settle();
+  const notice=h.root.querySelector(".mic-privacy");assert.equal(notice.hidden,false);assert.match(notice.textContent,/Let desktop apps access your microphone/);
+  await button(h.root,"Open Windows privacy settings").dispatch("click");await settle();assert.ok(h.calls.some(c=>c.name==="open_microphone_settings"));h.unload();
+});
+test("audio privacy notice: no devices on Windows explains, Linux stays quiet",async()=>{
+  let h=await settings({microphone_access:async()=>({blocked:null,settings_available:true}),list_devices:async()=>[]});await button(h.root,"Audio").dispatch("click");await settle();await settle();
+  assert.equal(h.root.querySelector(".mic-privacy").hidden,false);assert.match(h.root.querySelector(".mic-privacy").textContent,/No microphone found/);h.unload();
+  h=await settings({microphone_access:async()=>({blocked:null,settings_available:false}),list_devices:async()=>[]});await button(h.root,"Audio").dispatch("click");await settle();await settle();
+  assert.equal(h.root.querySelector(".mic-privacy").hidden,true);h.unload();
+  h=await settings({microphone_access:async()=>({blocked:null,settings_available:true})});await button(h.root,"Audio").dispatch("click");await settle();await settle();
+  assert.equal(h.root.querySelector(".mic-privacy").hidden,true,"devices present and nothing blocked");h.unload();
+});
 
 // ---- Idle app icon ----
 test("idle icon replaces hiding by default and gives way to every active state",async()=>{

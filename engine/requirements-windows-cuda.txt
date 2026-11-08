@@ -1,0 +1,6 @@
+# Windows GPU add-on input. nvidia-cublas-cu12 12.9.3.13 (the Linux pin) has no win_amd64 wheel;
+# 12.9.2.10 is the newest 12.9 release that has one. Hash from the PyPI JSON API (2026-11-07).
+# scripts/components/windows_components.py downloads exactly this wheel (--no-deps) and copies
+# cublas64_12.dll, cublasLt64_12.dll and the licence; no cuDNN, no NVRTC.
+# PyPI wheel: nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl (553,162,896 bytes)
+nvidia-cublas-cu12==12.9.2.10 --hash=sha256:623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661

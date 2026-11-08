@@ -54,24 +54,40 @@ fn io(message: &str) -> ComponentError {
     ComponentError::new(Reason::Io, message)
 }
 
-/// `fs::rename`, retried with backoff while Windows reports a sharing violation.
+/// How long a Windows rename may keep retrying a transient failure in total.
+pub const RENAME_BUDGET: Duration = Duration::from_secs(5);
+
+/// `fs::rename`, retried with backoff for up to [`RENAME_BUDGET`] while Windows reports a
+/// sharing violation or access denied. Verified in source, not run on hardware.
 pub fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    retry_transient(|| fs::rename(from, to), cfg!(windows), std::thread::sleep)
+}
+
+/// ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32): an antivirus scanner, the search
+/// indexer or a just-stopped engine still holds a handle; it is usually gone within seconds.
+fn transient(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32))
+}
+
+/// Shared retry schedule: 50 ms doubling to 1 s, never sleeping past [`RENAME_BUDGET`].
+fn retry_transient(
+    mut operation: impl FnMut() -> std::io::Result<()>,
+    windows: bool,
+    mut sleep: impl FnMut(Duration),
+) -> std::io::Result<()> {
     let mut delay = Duration::from_millis(50);
-    for attempt in 0.. {
-        match fs::rename(from, to) {
+    let mut waited = Duration::ZERO;
+    loop {
+        match operation() {
             Ok(()) => return Ok(()),
-            // ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32): a scanner or the
-            // engine still holds a handle; give it a moment.
-            Err(error)
-                if cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32)) && attempt < 8 =>
-            {
-                std::thread::sleep(delay);
-                delay = delay.saturating_mul(2);
+            Err(error) if windows && transient(&error) && waited + delay <= RENAME_BUDGET => {
+                sleep(delay);
+                waited += delay;
+                delay = (delay * 2).min(Duration::from_secs(1));
             }
             Err(error) => return Err(error),
         }
     }
-    unreachable!()
 }
 
 impl Store {
@@ -432,14 +448,28 @@ pub fn smoke_test(component: &Component, dir: &Path) -> Result<(), ComponentErro
             }
         }
         Kind::Cuda => {
-            let has_dll = fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .to_ascii_lowercase()
-                    .starts_with("cublas64_")
-            });
-            if !has_dll {
-                return Err(smoke_failed("The GPU add-on lacks cuBLAS"));
+            // Windows add-on: cublas64_12.dll and cublasLt64_12.dll, both PE images.
+            let names: Vec<String> = fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_ascii_lowercase())
+                .collect();
+            for prefix in ["cublas64_", "cublaslt64_"] {
+                let Some(name) = names
+                    .iter()
+                    .find(|n| n.starts_with(prefix) && n.ends_with(".dll"))
+                else {
+                    return Err(smoke_failed("The GPU add-on lacks cuBLAS"));
+                };
+                let mut magic = [0u8; 2];
+                let pe = fs::File::open(dir.join(name))
+                    .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic))
+                    .is_ok()
+                    && &magic == b"MZ";
+                if !pe {
+                    return Err(smoke_failed(format!("{name} is not a valid library")));
+                }
             }
         }
         Kind::SpeechModel => {
@@ -624,6 +654,54 @@ mod tests {
         let _ = fs::remove_dir_all(&s.root);
     }
 
+    #[test]
+    fn windows_rename_retries_sharing_violations_for_about_five_seconds() {
+        use std::io::{Error, ErrorKind};
+        // Locked the whole time: gives up within the budget.
+        let mut attempts = 0;
+        let mut waited = Duration::ZERO;
+        let result = retry_transient(
+            || {
+                attempts += 1;
+                Err(Error::from_raw_os_error(32))
+            },
+            true,
+            |d| waited += d,
+        );
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(32));
+        assert!(waited <= RENAME_BUDGET, "{waited:?}");
+        assert!(waited >= Duration::from_secs(4), "{waited:?}");
+        assert_eq!(attempts, 9);
+        // Released after two tries (access denied, then sharing violation): succeeds.
+        let mut codes = vec![5, 32].into_iter();
+        let mut sleeps = 0;
+        retry_transient(
+            || {
+                codes
+                    .next()
+                    .map_or(Ok(()), |c| Err(Error::from_raw_os_error(c)))
+            },
+            true,
+            |_| sleeps += 1,
+        )
+        .unwrap();
+        assert_eq!(sleeps, 2);
+        // Other errors, and every error off Windows, fail at once.
+        let mut slept = false;
+        assert!(retry_transient(
+            || Err(Error::new(ErrorKind::NotFound, "gone")),
+            true,
+            |_| slept = true
+        )
+        .is_err());
+        assert!(retry_transient(
+            || Err(Error::from_raw_os_error(32)),
+            false,
+            |_| slept = true
+        )
+        .is_err());
+        assert!(!slept);
+    }
     #[test]
     fn active_json_is_replaced_atomically() {
         let s = store("atomic");

@@ -203,8 +203,15 @@ engine was stopped (activation, removal), the engine is restarted with the files
 still in place instead of staying held. A file component's verified downloads
 are moved into staging and moved back to `downloads/` when the smoke test,
 activation or a pause fails, so Retry does not download them again (they are
-hashed again first). On Windows, renames retry with backoff on sharing
-violations (not tested on Windows yet).
+hashed again first). The engine must confirm it stopped (its process exited)
+before engine or CUDA files are switched or removed; if it does not within 20 s,
+the job fails with "The speech engine did not stop in time" and nothing is
+deleted. On Windows, renames retry on sharing violations and access denied
+(antivirus, indexer, a just-exited engine) with backoff from 50 ms, for at most
+about 5 s in total (verified in source, not run on Windows). The Windows GPU
+add-on's smoke test requires `cublas64_12.dll` and `cublasLt64_12.dll` as PE
+images; the Windows GPU option stays hidden in setup until validated on hardware
+(`WINDOWS_GPU_OFFERED`).
 
 Component ids and versions become paths, so every entry point checks them
 (`safe_id`, `safe_version`) and `Store::component_dir` refuses unsafe ones too.

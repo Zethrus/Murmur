@@ -7,24 +7,19 @@ installed engine runs the full GPU precision x VAD matrix with only the add-on's
 the loader path, Auto on GPU, and CPU with the GPU hidden.
 """
 import argparse
-import base64
-import hashlib
 import json
 import os
 from pathlib import Path
 import select
 import signal
-import statistics
 import subprocess
 import sys
 import tempfile
 import time
-import wave
 
 import linux_components
+from inference_common import MATRIX, fixture_pcm, requester, transcription_runs
 from linux_cuda_runtime import REQUIRED, sha256
-# Every GPU precision Murmur offers, with Silero VAD on and off.
-MATRIX = [(compute, vad) for compute in ("int8_float16", "float16", "float32", "int8") for vad in (False, True)]
 
 
 def _engine_gate():
@@ -33,17 +28,6 @@ def _engine_gate():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.check
-
-
-def fixture_pcm(path):
-    with wave.open(str(path)) as sound:
-        if (sound.getnchannels(), sound.getframerate(), sound.getsampwidth()) != (1, 16000, 2):
-            raise RuntimeError("Inference fixture must be mono 16 kHz PCM16 WAV")
-        raw = sound.readframes(sound.getnframes())
-    import array
-    samples = array.array("h", raw)
-    import struct
-    return base64.b64encode(struct.pack(f"<{len(samples)}f", *(sample / 32768 for sample in samples))).decode()
 
 
 def descendants(pid):
@@ -89,46 +73,18 @@ def run_engine(engine, model_path, model, pcm, library_path, device, runs, home,
     process = subprocess.Popen([str(engine), "--models-dir", str(home / "no-legacy-models")], env=env,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, bufsize=1, start_new_session=True)
-    number = 0
 
-    def request(method, params=None):
-        nonlocal number
-        number += 1
-        process.stdin.write(json.dumps({"id": number, "method": method, "params": params or {}}) + "\n")
-        process.stdin.flush()
-        ready, _, _ = select.select([process.stdout], [], [], 180)
+    def read_line(timeout):
+        ready, _, _ = select.select([process.stdout], [], [], timeout)
         if not ready:
-            raise RuntimeError(f"{device} inference timed out")
-        line = process.stdout.readline()
-        if not line:
-            raise RuntimeError(f"{device} engine exited: {process.stderr.read()[-600:]}")
-        reply = json.loads(line)
-        if not reply.get("ok"):
-            raise RuntimeError(f"{device} inference failed: {reply.get('error')}")
-        return reply["result"]
+            raise TimeoutError
+        return process.stdout.readline()
 
+    request = requester(process.stdin, read_line, device, lambda: process.stderr.read())
     try:
-        params = {"model": model, "model_path": str(model_path), "device": device, "compute_type": "auto",
-                  "pcm_b64": pcm, "sample_rate": 16000, "beam_size": 1, "vad": False}
-        first = request("transcribe", params)
-        startup_ms = round((time.perf_counter() - launched) * 1000, 2)
-        if not first["text"].strip():
-            raise RuntimeError(f"{device} fixture produced no transcript")
-        times = [request("transcribe", params)["infer_ms"] for _ in range(runs)]
-        status = request("status", {"model": model, "model_path": str(model_path), "device": device, "compute_type": "auto"})
-        combinations = []
-        for compute, vad in matrix:
-            reply = request("transcribe", dict(params, compute_type=compute, vad=vad))
-            loaded = request("status", {})
-            if not reply["text"].strip() or loaded["device"] != device or loaded["compute"] != compute:
-                raise RuntimeError(f"{device} {compute} vad={vad} failed: {loaded}")
-            combinations.append({"compute": compute, "vad": vad, "infer_ms": reply["infer_ms"],
-                                 "transcript_sha256": hashlib.sha256(reply["text"].encode()).hexdigest()})
-        libraries = loaded_libraries(process.pid)
-        return {"status": status, "startup_and_first_infer_ms": startup_ms, "matrix": combinations,
-                "cold_infer_ms": first["infer_ms"],
-                "warm_median_ms": statistics.median(times), "warm_runs_ms": times,
-                "libraries": libraries, "transcript_sha256": hashlib.sha256(first["text"].encode()).hexdigest()}
+        result = transcription_runs(request, model, model_path, device, pcm, runs, matrix, launched)
+        result["libraries"] = loaded_libraries(process.pid)
+        return result
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
@@ -220,7 +176,8 @@ def check(artifacts, components, models, model, fixture, runs, baseline_engine=N
             if gpu["warm_median_ms"] > limit:
                 raise RuntimeError(f"Packaged GPU median {gpu['warm_median_ms']} ms exceeds baseline limit {limit} ms")
         assets = {path.name: sha256(path) for directory in (artifacts, components) for path in directory.iterdir()
-                  if path.is_file() and path.name not in ("GPU-VALIDATION.json", linux_components.SIGNATURE, linux_components.CERTIFICATE)}
+                  if path.is_file() and path.name not in ("GPU-VALIDATION.json", linux_components.SIGNATURE, linux_components.CERTIFICATE)
+                  and "-windows-" not in path.name}
         return {"assets": assets, "model": model, "fixture_sha256": sha256(fixture),
                 "origin_validated": True, "runtime_probe": runtime_probe,
                 "gpu": gpu, "auto": auto, "cpu": cpu, "cpu_auto": cpu_auto,

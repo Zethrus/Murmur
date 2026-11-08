@@ -1,4 +1,5 @@
 import {call, type HeldView} from "../bridge";
+import {pressWithoutFocus} from "./no-focus";
 
 /** Review panel for a transcript held back because focus changed during dictation. */
 export interface HeldPanel {
@@ -24,6 +25,7 @@ export function heldPanel(): HeldPanel {
   const insert = node("button","overlay-button primary held-insert","Insert here"), copy = node("button","overlay-button held-copy","Copy");
   const discard = node("button","overlay-button held-discard","Discard");
   for (const button of [insert,copy,discard]) button.setAttribute("type","button");
+  pressWithoutFocus(insert,copy,discard);
   actions.append(insert,copy,discard); element.append(title,origin,text,message,actions); element.hidden = true;
   let view: HeldView | null = null, busy = false, acting = false, shown = false, localMessage = "";
 

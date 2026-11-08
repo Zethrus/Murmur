@@ -30,6 +30,9 @@ if (-not $lib -or -not (Get-Command cmake -ErrorAction SilentlyContinue)) {
 }
 if (-not (Test-Path (Join-Path $lib 'libclang.dll'))) { throw 'libclang.dll missing.' }
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { throw 'CMake missing.' }
+if ($env:CMAKE_GENERATOR -eq 'Ninja' -and -not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+    throw 'CMAKE_GENERATOR is Ninja but ninja.exe is not on PATH (it ships with the VS C++ workload; install Ninja-build.Ninja otherwise).'
+}
 $env:LIBCLANG_PATH = $lib
 if ($env:GITHUB_ENV) {
     foreach ($name in @('LIBCLANG_PATH','INCLUDE','LIB','LIBPATH','VCINSTALLDIR','VCToolsInstallDir','WindowsSdkDir','PATH')) {

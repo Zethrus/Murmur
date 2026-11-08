@@ -1,0 +1,67 @@
+# Windows x86_64, CPython 3.12: the Linux release pins (requirements-linux-release.txt) with the
+# win_amd64 / py3-none-any wheel hashes from the PyPI JSON API (recorded 2026-11-07), plus the
+# Windows-only dependencies colorama (click, tqdm), pefile and pywin32-ctypes (PyInstaller).
+# Install with: pip install --require-hashes --only-binary :all: -r engine/requirements-windows-release.txt
+# Not yet installed on Windows: Edison CI (windows-build.yml) is the first run. av and hf_xet are
+# installed because faster-whisper / huggingface_hub require them, then excluded from the freeze.
+# NVIDIA cuBLAS is not installed here; it is packaged separately (requirements-windows-cuda.txt).
+# altgraph-0.17.5-py2.py3-none-any.whl
+altgraph==0.17.5 --hash=sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597
+# anyio-4.16.0-py3-none-any.whl
+anyio==4.16.0 --hash=sha256:c66ae634e0b8228396b801741beb3294326d4b6102f7bba4041c0dfb58c29026
+# av-19.0.2-cp312-abi3-win_amd64.whl
+av==19.0.2 --hash=sha256:3ce5a1d7b916d13c16ac58f1756f0fee4af2d53f02bc1403e18550b50d375a22
+# certifi-2026.10.23-py3-none-any.whl
+certifi==2026.10.23 --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1
+# click-8.5.0-py3-none-any.whl
+click==8.5.0 --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+# colorama-0.4.6-py2.py3-none-any.whl
+colorama==0.4.6 --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+# ctranslate2-4.6.3-cp312-cp312-win_amd64.whl
+ctranslate2==4.6.3 --hash=sha256:05ec48b44bb2f1e623e30acc57d34d22000d969e8998cae7762137231fae0d25
+# faster_whisper-1.2.1-py3-none-any.whl
+faster-whisper==1.2.1 --hash=sha256:79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7
+# filelock-4.2.9-py3-none-any.whl
+filelock==4.2.9 --hash=sha256:a379c50a729e5b68c8519a4d26489f755d9769960a236ecd838190e2a78db2e9
+# flatbuffers-25.12.19-py2.py3-none-any.whl
+flatbuffers==25.12.19 --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
+# fsspec-2026.9.0-py3-none-any.whl
+fsspec==2026.9.0 --hash=sha256:8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f
+# h11-0.16.0-py3-none-any.whl
+h11==0.16.0 --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+# hf_xet-1.8.0-cp38-abi3-win_amd64.whl
+hf-xet==1.8.0 --hash=sha256:92188598dedc1e1f5609bd718d4db8687a6c89915553912571e2f587892eecec
+# httpcore-1.0.9-py3-none-any.whl
+httpcore==1.0.9 --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+# httpx-0.28.1-py3-none-any.whl
+httpx==0.28.1 --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+# huggingface_hub-1.33.0-py3-none-any.whl
+huggingface-hub==1.33.0 --hash=sha256:04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899
+# idna-3.20-py3-none-any.whl
+idna==3.20 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+# numpy-1.26.4-cp312-cp312-win_amd64.whl
+numpy==1.26.4 --hash=sha256:08beddf13648eb95f8d867350f6a018a4be2e5ad54c8d8caed89ebca558b2818
+# onnxruntime-1.31.1-cp312-cp312-win_amd64.whl
+onnxruntime==1.31.1 --hash=sha256:ae8a9a351efda685cc59a66226cdefaa37a126c1d66872ca23a2de9425326130
+# packaging-26.3-py3-none-any.whl
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+# pefile-2024.8.26-py3-none-any.whl
+pefile==2024.8.26 --hash=sha256:76f8b485dcd3b1bb8166f1128d395fa3d87af26360c2358fb75b80019b957c6f
+# protobuf-7.36.2-cp310-abi3-win_amd64.whl
+protobuf==7.36.2 --hash=sha256:a300819d441e078a5608c0d3c709796bb548136058fda017ae51d425b44fd353
+# pyinstaller-6.22.3-py3-none-win_amd64.whl
+pyinstaller==6.22.3 --hash=sha256:500bd58c7bf7e584a8435adccbd763a0b918d5c12b08d74ff50fd79b2915458b
+# pyinstaller_hooks_contrib-2026.9-py3-none-any.whl
+pyinstaller-hooks-contrib==2026.9 --hash=sha256:fb3e67dd64122561724c48ad0366ac9e8c16e638b63bf7d85de03bf3fdbf06c3
+# pywin32_ctypes-0.2.3-py3-none-any.whl
+pywin32-ctypes==0.2.3 --hash=sha256:8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8
+# pyyaml-6.0.3-cp312-cp312-win_amd64.whl
+pyyaml==6.0.3 --hash=sha256:5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b
+# setuptools-84.2.1-py3-none-any.whl
+setuptools==84.2.1 --hash=sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2
+# tokenizers-0.23.3-cp310-abi3-win_amd64.whl
+tokenizers==0.23.3 --hash=sha256:1f0823bb00c5fdc98e487354d54dd55a03848d61a1a0bf29a68c77f24f3b26c3
+# tqdm-4.70.1-py3-none-any.whl
+tqdm==4.70.1 --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
+# typing_extensions-4.16.0-py3-none-any.whl
+typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8

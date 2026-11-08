@@ -26,8 +26,10 @@ See [the Android implementation plan](../companion/android-plan.md).
 
 ## November 6 or 7 target: Windows
 
-Windows builds are deferred until November 6 or 7, subject to testing. Build scripts remain
-in the repository for development. There is no supported Windows download in
+Windows builds are deferred until November 6 or 7, subject to testing. The Windows
+port (PR-C, `windows-parity`) is implemented and compiles, but has not run on
+Windows hardware; the self-hosted Windows runner (Edison) is being set up
+([ci-windows.md](ci-windows.md)). There is no supported Windows download in
 today's release.
 
 Before shipping: produce the installer and portable archive, then check microphone

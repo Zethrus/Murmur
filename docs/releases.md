@@ -1,7 +1,9 @@
 # Publishing a release
 
-The public release currently requires Linux x86_64 and Flipper Zero. Windows and
-Android are deferred in [the roadmap](roadmap.md).
+The public release currently requires Linux x86_64 and Flipper Zero. Windows joins
+the same draft when `ENABLE_WINDOWS` is `true` and the Edison runner is
+registered ([ci-windows.md](ci-windows.md)); Android is deferred in
+[the roadmap](roadmap.md).
 
 ## Prepare
 
@@ -73,8 +75,38 @@ CPython 3.12 and the checked-in wheel hash lock; release validation uses Python
 available for the offline clean-install test. `MURMUR_RELEASE_TRUST_FINGERPRINT`
 and the `release-signing` environment are described in [signing.md](signing.md).
 
-Flipper is required and no longer gated by `ENABLE_FLIPPER`. Windows development
-CI remains behind `ENABLE_WINDOWS`; it is not called by today's release workflow.
+Flipper is required and no longer gated by `ENABLE_FLIPPER`.
+
+## Windows assets
+
+With `ENABLE_WINDOWS=true` and `WINDOWS_RUNNER` set, `release.yml` also calls
+`windows-build.yml` on the Edison runner. It attaches to the **draft**:
+
+| Asset | Budget | Notes |
+| --- | ---: | --- |
+| `Murmur_<ver>_x64-setup.exe` | 35 MiB | Per-user NSIS installer, app only, embedded WebView2 bootstrapper |
+| `murmur-windows-x86_64.zip` | 35 MiB | `murmur.exe` + `README.txt` only |
+| `murmur-engine-windows-x86_64-<ver>.zip` | 130 MiB | Onedir engine component |
+| `murmur-cuda-windows-x86_64-<ver>.zip` | 520 MiB | cuBLAS-only GPU add-on; 429.9 MiB when built from the pinned wheel on Linux, to be re-measured on Edison |
+| `GPU-VALIDATION-windows.json` | 1 MiB | Only when `WINDOWS_GPU_TEST_MODELS` is set (the Edison GPU gate) |
+
+The Linux release job signs **one** manifest for both platforms, after checking
+that the Windows zips it downloads from the draft match the hashes the Windows job
+recorded. The `windows-gpu` job then runs the full GPU matrix on Edison against
+the final signed assets; `validate` requires the Windows set (`--windows`) and,
+when the GPU job ran, its evidence (`--windows-gpu`): forced CUDA and Auto on the
+GPU, cuBLAS loaded from the installed add-on, `nvcuda.dll` from the driver, no
+cuDNN/NVRTC. Without that evidence the Windows GPU option must stay hidden
+(`WINDOWS_GPU_OFFERED = false`).
+
+**Authenticode.** Windows builds are unsigned until the owner adds
+`WINDOWS_CERT_PFX_BASE64` and `WINDOWS_CERT_PASSWORD`; the job summary says
+"Unsigned", asset names stay the same, and the release notes must say so.
+Never invent or borrow a certificate.
+
+Before publishing a release with Windows assets, run
+[the Windows checklist](parity/windows-checklist.md) on Edison in the logged-in
+session; CI cannot test hotkeys, injection, the overlay or the tray.
 The standalone Flipper workflow ignores tag pushes because `release.yml` owns
 tag builds. Fork pull requests are skipped when a self-hosted runner is configured.
 
@@ -87,4 +119,4 @@ GPL license. Record any hardware checks that were not performed.
 
 For a public announcement, link to `/releases/latest` and state Linux/X11 support.
 Do not advertise Windows or an Android APK until their downloads and device checks
-are complete.
+(for Windows: [the checklist](parity/windows-checklist.md)) are complete.

@@ -16,14 +16,25 @@ CERTIFICATE = "murmur-release.asc"
 ACK = "I-understand-this-disables-release-trust"
 
 
-def environment(home, components, base=None):
-    """HOME/XDG under `home`, trusting the certificate shipped next to the manifest."""
+def environment(home, components, base=None, windows=False):
+    """HOME/XDG (Linux) or APPDATA/LOCALAPPDATA (Windows) under `home`, trusting the
+    certificate shipped next to the manifest. Shared by the Linux and Windows test scripts."""
     home = Path(home)
     env = dict(base if base is not None else os.environ)
-    env.update(HOME=str(home), XDG_DATA_HOME=str(home / "data"), XDG_CONFIG_HOME=str(home / "config"),
-               XDG_CACHE_HOME=str(home / "cache"), MURMUR_DEV_TRUST_ROOT=str(Path(components) / CERTIFICATE),
-               MURMUR_DEV_TRUST_ROOT_ACK=ACK)
+    if windows:
+        env.update(USERPROFILE=str(home), APPDATA=str(home / "Roaming"), LOCALAPPDATA=str(home / "Local"))
+    else:
+        env.update(HOME=str(home), XDG_DATA_HOME=str(home / "data"), XDG_CONFIG_HOME=str(home / "config"),
+                   XDG_CACHE_HOME=str(home / "cache"))
+    env.update(MURMUR_DEV_TRUST_ROOT=str(Path(components) / CERTIFICATE), MURMUR_DEV_TRUST_ROOT_ACK=ACK)
     return env
+
+
+def data_root(env):
+    """The app's data directory for `env` (platform::Paths::discover)."""
+    if "LOCALAPPDATA" in env and "XDG_DATA_HOME" not in env:
+        return Path(env["LOCALAPPDATA"]) / "Murmur"
+    return Path(env["XDG_DATA_HOME"]) / "murmur"
 
 
 def install(app, components, source, env, check=True):
@@ -41,16 +52,16 @@ def install(app, components, source, env, check=True):
 
 def active(env, component):
     """Directory of the active version of `component` in the data directory of `env`."""
-    root = Path(env["XDG_DATA_HOME"]) / "murmur/components" / component
+    root = data_root(env) / "components" / component
     record = json.loads((root / "active.json").read_text())
     return Path(record["location"]) if record.get("location") else root / record["version"]
 
 
-def install_release(app, components, env, models=()):
+def install_release(app, components, env, models=(), system="linux"):
     """Engine, CUDA add-on (when present) and the given model directories."""
     components = Path(components)
     installed = {}
-    for zip_path in sorted(components.glob("murmur-*-linux-x86_64-*.zip")):
+    for zip_path in sorted(components.glob(f"murmur-*-{system}-x86_64-*.zip")):
         component = install(app, components, zip_path, env)
         installed[component] = active(env, component)
     for model in models:

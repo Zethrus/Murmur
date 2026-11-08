@@ -3,6 +3,7 @@
 //! except during actual text injection, when it becomes click-through.
 mod drag;
 mod movement;
+pub mod noactivate;
 use crate::config::{Overlay, Placement};
 use anyhow::{Context, Result};
 pub use drag::drag;
@@ -378,6 +379,8 @@ fn show_interactive(window: &tauri::WebviewWindow) -> Result<()> {
     // GTK only has a GdkWindow after the widget is realized, and tao panics (not Result) when
     // asked to shape an unrealized window: show first, then set cursor handling. Never focus.
     window.show().context("Show overlay")?;
+    // Windows (B7): WebView2 children appear after creation; subclass them on every show.
+    noactivate::install(window);
     let busy = runtime().busy;
     if let Err(error) = window.set_ignore_cursor_events(busy) {
         tracing::warn!(%error, "Overlay cursor handling unavailable; hiding it");

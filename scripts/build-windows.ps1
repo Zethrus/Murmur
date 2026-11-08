@@ -1,24 +1,20 @@
-# Build from a regular x64 Windows PowerShell (5.1+) or PowerShell 7 session.
-# Requires Python, Node 22+, Rust/MSVC, VS C++ Build Tools + Windows SDK, and WebView2.
+# Build the Windows release locally from a regular x64 Windows PowerShell (5.1+) or PowerShell 7.
+# Requires Python 3.12 x64, Node 22+, Rust/MSVC, VS C++ Build Tools + Windows SDK, LLVM, CMake,
+# NSIS and WebView2 (the Edison runner prompt lists the exact packages).
+#
+# Produces (see scripts/windows/package.ps1): the per-user NSIS installer and portable zip with
+# the app only, the engine and cuBLAS-only GPU component zips and their manifest input. The app
+# downloads the engine on first run, verified against the signed component manifest.
+# Unsigned unless WINDOWS_CERT_PFX_BASE64/WINDOWS_CERT_PASSWORD are set. Verified in source only.
 [CmdletBinding()]
-param()
+param([switch]$SkipComponents)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Invoke-Native {
     param([string]$File, [string[]]$NativeArgs)
     & $File @NativeArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "$File failed with exit code $LASTEXITCODE"
-    }
-}
-
-function Assert-Artifact {
-    param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Missing artifact: $Path"
-    }
-    if ((Get-Item -LiteralPath $Path).Length -eq 0) { throw "Empty artifact: $Path" }
+    if ($LASTEXITCODE -ne 0) { throw "$File failed with exit code $LASTEXITCODE" }
 }
 
 if ($env:OS -ne 'Windows_NT') { throw 'Run this script on Windows x64.' }
@@ -28,7 +24,7 @@ try {
     . (Join-Path $PSScriptRoot 'prepare-windows-native.ps1')
     foreach ($Command in @('python', 'node', 'npm', 'cargo', 'rustup', 'cmake', 'clang-cl', 'cl.exe')) {
         if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
-            throw "Missing prerequisite: $Command (see README.md)"
+            throw "Missing prerequisite: $Command (see docs/building.md)"
         }
     }
     if ($env:RUSTFLAGS) { throw 'Release RUSTFLAGS must be empty: the build enforces the x86-64/SSE2 baseline.' }
@@ -37,8 +33,9 @@ try {
         [Environment]::SetEnvironmentVariable($Flag, 'OFF', 'Process')
     }
     if (-not $env:CMAKE_BUILD_PARALLEL_LEVEL) { $env:CMAKE_BUILD_PARALLEL_LEVEL = '2' }
+    # The CPU audit reads llama.cpp flags from build.ninja (Visual Studio projects are not audited).
+    if (-not $env:CMAKE_GENERATOR) { $env:CMAKE_GENERATOR = 'Ninja' }
     if (-not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = '2' }
-    Invoke-Native 'python' @('-c', "import struct, sys; assert sys.version_info >= (3, 10); assert struct.calcsize('P') == 8, '64-bit Python required'")
     Invoke-Native 'node' @('-e', "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)")
     $env:TMP = Join-Path $Root '.cache\tmp'
     $env:TEMP = $env:TMP
@@ -50,62 +47,30 @@ try {
     $env:DO_NOT_TRACK = '1'
     New-Item -ItemType Directory -Force -Path $env:TMP, $env:PIP_CACHE_DIR | Out-Null
 
-    Write-Host '[1/5] Preparing engine venv and dependencies...'
-    Invoke-Native 'python' @('-m', 'venv', 'engine\.venv')
-    $Python = Join-Path $Root 'engine\.venv\Scripts\python.exe'
-    Invoke-Native $Python @('-m', 'pip', 'install', '-r', 'engine\requirements-cuda.txt', 'pyinstaller')
-    Invoke-Native $Python @('-c', 'import faster_whisper, ctranslate2, PyInstaller')
-
-    Write-Host '[2/5] Freezing murmur-engine.exe...'
-    Push-Location (Join-Path $Root 'engine')
-    try {
-        # Onedir engine without bundled CUDA: point MURMUR_CUDA_DIR at a CUDA folder
-        # (murmur_engine/runtime.py adds it to the DLL search path).
-        $FreezeArgs = @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir',
-            '--name', 'murmur-engine', '--paths', '.', '--exclude-module', 'nvidia',
-            '--exclude-module', 'av', '--exclude-module', 'hf_xet',
-            '--collect-all', 'faster_whisper', '--collect-all', 'ctranslate2',
-            '--collect-all', 'tokenizers', '--collect-binaries', 'onnxruntime',
-            '--collect-data', 'onnxruntime', '--hidden-import', 'onnxruntime.capi._pybind_state',
-            'murmur_engine/__main__.py')
-        Invoke-Native $Python $FreezeArgs
-    } finally { Pop-Location }
-    $FrozenDir = Join-Path $Root 'engine\dist\murmur-engine'
-    $Frozen = Join-Path $FrozenDir 'murmur-engine.exe'
-    Assert-Artifact $Frozen
-    Invoke-Native $Python @('-c', "import subprocess, sys; subprocess.run([sys.argv[1], '--help'], check=True, timeout=120)", $Frozen)
-    Invoke-Native $Python @('-m', 'pip', 'install', 'pefile')
-    Invoke-Native $Python @((Join-Path $PSScriptRoot 'check-engine-imports.py'), $FrozenDir,
-        '--site-packages', (Join-Path $Root 'engine\.venv\Lib\site-packages'))
-
-    Write-Host '[3/5] Installing frontend dependencies and building UI...'
+    Write-Host '[1/4] Freezing the engine (hash-locked wheels, cuDNN/NVRTC gate)...'
+    & (Join-Path $PSScriptRoot 'windows\freeze-engine.ps1')
+    Write-Host '[2/4] Building the UI...'
     Invoke-Native 'npm' @('ci')
     Invoke-Native 'npm' @('run', 'build')
-    Write-Host '[4/5] Preparing Tauri CLI and MSVC target...'
+    Write-Host '[3/4] Building murmur.exe and the NSIS installer...'
     Invoke-Native 'rustup' @('target', 'add', 'x86_64-pc-windows-msvc')
-    # Match the locked npm CLI version, without assuming a global cargo-tauri install.
-    $TauriVersion = (Get-Content -Raw 'node_modules\@tauri-apps\cli\package.json' | ConvertFrom-Json).version
-    Invoke-Native 'cargo' @('install', 'tauri-cli', '--version', "=$TauriVersion", '--locked')
-    Write-Host '[5/5] Building portable app and NSIS installer (unsigned)...'
-    # tauri.windows.conf.json is merged automatically; no source/config edits needed.
-    Invoke-Native 'cargo' @('tauri', 'build', '--target', 'x86_64-pc-windows-msvc')
-    $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
-    $App = Join-Path $Release 'murmur.exe'
-    $PortableEngine = Join-Path $Release 'engine\murmur-engine.exe'
-    Assert-Artifact $App
-    Invoke-Native 'python' @((Join-Path $PSScriptRoot 'audit-llama-cpu.py'), $Release, '--artifact', $App)
-    # murmur.exe resolves engine\murmur-engine.exe beside itself (src-tauri/src/engine.rs).
-    $PortableEngineDir = Join-Path $Release 'engine'
-    if (Test-Path $PortableEngineDir) { Remove-Item $PortableEngineDir -Recurse -Force }
-    Copy-Item -LiteralPath $FrozenDir -Destination $PortableEngineDir -Recurse
-    Assert-Artifact $PortableEngine
-    $Installers = @(Get-ChildItem -Path (Join-Path $Release 'bundle\nsis\*.exe') -File)
-    if ($Installers.Count -eq 0) { throw 'NSIS installer was not generated' }
-    Write-Host "Portable app: $App"
-    Write-Host "Required engine folder beside the app: $PortableEngine"
-    foreach ($Installer in $Installers) {
-        Assert-Artifact $Installer.FullName
-        Write-Host "NSIS installer: $($Installer.FullName)"
+    $TauriArgs = @('tauri', 'build', '--target', 'x86_64-pc-windows-msvc')
+    & (Join-Path $PSScriptRoot 'windows\authenticode.ps1') -Import
+    if ($env:MURMUR_SIGN_THUMBPRINT) {
+        $SignCommand = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\windows\authenticode.ps1`" -Sign %1"
+        # A config file, not inline JSON: Windows PowerShell 5.1 strips quotes from native arguments.
+        $SignConfig = Join-Path $env:TMP 'tauri.sign.conf.json'
+        @{ bundle = @{ windows = @{ signCommand = $SignCommand } } } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 $SignConfig
+        $TauriArgs += @('--config', $SignConfig)
     }
-    Write-Host 'Unsigned build. Runtime is unverified on real Windows hardware.'
+    try {
+        Invoke-Native 'npx' $TauriArgs
+    } finally {
+        & (Join-Path $PSScriptRoot 'windows\authenticode.ps1') -Remove
+    }
+    $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
+    Invoke-Native 'python' @((Join-Path $PSScriptRoot 'audit-llama-cpu.py'), $Release, '--artifact', (Join-Path $Release 'murmur.exe'))
+    Write-Host '[4/4] Packaging the installer, portable zip and components...'
+    & (Join-Path $PSScriptRoot 'windows\package.ps1') -Release $Release -SkipComponents:$SkipComponents
+    Write-Host 'Done. Runtime behaviour on Windows hardware is checked with docs/parity/windows-checklist.md.'
 } finally { Pop-Location }

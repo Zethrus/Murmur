@@ -102,6 +102,9 @@ export interface ComponentsSnapshot {
   migrating: boolean; checking: boolean; engine_installed: boolean;
 }
 export interface Device { id: string; name: string; is_default: boolean }
+/** Windows microphone privacy switches; `blocked` is always null elsewhere. */
+export type MicrophoneBlock = "device" | "apps" | "desktop_apps";
+export interface MicrophoneAccess { blocked: MicrophoneBlock | null; settings_available: boolean }
 export interface Transcript { text: string; language: string; duration_ms: number; infer_ms: number }
 export interface HistoryEntry { id: number; ts: number; text: string; app: string; duration_ms: number; latency_ms: number; model: string }
 
@@ -166,6 +169,7 @@ interface Commands {
   components_verify: [{ id: string }, { verdict: "verified" | "mismatch" | "missing" }];
   components_check_updates: [undefined, void];
   list_devices: [undefined, Device[]]; set_hotkey: [{ accel: string }, Config];
+  microphone_access: [undefined, MicrophoneAccess]; open_microphone_settings: [undefined, void];
   preview_sound: [{ kind: "start" | "stop" | "error" }, void]; start_dictation: [undefined, void];
   stop_dictation: [undefined, void]; cancel_dictation: [undefined, void]; open_settings: [undefined, void];
   quit_app: [undefined, void]; history_search: [{ q: string; limit: number }, HistoryEntry[]];

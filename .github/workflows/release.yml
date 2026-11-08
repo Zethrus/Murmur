@@ -33,15 +33,71 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
               --title "Murmur $GITHUB_REF_NAME" --notes-file docs/release-notes.md
           fi
-  linux:
+  # Windows (vars.ENABLE_WINDOWS == 'true', Edison runner): builds the installer, portable zip
+  # and component zips and attaches them to the draft; its component inputs go to the Linux job,
+  # which signs one manifest for both platforms.
+  windows:
     needs: prepare
+    # Tags build only on the real Windows runner, never on a billing-locked hosted one.
+    if: vars.ENABLE_WINDOWS == 'true' && vars.WINDOWS_RUNNER != ''
+    uses: ./.github/workflows/windows-build.yml
+    secrets: inherit
+  linux:
+    needs: [prepare, windows]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      (needs.windows.result == 'success' || needs.windows.result == 'skipped')
     uses: ./.github/workflows/linux-build.yml
+    with:
+      windows_inputs: ${{ needs.windows.outputs.windows_inputs || '' }}
   flipper:
     needs: prepare
     uses: ./.github/workflows/flipper-build.yml
-  # Windows and Android are deferred. See docs/roadmap.md.
+  # Windows GPU validation of the FINAL signed assets on Edison (NVIDIA): tied to the release by
+  # hash. Until it has passed for a release, the Windows GPU option stays hidden in the app
+  # (components::detect::WINDOWS_GPU_OFFERED = false).
+  windows-gpu:
+    needs: [windows, linux]
+    if: >-
+      always() && needs.linux.result == 'success' &&
+      needs.windows.outputs.windows_inputs != '' && vars.WINDOWS_GPU_TEST_MODELS != ''
+    runs-on: [self-hosted, Windows, X64, gpu, nvidia]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Validate the released Windows engine and cuBLAS add-on on the GPU
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WINDOWS_GPU_TEST_MODELS: ${{ vars.WINDOWS_GPU_TEST_MODELS }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) { throw 'NVIDIA runner required' }
+          $Version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $Assets = Join-Path $env:RUNNER_TEMP 'windows-release'
+          if (Test-Path $Assets) { Remove-Item $Assets -Recurse -Force }
+          gh release download $env:GITHUB_REF_NAME --dir $Assets `
+            --pattern "Murmur_${Version}_x64-setup.exe" --pattern 'murmur-windows-x86_64.zip' `
+            --pattern "murmur-*-windows-x86_64-$Version.zip" `
+            --pattern components-manifest.json --pattern components-manifest.json.sig --pattern murmur-release.asc
+          if ($LASTEXITCODE -ne 0) { throw 'Download from the draft failed' }
+          # The release certificate, accepted through the same CLI path as the Linux check.
+          python scripts/test-windows-inference.py --artifacts $Assets --components $Assets --models-dir $env:WINDOWS_GPU_TEST_MODELS
+          if ($LASTEXITCODE -ne 0) { throw 'Windows GPU validation failed' }
+          gh release upload $env:GITHUB_REF_NAME (Join-Path $Assets 'GPU-VALIDATION-windows.json') --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Evidence upload failed' }
   validate:
-    needs: [linux, flipper]
+    needs: [linux, flipper, windows, windows-gpu]
+    if: >-
+      always() && needs.linux.result == 'success' && needs.flipper.result == 'success' &&
+      (needs.windows.result == 'success' || needs.windows.result == 'skipped') &&
+      (needs.windows-gpu.result == 'success' || needs.windows-gpu.result == 'skipped')
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     steps:
       - uses: actions/checkout@v4
@@ -53,11 +109,17 @@ jobs:
       - name: Verify all assets and retain the draft for testing
         env:
           GH_TOKEN: ${{ github.token }}
+          WINDOWS: ${{ needs.windows.outputs.windows_inputs != '' && '--windows' || '' }}
+          WINDOWS_GPU: ${{ needs.windows-gpu.result == 'success' && '--windows-gpu' || '' }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
           gh release download "$GITHUB_REF_NAME" --dir release-assets
-          python3 scripts/check-release.py assets "$GITHUB_REF_NAME" release-assets
+          # Never publishes: the draft stays a draft for manual testing.
+          python3 scripts/check-release.py assets "$GITHUB_REF_NAME" release-assets $WINDOWS $WINDOWS_GPU
+          if [ -n "$WINDOWS" ] && [ -z "$WINDOWS_GPU" ]; then
+            echo 'Windows assets verified WITHOUT GPU evidence: the Windows GPU option must stay hidden.' >> "$GITHUB_STEP_SUMMARY"
+          fi
           # The manifest must be signed by the release key the app pins.
           test -n "${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}"
           python3 scripts/check-release.py signature release-assets "${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}"

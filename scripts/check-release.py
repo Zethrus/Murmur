@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate release versions, the required Linux/Flipper/component download set and budgets."""
+"""Validate release versions, the required Linux/Windows/Flipper/component download set and budgets."""
 import hashlib
 import json
 from pathlib import Path
@@ -19,10 +19,21 @@ DEB_BUDGET = 125 * MiB
 TARBALL_BUDGET = 130 * MiB
 ENGINE_ZIP_BUDGET = 130 * MiB
 CUDA_ZIP_BUDGET = 520 * MiB
+# Windows: the NSIS installer and the portable zip carry only murmur.exe (the engine is a
+# component); expected ~15-25 MB, not yet measured (no Windows build has run).
+WINDOWS_INSTALLER_BUDGET = 35 * MiB
+WINDOWS_PORTABLE_BUDGET = 35 * MiB
+WINDOWS_ENGINE_ZIP_BUDGET = 130 * MiB
+# Placeholder until measured on Edison: two cuBLAS DLLs from the 553 MB 12.9.2.10 wheel, LZMA.
+WINDOWS_CUDA_ZIP_BUDGET = 520 * MiB
 # (prefix, suffix, limit); the first match wins.
 BUDGETS = (
+    ("murmur-engine-windows-", ".zip", WINDOWS_ENGINE_ZIP_BUDGET),
+    ("murmur-cuda-windows-", ".zip", WINDOWS_CUDA_ZIP_BUDGET),
     ("murmur-engine-", ".zip", ENGINE_ZIP_BUDGET),
     ("murmur-cuda-", ".zip", CUDA_ZIP_BUDGET),
+    ("murmur-windows-", ".zip", WINDOWS_PORTABLE_BUDGET),
+    ("Murmur_", "_x64-setup.exe", WINDOWS_INSTALLER_BUDGET),
     ("", ".AppImage", APPIMAGE_BUDGET),
     ("", ".deb", DEB_BUDGET),
     ("", ".tar.gz", TARBALL_BUDGET),
@@ -36,6 +47,15 @@ MANIFEST = "components-manifest.json"
 SIGNATURE = "components-manifest.json.sig"
 CERTIFICATE = "murmur-release.asc"
 RELEASE_URL = "https://github.com/Zethrus/Murmur/releases/download/{tag}/"
+WINDOWS_GPU_EVIDENCE = "GPU-VALIDATION-windows.json"
+WINDOWS_PORTABLE = "murmur-windows-x86_64.zip"
+WINDOWS_PORTABLE_MEMBERS = {"murmur.exe", "README.txt"}
+
+
+def windows_assets(version):
+    """Windows release files (built on the Edison runner by windows-build.yml)."""
+    return {f"Murmur_{version}_x64-setup.exe", WINDOWS_PORTABLE,
+            f"murmur-engine-windows-x86_64-{version}.zip", f"murmur-cuda-windows-x86_64-{version}.zip"}
 
 
 def budget(path):
@@ -121,9 +141,13 @@ def check_version(tag):
         raise ValueError("Flipper version does not match release")
 
 
-def check_assets(tag, directory):
+def check_assets(tag, directory, windows=False, windows_gpu=False):
+    """`windows`: the release includes the Windows set (vars.ENABLE_WINDOWS); `windows_gpu`:
+    Edison's GPU validation ran and its evidence must be tied to these assets."""
     if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
         raise ValueError("Invalid release tag")
+    if windows_gpu and not windows:
+        raise ValueError("Windows GPU evidence needs the Windows assets")
     version = tag[1:]
     required = {
         "murmur-linux-x86_64.tar.gz",
@@ -132,6 +156,11 @@ def check_assets(tag, directory):
         f"murmur-engine-linux-x86_64-{version}.zip", f"murmur-cuda-linux-x86_64-{version}.zip",
         MANIFEST, SIGNATURE, CERTIFICATE,
     }
+    linux_required = set(required)
+    if windows:
+        required |= windows_assets(version)
+    if windows_gpu:
+        required.add(WINDOWS_GPU_EVIDENCE)
     actual = {p.name for p in directory.iterdir() if p.name != "SHA256SUMS"}
     if actual != required:
         raise ValueError(f"Asset mismatch: missing {required - actual}, unexpected {actual - required}")
@@ -141,9 +170,13 @@ def check_assets(tag, directory):
             raise ValueError(f"Missing, empty or unsafe asset: {name}")
     check_budgets(directory / name for name in sorted(required))
     check_portable(directory / "murmur-linux-x86_64.tar.gz", directory / f"Murmur_{version}_amd64.AppImage")
-    check_manifest(tag, directory)
+    check_manifest(tag, directory, windows)
+    if windows:
+        check_windows_portable(directory / WINDOWS_PORTABLE)
+    if windows_gpu:
+        check_windows_gpu(directory, windows_assets(version) | {MANIFEST})
     evidence = json.loads((directory / "GPU-VALIDATION.json").read_text())
-    linux = required - {"GPU-VALIDATION.json", f"murmur-companion-{tag}.fap", SIGNATURE, CERTIFICATE}
+    linux = linux_required - {"GPU-VALIDATION.json", f"murmur-companion-{tag}.fap", SIGNATURE, CERTIFICATE}
     if evidence.get("assets") != {name: _sha256(directory / name) for name in linux}:
         raise ValueError("GPU validation is not tied to the final release assets")
     if evidence.get("gpu", {}).get("status", {}).get("device") != "cuda" or evidence["gpu"]["status"].get("cpu_fallback"):
@@ -168,7 +201,7 @@ def check_assets(tag, directory):
     (directory / "SHA256SUMS").write_text("".join(lines))
 
 
-def check_manifest(tag, directory):
+def check_manifest(tag, directory, windows=False):
     """Zip components must be the release's own assets: same URL, size and SHA-256."""
     try:
         manifest = json.loads((directory / MANIFEST).read_text())
@@ -177,9 +210,12 @@ def check_manifest(tag, directory):
     if manifest.get("schema_version") != 1 or manifest.get("channel") != "stable":
         raise ValueError("Component manifest must be schema 1 on the stable channel")
     base = RELEASE_URL.format(tag=tag)
-    zips = [c for c in manifest.get("components", []) if c.get("archive") == "zip" and c.get("os") == "linux"]
-    if {c.get("id") for c in zips} != {"engine", "cuda"}:
-        raise ValueError("Component manifest must list the Linux engine and CUDA add-on")
+    zips = [c for c in manifest.get("components", []) if c.get("archive") == "zip"]
+    for system in ("linux", "windows") if windows else ("linux",):
+        if sorted(c.get("id") for c in zips if c.get("os") == system) != ["cuda", "engine"]:
+            raise ValueError(f"Component manifest must list the {system.capitalize()} engine and CUDA add-on")
+    if not windows and any(c.get("os") == "windows" for c in zips):
+        raise ValueError("Windows components listed but the Windows assets are not part of this release")
     for component in zips:
         urls = component.get("urls", [])
         if len(urls) != 1 or not urls[0].startswith(base):
@@ -193,6 +229,39 @@ def check_manifest(tag, directory):
         for file in component.get("files", []):
             if not all(url.startswith("https://huggingface.co/") for url in file.get("urls", [])):
                 raise ValueError(f"{component['id']} model files must come from huggingface.co")
+
+
+def check_windows_portable(path):
+    """The portable zip is murmur.exe and a README: the engine is downloaded on first run."""
+    import zipfile
+    with zipfile.ZipFile(path) as archive:
+        names = {info.filename for info in archive.infolist()}
+        if names != WINDOWS_PORTABLE_MEMBERS:
+            raise ValueError(f"Windows portable zip must contain only {sorted(WINDOWS_PORTABLE_MEMBERS)}, not {sorted(names)}")
+        with archive.open("murmur.exe") as stream:
+            if stream.read(2) != b"MZ":
+                raise ValueError("Windows portable murmur.exe is not a Windows executable")
+
+
+def check_windows_gpu(directory, assets):
+    """Edison evidence: forced CUDA and Auto stayed on the GPU with the add-on's cuBLAS only."""
+    evidence = json.loads((directory / WINDOWS_GPU_EVIDENCE).read_text())
+    if evidence.get("assets") != {name: _sha256(directory / name) for name in sorted(assets)}:
+        raise ValueError("Windows GPU validation is not tied to the final release assets")
+    for run in ("gpu", "auto"):
+        status = evidence.get(run, {}).get("status", {})
+        if status.get("device") != "cuda" or status.get("cpu_fallback"):
+            raise ValueError(f"Windows {run} CUDA validation did not pass")
+    if len(evidence["gpu"].get("warm_runs_ms", [])) != 10 or not evidence.get("driver") or evidence.get("origin_validated") is not True:
+        raise ValueError("Windows GPU hardware evidence is incomplete")
+    modules = [path.replace("/", "\\").lower() for path in evidence["gpu"].get("modules", [])]
+    for name in ("cublas64_12.dll", "cublaslt64_12.dll"):
+        if not any(re.search(rf"\\components\\cuda\\[^\\]+\\{re.escape(name)}$", path) for path in modules):
+            raise ValueError(f"Windows {name} did not load from the CUDA add-on")
+    if not any(path.endswith("\\nvcuda.dll") and "\\components\\" not in path for path in modules):
+        raise ValueError("Windows host driver (nvcuda.dll) origin evidence is missing")
+    if any(re.search(r"\\(?:cudnn|nvrtc)[^\\]*\.dll$", path) for path in modules):
+        raise ValueError("cuDNN/NVRTC loaded on Windows although Murmur ships cuBLAS only")
 
 
 def check_signature(directory, fingerprint):
@@ -232,8 +301,8 @@ if __name__ == "__main__":
     try:
         if len(sys.argv) == 3 and sys.argv[1] == "version":
             check_version(sys.argv[2])
-        elif len(sys.argv) == 4 and sys.argv[1] == "assets":
-            check_assets(sys.argv[2], Path(sys.argv[3]))
+        elif len(sys.argv) >= 4 and sys.argv[1] == "assets" and set(sys.argv[4:]) <= {"--windows", "--windows-gpu"}:
+            check_assets(sys.argv[2], Path(sys.argv[3]), "--windows" in sys.argv[4:], "--windows-gpu" in sys.argv[4:])
         elif len(sys.argv) == 4 and sys.argv[1] == "signature":
             check_signature(Path(sys.argv[2]), sys.argv[3])
         elif len(sys.argv) == 3 and sys.argv[1] == "budgets":
@@ -241,7 +310,7 @@ if __name__ == "__main__":
         elif len(sys.argv) >= 3 and sys.argv[1] == "sizes":
             print(size_table([Path(arg) for arg in sys.argv[2:]]))
         else:
-            raise ValueError("Usage: check-release.py version TAG | assets TAG DIRECTORY | "
+            raise ValueError("Usage: check-release.py version TAG | assets TAG DIRECTORY [--windows] [--windows-gpu] | "
                              "signature DIRECTORY FINGERPRINT | budgets DIRECTORY | sizes PATH... (Python 3.11+)")
     except (ValueError, OSError, tarfile.TarError, subprocess.CalledProcessError) as error:
         sys.exit(str(error))
