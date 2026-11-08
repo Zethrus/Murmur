@@ -69,6 +69,17 @@ def _differing_bytes(a, b, limit=PATCH_TOLERANCE + 1, chunk=1 << 16):
     return count
 
 
+def _newest_bin_fingerprint(fp, binary):
+    """Hash of the `murmur` binary fingerprint Cargo wrote for an unhashed deps binary.
+
+    Cargo records a binary's fingerprint right after linking it, so the matching record is the
+    newest `bin-murmur` and is not older than the binary; stale (cache-restored) records are."""
+    records = sorted(fp.glob("murmur-*/bin-murmur"), key=lambda path: path.stat().st_mtime)
+    if not records or records[-1].stat().st_mtime < binary.stat().st_mtime - 2:
+        raise ValueError(f"No Cargo fingerprint newer than {binary}")
+    return records[-1].parent.name.split("-", 1)[1]
+
+
 def linked_cache(target, artifact):
     target = target.resolve()
     artifact = artifact.resolve()
@@ -76,6 +87,11 @@ def linked_cache(target, artifact):
     if artifact == target / ("murmur.exe" if sys.platform == "win32" else "murmur"):
         digest = _unpatched_digest(artifact)
         candidates = [p for p in deps.glob("murmur-*") if p.is_file() and p.suffix not in (".d", ".pdb")]
+        # windows-msvc: Cargo omits the metadata hash from executable names (so the .pdb
+        # name stays stable), leaving deps/murmur.exe; its fingerprint is found by time.
+        unhashed = deps / artifact.name
+        if not candidates and unhashed.is_file():
+            candidates = [unhashed]
         same_size = [p for p in candidates if p.stat().st_size == artifact.stat().st_size]
         binaries = [p for p in same_size if _unpatched_digest(p) == digest]
         if not binaries:
@@ -89,10 +105,13 @@ def linked_cache(target, artifact):
             raise ValueError(f"Cannot uniquely match {artifact} ({artifact.stat().st_size} B) to a Cargo "
                              f"binary (stripped or stale artifact?); candidates: {details}")
         artifact = binaries[0]
-    if artifact.parent != deps or not re.fullmatch(r"murmur-[0-9a-f]{16}(?:\.exe)?", artifact.name):
-        raise ValueError("Artifact must be a current unstripped Cargo binary or target/<profile>/murmur")
-    binary_hash = artifact.stem.split("-", 1)[1]
     fp = target / ".fingerprint"
+    if artifact.parent == deps and artifact.stem == "murmur":
+        binary_hash = _newest_bin_fingerprint(fp, artifact)
+    elif artifact.parent != deps or not re.fullmatch(r"murmur-[0-9a-f]{16}(?:\.exe)?", artifact.name):
+        raise ValueError("Artifact must be a current unstripped Cargo binary or target/<profile>/murmur")
+    else:
+        binary_hash = artifact.stem.split("-", 1)[1]
     binary = fp / f"murmur-{binary_hash}" / "bin-murmur.json"
     sys_hash = dependency(binary, "llama_cpp_sys_2")
     sys_fp = by_fingerprint(fp, "llama-cpp-sys-2-*/lib-llama_cpp_sys_2", "lib-llama_cpp_sys_2", sys_hash)

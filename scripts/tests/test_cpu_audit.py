@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import pathlib
+import shutil
 import tempfile
 import unittest
 
@@ -215,6 +216,23 @@ class AuditTests(unittest.TestCase):
             bundled = root / ('murmur.exe' if audit.sys.platform == 'win32' else 'murmur')
             bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_NSS end')
             self.assertEqual(audit.linked_cache(root, bundled), cache)
+            # windows-msvc: deps/murmur.exe has no hash; the newest bin-murmur fingerprint wins.
+            import os
+            unhashed_root = root / 'msvc'
+            shutil.copytree(root, unhashed_root, ignore=shutil.ignore_patterns('msvc'))
+            name = 'murmur.exe' if audit.sys.platform == 'win32' else 'murmur'
+            (unhashed_root / 'deps' / artifact.name).rename(unhashed_root / 'deps' / name)
+            stale_fp = unhashed_root / '.fingerprint' / 'murmur-ffffffffffffffff'
+            stale_fp.mkdir()
+            (stale_fp / 'bin-murmur').write_text('00')
+            (stale_fp / 'bin-murmur.json').write_text(json.dumps({'deps': [[0, 'llama_cpp_sys_2', False, 99]]}))
+            os.utime(stale_fp / 'bin-murmur', (1, 1))
+            os.utime(unhashed_root / 'deps' / name, (1000, 1000))
+            (unhashed_root / '.fingerprint' / 'murmur-0123456789abcdef' / 'bin-murmur').write_text('11')
+            exe = unhashed_root / name
+            exe.write_bytes((unhashed_root / 'deps' / name).read_bytes())
+            cache_msvc = unhashed_root / 'build' / run.parent.name / 'out' / 'build' / 'CMakeCache.txt'
+            self.assertEqual(audit.linked_cache(unhashed_root, exe), cache_msvc.resolve())
             # A few patched bytes elsewhere (Windows rewrites a PE section) still match ...
             bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_NSS enD')
             self.assertEqual(audit.linked_cache(root, bundled), cache)
