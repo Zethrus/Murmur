@@ -42,9 +42,26 @@ section!(Overlay {
     position: String = "bottom-center".into(),
     scale: f64 = 1.0,
     show_preview: bool = true,
-    idle_hide: bool = true,
+    // What stays on screen between dictations: "icon", "pill" or "hidden".
+    idle_view: String = "icon".into(),
     placement: Placement = Placement::default()
 });
+impl Overlay {
+    pub const IDLE_VIEWS: &'static [&'static str] = &["icon", "pill", "hidden"];
+    /// Only the "hidden" idle view hides the native window between dictations.
+    pub fn hides_when_idle(&self) -> bool {
+        self.idle_view == "hidden"
+    }
+    /// Replace the older `idle_hide` boolean: `false` kept the full pill on screen.
+    /// An `idle_view` written in the file always wins over the legacy key.
+    fn migrate_idle_hide(&mut self, explicit_view: bool) {
+        if let Some(old) = self.extra.remove("idle_hide") {
+            if !explicit_view && old.as_bool() == Some(false) {
+                self.idle_view = "pill".into();
+            }
+        }
+    }
+}
 section!(Sounds {
     enabled: bool = true,
     volume: f32 = 0.6,
@@ -175,13 +192,19 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let mut config: Self = toml::from_str(&fs::read_to_string(path).context("Read config")?)
+        let raw: toml::Value = toml::from_str(&fs::read_to_string(path).context("Read config")?)
             .context("Parse config TOML")?;
+        let explicit_idle_view = raw
+            .get("overlay")
+            .and_then(|overlay| overlay.get("idle_view"))
+            .is_some();
+        let mut config: Self = raw.try_into().context("Parse config TOML")?;
         // Default migration: old installs inherited a deadline too short for CPU inference.
         // Apply only on disk load; live patches retain an explicitly chosen 15 seconds.
         if config.enhance.timeout_ms == 15000 {
             config.enhance.timeout_ms = 60000;
         }
+        config.overlay.migrate_idle_hide(explicit_idle_view);
         config.validate()?;
         Ok(config)
     }
@@ -207,6 +230,7 @@ impl Config {
                 self.overlay.position.as_str(),
                 &["bottom-center", "top-center", "custom"][..],
             ),
+            (self.overlay.idle_view.as_str(), Overlay::IDLE_VIEWS),
             (self.engine.device.as_str(), &["auto", "cuda", "cpu"][..]),
             (
                 self.engine.compute_type.as_str(),
@@ -401,6 +425,38 @@ mod tests {
         assert!(Config::default()
             .patched(serde_json::json!({"audio":{"gain":"bad"}}))
             .is_err());
+    }
+    #[test]
+    fn idle_view_defaults_validates_and_migrates_idle_hide() -> Result<()> {
+        assert_eq!(Config::default().overlay.idle_view, "icon");
+        for view in Overlay::IDLE_VIEWS {
+            Config::default().patched(serde_json::json!({"overlay":{"idle_view":view}}))?;
+        }
+        assert!(Config::default()
+            .patched(serde_json::json!({"overlay":{"idle_view":"bogus"}}))
+            .is_err());
+        let dir = std::env::temp_dir().join(format!("murmur-idle-view-{}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("config.toml");
+        for (old, expected) in [("false", "pill"), ("true", "icon")] {
+            fs::write(&path, format!("[overlay]\nidle_hide = {old}\n"))?;
+            let c = Config::load(&path)?;
+            assert_eq!(c.overlay.idle_view, expected);
+            assert!(!c.overlay.extra.contains_key("idle_hide"));
+            assert!(!toml::to_string(&c)?.contains("idle_hide"));
+        }
+        // An explicit idle_view wins, including one equal to the default.
+        for view in Overlay::IDLE_VIEWS {
+            fs::write(
+                &path,
+                format!("[overlay]\nidle_hide = false\nidle_view = \"{view}\"\n"),
+            )?;
+            let c = Config::load(&path)?;
+            assert_eq!(c.overlay.idle_view, *view);
+            assert!(!c.overlay.extra.contains_key("idle_hide"));
+        }
+        fs::remove_dir_all(&dir)?;
+        Ok(())
     }
     #[test]
     fn focus_change_defaults_to_hold_and_rejects_unknown_modes() -> Result<()> {
