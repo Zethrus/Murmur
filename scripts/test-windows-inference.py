@@ -121,6 +121,16 @@ def evidence_assets(artifacts, components):
     return {name: sha256(path) for name, path in sorted(files.items())}
 
 
+def windows_version():
+    """sys.getwindowsversion() is a struct sequence without _asdict(); copy its named fields."""
+    if not hasattr(sys, "getwindowsversion"):
+        return None
+    info = sys.getwindowsversion()
+    return {"major": info.major, "minor": info.minor, "build": info.build,
+            "platform_version": list(info.platform_version), "service_pack": info.service_pack,
+            "product_type": info.product_type}
+
+
 def check(artifacts, components, models, model, fixture, runs):
     with tempfile.TemporaryDirectory(prefix="murmur-inference-") as temporary:
         work = Path(temporary)
@@ -146,7 +156,7 @@ def check(artifacts, components, models, model, fixture, runs):
                                 check=True, capture_output=True, text=True).stdout.strip()
         return {"assets": evidence_assets(artifacts, components), "model": model, "fixture_sha256": sha256(fixture),
                 "origin_validated": True, "gpu": gpu, "auto": auto, "cpu": cpu, "cpu_auto": cpu_auto,
-                "driver": driver, "windows": sys.getwindowsversion()._asdict() if hasattr(sys, "getwindowsversion") else None}
+                "driver": driver, "windows": windows_version()}
 
 
 def main():
