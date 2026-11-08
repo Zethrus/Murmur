@@ -268,7 +268,9 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           components=.cache/artifacts/components-windows
-          key="$RUNNER_TEMP/murmur-throwaway-key"
+          # Git Bash's gpg is an MSYS program: it reads S:/... as a relative path, so hand it
+          # the POSIX form (/s/...) of the runner's temp directory.
+          key="$(cygpath -u "$RUNNER_TEMP")/murmur-throwaway-key"
           rm -rf "$key"
           scripts/components/dev-key.sh "$key" >/dev/null
           sleep 1
