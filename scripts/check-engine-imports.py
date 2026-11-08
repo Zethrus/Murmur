@@ -151,8 +151,9 @@ def _pe_imports(path, require_pefile=False):
 
 
 def references(path, platform=sys.platform):
-    """Forbidden library names referenced by one file."""
+    """Forbidden library names referenced by one file, or the file's own name."""
     found = _scan(path)
+    found.update(match.decode().lower() for match in FORBIDDEN.findall(path.name.encode()))
     with path.open("rb") as stream:
         magic = stream.read(4)
     if platform.startswith("linux") and magic == b"\x7fELF":
@@ -180,9 +181,15 @@ BENIGN = {"onnxruntime/__init__.py",
 CUDA_PROVIDER = re.compile(r"onnxruntime_providers_cuda", re.IGNORECASE)
 
 
+def _is_metadata(path):
+    """Wheel metadata (`*.dist-info/RECORD`, METADATA, WHEEL): text listing file names the
+    package once shipped, such as a pruned cudnn64_9.dll. Nothing loads from it."""
+    return any(parent.name.endswith(".dist-info") for parent in path.parents)
+
+
 def _problems(files, root, platform):
     return {str(path.relative_to(root)): sorted(names)
-            for path in files if (names := references(path, platform))}
+            for path in files if not _is_metadata(path) and (names := references(path, platform))}
 
 
 def check(directory, platform=sys.platform, site_packages=None):

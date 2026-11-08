@@ -25,6 +25,17 @@ class EngineImportGateTests(unittest.TestCase):
     def test_cublas_only_engine_passes(self):
         self.assertEqual(gate.check(self.engine, platform="test"), 3)
 
+    def test_wheel_metadata_listing_a_pruned_dll_is_ignored(self):
+        # The Windows CTranslate2 wheel's RECORD names cudnn64_9.dll even after the shim is pruned.
+        info = self.engine / "_internal" / "ctranslate2-4.6.3.dist-info"
+        info.mkdir()
+        (info / "RECORD").write_text("ctranslate2/cudnn64_9.dll,sha256=abc,266240\n")
+        self.assertEqual(gate.check(self.engine, platform="test"), 4)
+        # A real file of that name next to the metadata still fails.
+        (self.engine / "_internal" / "cudnn64_9.dll").write_bytes(b"MZ")
+        with self.assertRaisesRegex(RuntimeError, "references cuDNN/NVRTC"):
+            gate.check(self.engine, platform="test")
+
     def test_library_name_in_any_file_fails(self):
         for name, content in (("libfake.so", b"\x00libcudnn.so.9\x00"),
                               ("libctranslate2-x.so", b"dlopen libcudnn_ops.so.9"),
