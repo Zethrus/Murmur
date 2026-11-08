@@ -31,7 +31,7 @@ class WindowsComponentTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()  # Windows %TEMP% may be an 8.3 short name
 
     def engine(self):
         engine = self.root / "murmur-engine"
@@ -118,7 +118,7 @@ class WindowsManifestInputTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.components = Path(self.tmp.name)
+        self.components = Path(self.tmp.name).resolve()
         for name in ("murmur-engine-linux-x86_64-1.2.3.zip", "murmur-cuda-linux-x86_64-1.2.3.zip",
                      "murmur-engine-windows-x86_64-1.2.3.zip", "murmur-cuda-windows-x86_64-1.2.3.zip"):
             with zipfile.ZipFile(self.components / name, "w") as archive:
