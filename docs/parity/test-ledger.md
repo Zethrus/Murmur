@@ -9,6 +9,33 @@ hardware result.
 Machine for every Linux row unless noted: einstein-probe, Ubuntu 24.04.5 LTS,
 x86_64, RTX 4060 Laptop GPU, NVIDIA driver 580.178.04, Python 3.12, Node 22.
 
+## Windows CI on Edison, 2026-11-08
+
+First runs on real Windows hardware. Machine: "Edison", Windows (x64), NVIDIA
+GeForce RTX 3060 12 GB, driver 621.14, self-hosted runner `edison` (service user
+`murmur-ci`, non-admin, session 0), MSVC 14.51 (Visual Studio 18), Python 3.12,
+Node 22. Green run: `windows-build.yml` workflow_dispatch `gpu=true`, run
+42502808128 (commit f28a397); pull-request run 42502760073 also green.
+**CI only**: session 0 has no desktop, so nothing interactive ran (overlay,
+hotkeys, insertion, tray, DPI, screenshots stay blocked below).
+
+| Check | Platform | Result | Evidence |
+| --- | --- | --- | --- |
+| Engine freeze (hash-locked win_amd64 wheels) + cuDNN/NVRTC gate (pefile + site-packages) | Windows | executed | Gate passed on 560 files; first run found `ctranslate2-4.6.3.dist-info/RECORD` naming the pruned shim (wheel metadata is now skipped; files *named* like cuDNN/NVRTC now fail) |
+| `npm run build && npm run test:ui` | Windows | executed | 53/53 (first run: harness compared paths with `/` only) |
+| Script tests (`test_release`, `test_engine_imports`, `test_windows_components`, `test_inference_common`, `test_windows_ci`) | Windows | executed | 80 OK (first run: an 8.3 short temp path) |
+| Engine pytest | Windows | executed | 54 passed, 1 skipped: the symlink test needs SeCreateSymbolicLinkPrivilege, which the non-admin runner lacks |
+| `cargo test` with and without the Enhance backend (MSVC) | Windows | executed | 261 passed each (3 / 2 ignored) + 10 + 2 in other targets. First run: 7 component tests used a `#!/bin/sh` fake engine; Windows now compiles a tiny real one |
+| `tauri build` → `murmur.exe` + per-user NSIS installer | Windows | executed | Built with MSVC; llama.cpp built with Ninja |
+| CPU baseline audit of the linked llama.cpp | Windows | executed | "Rust + AVX2 llama.cpp ... clean". Needed: tauri's in-place bundle-type patch, MSVC's unhashed `deps/murmur.exe`, hard-link mtimes, absent GGML_FMA/F16C/AMX options under MSVC, `-MD` runtime switch |
+| Packaging + size budgets (`check-release.py sizes`) | Windows | executed | Installer 10.6 MiB, portable 11.2 MiB, engine 42.8 MiB, cuBLAS add-on 429.9 MiB; all within budget. First run: WinError 32 deleting the staged DLLs (scanner); now retried |
+| Startup smoke `--version`, `--help` | Windows | executed | OK. The 10 s no-engine launch is hosted-runner only (no desktop in session 0) |
+| Throwaway-signed Windows manifest | Windows | executed | Signed and verified with MSYS gpg (first run: `S:/` path; now `cygpath -u`) |
+| GPU validation (`test-windows-inference.py`, distil-small.en, components installed through the app) | Windows + NVIDIA | executed | Forced CUDA (8-combination precision × VAD matrix) with cuBLAS loaded from the add-on, Auto → CUDA, explicit CPU, CPU-only Auto (GPU hidden → CPU, `cpu_fallback` set, no failure reason). Warm median 82.3 ms. Evidence `GPU-VALIDATION-windows.json` written on the runner (not uploaded) |
+| Linux build on Edison's WSL2 runner (`edison-linux`) | Linux | executed | Green on every commit above; one flaky pty test fixed (`ptsname` → `ptsname_r`) |
+| Overlay focus (B7), modifiers (B8), elevated/secure desktop (B9), identity (B10), microphone privacy, tray, DPI, screenshots | Windows | blocked | Need the logged-in desktop session on Edison: [windows-checklist.md](windows-checklist.md) |
+| Interactive dictation end to end on Windows | Windows | blocked | Same |
+
 ## PR-C (windows-parity), 2026-11-07
 
 **Nothing in this section ran on Windows.** There is no Windows machine, VM or

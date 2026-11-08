@@ -1,4 +1,4 @@
-# Download size report (Linux; Windows estimates)
+# Download size report (Linux and Windows)
 
 Units: MB = 10⁶ bytes, MiB = 2²⁰ bytes. "Download" is the file a user fetches;
 "unpacked" is what an AppImage expands to; "installed" is the `.deb`
@@ -182,23 +182,21 @@ MiB; the "App, WebKitGTK…" row above (88.9 MB) is what remains.
 - **Engine (≈297 MB unpacked)**: CTranslate2 (≈136 MB), onnxruntime for Silero
   VAD (≈59 MB), OpenBLAS in NumPy (≈37 MB), tokenizers and Python itself.
 
-## Windows (PR-C): estimates, except the GPU add-on
+## Windows (PR-C): measured on Edison
 
-No Windows build has run (no Windows machine or runner yet), so the app sizes
-below are **estimates**, to be replaced by the `check-release.py sizes` table
-from the first Edison run. The GPU add-on was actually built on Linux from the
-pinned wheel with `scripts/components/windows_components.py cuda` (the same
-deterministic LZMA writer the Windows job uses), on 2026-11-07.
+Measured by `check-release.py sizes` in the green Edison run (2026-11-08, run
+42502808128, version 0.4.7). Unpacked = sum of zip entries (the installer is
+reported as its own size).
 
-| Artifact | Size | Basis | Budget |
-| --- | ---: | --- | ---: |
-| `Murmur_<ver>_x64-setup.exe` (NSIS, app only, embedded WebView2 bootstrapper ≈ 1.8 MB) | ~15–25 MB | estimate: the stripped Linux `murmur` binary with llama.cpp is 31 MB; NSIS compresses with LZMA | 35 MiB |
-| `murmur-windows-x86_64.zip` (`murmur.exe` + README) | ~10–20 MB | estimate | 35 MiB |
-| `murmur-engine-windows-x86_64-<ver>.zip` | ~60–80 MB | estimate: Linux engine zip 62.4 MiB; the Windows CTranslate2 wheel adds `libiomp5md.dll` (1.6 MB) | 130 MiB |
-| `murmur-cuda-windows-x86_64-<ver>.zip` | **450.8 MB (429.9 MiB)** measured; 771.2 MB unpacked (`cublas64_12.dll` 102.5 MB, `cublasLt64_12.dll` 668.7 MB) | built here from `nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl` (553.2 MB, SHA-256 pinned) | 520 MiB (re-measure on Edison) |
+| Artifact | Download | Unpacked | Budget |
+| --- | ---: | ---: | ---: |
+| `Murmur_<ver>_x64-setup.exe` (NSIS, per-user, embedded WebView2 bootstrapper) | 10.6 MiB | — | 35 MiB |
+| `murmur-windows-x86_64.zip` (portable `murmur.exe` + README) | 11.2 MiB | 29.2 MiB | 35 MiB |
+| `murmur-engine-windows-x86_64-<ver>.zip` | 42.8 MiB | 178.6 MiB | 130 MiB |
+| `murmur-cuda-windows-x86_64-<ver>.zip` (cuBLAS 12.9.2.10 only) | 429.9 MiB | 735.5 MiB | 520 MiB |
 
 Removed from what the Windows CTranslate2 wheel would otherwise bring along:
 `cudnn64_9.dll` (266 KB dispatcher shim; `ctranslate2.dll` never references
 cuDNN) and, from the cuBLAS wheel, `nvblas64_12.dll`, headers and import
-libraries. Typical Windows CPU setup (estimate): installer ~20 MB + engine ~70 MB
-+ `distil-small.en` 335.5 MB ≈ 425 MB; GPU adds 450.8 MB.
+libraries. Typical Windows CPU setup: installer 11.1 MB + engine 44.9 MB + `distil-small.en`
+335.5 MB ≈ 392 MB; GPU adds 450.8 MB.
