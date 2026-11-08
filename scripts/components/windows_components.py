@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -116,8 +117,9 @@ def build_cuda(wheel, lock, version, output):
         raise RuntimeError(f"{wheel.name} is not the pinned win_amd64 wheel {pinned_version}")
     gate = _gate()
     output.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="murmur-cuda-win-", dir=output) as temporary:
-        stage = Path(temporary) / "cuda"
+    temporary = Path(tempfile.mkdtemp(prefix="murmur-cuda-win-", dir=output.parent))
+    try:
+        stage = temporary / "cuda"
         stage.mkdir()
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
@@ -149,6 +151,23 @@ def build_cuda(wheel, lock, version, output):
             "files": files, "excluded": "cuDNN, NVRTC and every other wheel member",
         }, indent=2, sort_keys=True) + "\n")
         return write_zip(stage, output / CUDA_ZIP.format(version=version))
+    finally:
+        _remove_staging(temporary)
+
+
+def _remove_staging(path, attempts=20, delay=1.0):
+    """Delete a staging tree, waiting out Windows scanners (Defender, the indexer) that briefly
+    hold freshly written DLLs open (WinError 32). The tree sits beside the output directory,
+    so if it still cannot go it is left behind with a warning rather than failing the build."""
+    for _ in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            time.sleep(delay)
+    print(f"warning: could not remove staging directory {path}; a scanner still holds it", file=sys.stderr)
 
 
 def inputs(components, version, output, engine_lock=ENGINE_LOCK, cuda_lock=CUDA_LOCK):

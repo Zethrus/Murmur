@@ -8,6 +8,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+import unittest.mock
 import zipfile
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -84,6 +85,27 @@ class WindowsComponentTests(unittest.TestCase):
         self.assertEqual(record["source"]["version"], "12.9.2.10")
         self.assertIn("cublasLt64_12.dll", record["files"]["cublas64_12.dll"]["imports"])
         self.assertEqual(list((self.root / "out").iterdir()), [path], "staging removed")
+
+    def test_staging_cleanup_waits_out_a_scanner_holding_a_dll(self):
+        # Defender/the indexer briefly hold freshly written DLLs open (WinError 32).
+        staging = self.root / "staging"
+        staging.mkdir()
+        real = windows.shutil.rmtree
+        calls = []
+        def busy_then_free(path):
+            calls.append(path)
+            if len(calls) < 3:
+                raise PermissionError(32, "being used by another process")
+            real(path)
+        with unittest.mock.patch.object(windows.shutil, "rmtree", busy_then_free):
+            windows._remove_staging(staging, delay=0)
+        self.assertEqual(len(calls), 3)
+        self.assertFalse(staging.exists())
+        # Still held after every attempt: warn and leave it, do not fail the build.
+        staging.mkdir()
+        with unittest.mock.patch.object(windows.shutil, "rmtree", side_effect=PermissionError(32, "busy")):
+            windows._remove_staging(staging, attempts=2, delay=0)
+        self.assertTrue(staging.exists())
 
     def test_cuda_refuses_another_wheel_or_a_cudnn_dependency(self):
         wheel, lock = self.wheel()
