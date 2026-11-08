@@ -43,15 +43,25 @@ def dependency(path, name):
     return matches[0]
 
 
+# `tauri build` patches the main binary in place after Cargo links it, rewriting this marker's
+# three-letter suffix to the bundle type (UNK -> NSS, DEB, RPM, APP, MSI); same length, so only
+# those bytes differ from the Cargo binary in deps/.
+BUNDLE_TYPE = re.compile(rb"__TAURI_BUNDLE_TYPE_VAR_[A-Z]{3}")
+
+
+def _unpatched_digest(path):
+    return hashlib.sha256(BUNDLE_TYPE.sub(b"__TAURI_BUNDLE_TYPE_VAR_UNK", path.read_bytes())).digest()
+
+
 def linked_cache(target, artifact):
     target = target.resolve()
     artifact = artifact.resolve()
     deps = target / "deps"
     if artifact == target / ("murmur.exe" if sys.platform == "win32" else "murmur"):
-        digest = hashlib.sha256(artifact.read_bytes()).digest()
+        digest = _unpatched_digest(artifact)
         binaries = [p for p in deps.glob("murmur-*") if p.is_file() and p.suffix not in (".d", ".pdb")
                     and p.stat().st_size == artifact.stat().st_size
-                    and hashlib.sha256(p.read_bytes()).digest() == digest]
+                    and _unpatched_digest(p) == digest]
         if len(binaries) != 1:
             raise ValueError(f"Cannot uniquely match {artifact} to a Cargo binary (stripped or stale artifact?)")
         artifact = binaries[0]

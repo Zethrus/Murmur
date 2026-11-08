@@ -209,6 +209,15 @@ class AuditTests(unittest.TestCase):
             (stale / 'CMakeCache.txt').write_text('GGML_AVX2:BOOL=OFF')
             self.assertEqual(audit.linked_cache(root, artifact), cache)
             self.assertEqual(audit.audit_cache(cache), 1)
+            # target/<profile>/murmur after `tauri build` patched the bundle type still matches
+            # its Cargo binary; any other difference does not.
+            artifact.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_UNK end')
+            bundled = root / ('murmur.exe' if audit.sys.platform == 'win32' else 'murmur')
+            bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_NSS end')
+            self.assertEqual(audit.linked_cache(root, bundled), cache)
+            bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_NSS enD')
+            with self.assertRaisesRegex(ValueError, 'Cannot uniquely match'):
+                audit.linked_cache(root, bundled)
             cache.write_text(cache.read_text().replace('GGML_AVX2:BOOL=ON', 'GGML_AVX2:BOOL=OFF'))
             with self.assertRaisesRegex(ValueError, 'GGML_AVX2 must be ON'):
                 audit.audit_cache(audit.linked_cache(root, artifact))
