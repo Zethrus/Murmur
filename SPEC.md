@@ -109,7 +109,7 @@ enabled = true
 position = "bottom-center"  # bottom-center | top-center
 scale = 1.0                 # 0.8 – 1.6
 show_preview = true
-idle_hide = true
+idle_view = "icon"          # icon | pill | hidden
 
 [sounds]
 enabled = true
@@ -203,7 +203,9 @@ human-readable message.
    monitor's work area (bottom-centre 48 px up, or top-centre). Content: idle = muted dot + "mur";
    listening = 5 animated level bars + optional 2-line partial preview (pill grows to 560 px wide);
    transcribing = pulsing dots; done = check, hide after 900 ms; error = amber dot, hide after
-   1.6 s. With `idle_hide` the window hides 1.5 s after going idle. Repaint only on events.
+   1.6 s. 1.5 s after going idle (900 ms after done) the pill settles into `idle_view`: `icon`
+   (default) shows only the app icon's five accent bars, translucent and draggable as a whole;
+   `pill` keeps the full idle pill; `hidden` hides the window. Repaint only on events.
 8. **Tray (main.rs)**: icon, tooltip `Murmur: <state>`, menu: state label (disabled), "Dictate"
    (toggle mode only), Sounds mute check, Overlay enabled check, "Settings…", "Reload config",
    "Quit". Left-click opens Settings. Missing model → tooltip `Murmur: no model`.

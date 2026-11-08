@@ -92,7 +92,7 @@ def exercise(executable, evidence):
 
     config = Path(os.environ['XDG_CONFIG_HOME']) / 'murmur/config.toml'
     config.parent.mkdir(parents=True, exist_ok=True)
-    config.write_text('[general]\nautostart=false\n[overlay]\nidle_hide=false\n'
+    config.write_text('[general]\nautostart=false\n[overlay]\nidle_view="pill"\n'
                       '[sounds]\nenabled=false\n[companion]\nsource="phone"\n')
 
     def prefs():

@@ -145,6 +145,15 @@ fn size_reports_are_validated_and_revisioned() {
         accept_size(300.0, 300.0, 1, "reloaded").unwrap(),
         Some((300.0, 300.0))
     );
+    // The idle icon reports about 44x44; the window keeps no 120 px pill floor.
+    assert_eq!(
+        accept_size(44.0, 44.0, 2, "reloaded").unwrap(),
+        Some((44.0, 44.0))
+    );
+    assert_eq!(
+        accept_size(1.0, 1.0, 3, "reloaded").unwrap(),
+        Some(crate::overlay::MIN_SIZE)
+    );
 }
 
 #[test]

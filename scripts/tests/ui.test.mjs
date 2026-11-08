@@ -187,8 +187,8 @@ test("GPU fallback warning refreshes and clears in Engine settings",async()=>{
   h.status.fallback_reason=null;h.emit("state",{state:"idle"});h.timers.tick(250);await settle();
   assert.doesNotMatch(h.root.textContent,/Using CPU because GPU acceleration is unavailable/);h.unload();
 });
-test("overlay renders all states, five bars, previews and timed hiding",async()=>{
-  const h=await harness();await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);const pill=h.root.querySelector(".pill");
+test("overlay renders all states, five bars, previews and timed hiding when the idle view is hidden",async()=>{
+  const h=await harness();h.config.overlay.idle_view="hidden";await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);const pill=h.root.querySelector(".pill");
   assert.equal(h.root.dataset.state,"idle");h.timers.tick(1500);assert.equal(pill.hidden,true);
   h.emit("state",{state:"listening"});assert.equal(pill.hidden,false);h.emit("partial",{text:"foo underscore bar"});assert.equal(h.root.dataset.expanded,"true");
   h.emit("level",{rms:0.2});assert.equal(h.root.querySelectorAll(".bars i").length,5);assert.ok(h.root.querySelector(".bars i").style.values.has("--level"));
@@ -284,9 +284,13 @@ test("general offers reset position and describes a clickable, draggable overlay
   h.config.overlay.position="custom";h.emit("config",structuredClone(h.config));await settle();const position=h.document.getElementById("field-position");
   assert.equal(position.value,"custom");assert.match(h.root.textContent,/Where you dragged it/);h.unload();
 });
+test("general replaces the hide toggle with a When idle choice",async()=>{
+  const h=await settings();assert.doesNotMatch(h.root.textContent,/Hide when idle/);const idle=h.document.getElementById("field-when-idle");
+  assert.equal(idle.value,"icon");idle.value="pill";await idle.dispatch("change");assert.equal(h.config.overlay.idle_view,"pill");h.unload();
+});
 
 // ---- Interactive overlay ----
-async function overlay(overrides){const h=await harness(overrides);await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);return h;}
+async function overlay(overrides,idleView){const h=await harness(overrides);if(idleView)h.config.overlay.idle_view=idleView;await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);return h;}
 const enh = (phase,extra={}) => ({phase,dictation_id:"7",suggestion_id:null,original_text:null,proposed_text:null,acceptance_mode:"clipboard",message:null,expires_at:null,...extra});
 const snap = (revision,enhancement,extra={}) => ({revision,dictation_state:"idle",delivery_busy:false,partial_text:"",enhancement,...extra});
 const READY = enh("ready",{suggestion_id:"42",original_text:"um so the the release is done",proposed_text:"The release is done."});
@@ -305,7 +309,7 @@ test("generation timeout remains visible with an explanation",async()=>{
   h.timers.tick(7000);assert.equal(h.root.dataset.enhance,"none");h.unload();
 });
 test("overlay ignores stale snapshot revisions and hydrates from get_overlay_snapshot",async()=>{
-  const h=await overlay({get_overlay_snapshot:async()=>snap(5,READY)});await settle();assert.equal(h.root.dataset.enhance,"ready");
+  const h=await overlay({get_overlay_snapshot:async()=>snap(5,READY)},"hidden");await settle();assert.equal(h.root.dataset.enhance,"ready");
   h.emit("overlay-update",snap(4,enh("none")));assert.equal(h.root.dataset.enhance,"ready");h.emit("overlay-update",snap(5,enh("none")));assert.equal(h.root.dataset.enhance,"ready");
   h.emit("overlay-update",snap(6,enh("none")));assert.equal(h.root.dataset.enhance,"none");assert.equal(h.root.querySelector(".pill").hidden,true);
   assert.ok(h.calls.findIndex(c=>c.name==="get_overlay_snapshot")>=0);h.unload();
@@ -316,7 +320,7 @@ test("accept and discard send only suggestion ids; accept is idempotent while pe
   const accepts=h.calls.filter(c=>c.name==="accept_enhancement");assert.equal(accepts.length,1);assert.deepEqual(plain(accepts[0].args),{suggestionId:"42"});
   release({outcome:"copied"});await settle();await settle();assert.match(h.root.textContent,/Copied\. Select the original dictation and paste to replace it\./);
   assert.equal(accept.hidden,true);assert.equal(h.root.querySelector(".suggestion-text").textContent,"");h.timers.tick(4000);assert.equal(h.root.dataset.enhance,"none");h.unload();
-  const d=await overlay();d.emit("overlay-update",snap(1,READY));await d.root.querySelector(".discard-button").dispatch("click");await settle();
+  const d=await overlay({},"hidden");d.emit("overlay-update",snap(1,READY));await d.root.querySelector(".discard-button").dispatch("click");await settle();
   assert.deepEqual(plain(d.calls.find(c=>c.name==="discard_enhancement").args),{suggestionId:"42"});assert.ok(!d.calls.some(c=>c.name==="accept_enhancement"));
   assert.equal(d.root.dataset.enhance,"none");assert.equal(d.root.querySelector(".pill").hidden,true);d.unload();
 });
@@ -384,7 +388,7 @@ test("measured overlay size is reported once per change with increasing layout r
 });
 
 test("native drag owns the gesture until completion and defers idle hiding",async()=>{
-  let release;const h=await overlay({startOverlayDrag:()=>new Promise(resolve=>{release=resolve;})});
+  let release;const h=await overlay({startOverlayDrag:()=>new Promise(resolve=>{release=resolve;})},"hidden");
   const handle=h.root.querySelector(".drag-handle"),pill=h.root.querySelector(".pill");
   await handle.dispatch("mousedown",{button:0});
   await handle.dispatch("mousedown",{button:0});
@@ -406,7 +410,7 @@ test("a subsequent successful drag clears the previous error",async()=>{
 const NO_ENH = enh("none",{dictation_id:null,acceptance_mode:"unavailable"});
 const HELD = {kind:"held",id:"3",text:"Buy milk.",origin_app:"obsidian",message:null,expires_at:Date.now()+120000};
 test("held transcript and native drag independently prevent idle hiding",async()=>{
-  let release;const h=await overlay({startOverlayDrag:()=>new Promise(resolve=>{release=resolve;})});
+  let release;const h=await overlay({startOverlayDrag:()=>new Promise(resolve=>{release=resolve;})},"hidden");
   const handle=h.root.querySelector(".drag-handle"),pill=h.root.querySelector(".pill");
   h.emit("overlay-update",snap(1,NO_ENH,{held:HELD}));
   await handle.dispatch("mousedown",{button:0});
@@ -420,7 +424,7 @@ test("held transcript and native drag independently prevent idle hiding",async()
   assert.equal(pill.hidden,true,"hiding resumes after both holds end");h.unload();
 });
 test("held transcript shows review actions, overrides idle hiding and calls backend by id",async()=>{
-  const h=await overlay(),pill=h.root.querySelector(".pill"),panel=h.root.querySelector(".held");
+  const h=await overlay({},"hidden"),pill=h.root.querySelector(".pill"),panel=h.root.querySelector(".held");
   h.emit("overlay-update",snap(1,NO_ENH,{held:HELD}));
   assert.equal(panel.hidden,false);assert.equal(pill.hidden,false);assert.equal(h.root.dataset.held,"true");
   assert.equal(h.root.querySelector(".held-text").textContent,"Buy milk.");assert.match(panel.textContent,/Started in obsidian/);
@@ -473,4 +477,45 @@ test("audio privacy notice: no devices on Windows explains, Linux stays quiet",a
   assert.equal(h.root.querySelector(".mic-privacy").hidden,true);h.unload();
   h=await settings({microphone_access:async()=>({blocked:null,settings_available:true})});await button(h.root,"Audio").dispatch("click");await settle();await settle();
   assert.equal(h.root.querySelector(".mic-privacy").hidden,true,"devices present and nothing blocked");h.unload();
+});
+
+// ---- Idle app icon ----
+test("idle icon replaces hiding by default and gives way to every active state",async()=>{
+  const h=await overlay(),pill=h.root.querySelector(".pill");
+  assert.equal(h.root.dataset.idle,undefined,"startup shows the pill first");h.timers.tick(1500);
+  assert.equal(pill.hidden,false);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.title,"Drag to move");
+  h.emit("state",{state:"listening"});assert.equal(h.root.dataset.idle,undefined);assert.equal(pill.hidden,false);
+  h.emit("state",{state:"done"});h.timers.tick(899);assert.equal(h.root.dataset.idle,undefined);h.timers.tick(1);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);
+  h.emit("state",{state:"idle"});assert.equal(h.root.dataset.idle,"icon");
+  h.emit("state",{state:"error"});assert.equal(h.root.dataset.idle,undefined);h.timers.tick(1600);assert.equal(h.root.dataset.idle,"icon");
+  h.emit("state",{state:"idle"});h.config.overlay.enabled=false;h.emit("config",structuredClone(h.config));assert.equal(pill.hidden,true);
+  h.timers.tick(1500);assert.equal(pill.hidden,true,"a disabled overlay never shows the icon");h.unload();
+});
+test("idle re-renders keep the icon steady and a Settings change applies at once",async()=>{
+  const h=await overlay(),pill=h.root.querySelector(".pill"),label=h.root.querySelector(".pill-label");h.timers.tick(1500);
+  for(const scale of [1.1,1.2,1.3]){h.config.overlay.scale=scale;h.emit("config",structuredClone(h.config));
+    for(let tick=0;tick<4;tick++){assert.equal(h.root.dataset.idle,"icon","no pill flash on re-render");assert.equal(pill.hidden,false);h.timers.tick(500);}}
+  h.config.overlay.idle_view="pill";h.emit("config",structuredClone(h.config));assert.equal(h.root.dataset.idle,undefined);assert.equal(label.textContent,"mur");
+  h.timers.tick(5000);assert.equal(pill.hidden,false,"the full pill stays while idle");
+  h.config.overlay.idle_view="hidden";h.emit("config",structuredClone(h.config));assert.equal(pill.hidden,true);
+  h.config.overlay.idle_view="icon";h.emit("config",structuredClone(h.config));assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);h.unload();
+});
+test("the whole idle icon is the drag handle and stays an icon while moving",async()=>{
+  let release;const h=await overlay({startOverlayDrag:()=>new Promise(resolve=>{release=resolve;})}),pill=h.root.querySelector(".pill");
+  await pill.dispatch("mousedown",{button:0});assert.equal(h.drags.length,0,"the full pill moves only from its handle");
+  h.timers.tick(1500);await pill.dispatch("mousedown",{button:2});assert.equal(h.drags.length,0);
+  await pill.dispatch("mousedown",{button:0});assert.equal(h.drags.length,1);assert.equal(h.root.dataset.dragging,"true");
+  h.timers.tick(5000);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);
+  release();await settle();h.timers.tick(1500);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);h.unload();
+});
+test("suggestions, held text and drag errors use the full pill over the idle icon",async()=>{
+  const h=await overlay({startOverlayDrag:async()=>{throw new Error("permission denied");}}),pill=h.root.querySelector(".pill"),label=h.root.querySelector(".pill-label");
+  h.timers.tick(1500);assert.equal(h.root.dataset.idle,"icon");
+  h.emit("overlay-update",snap(1,READY));assert.equal(h.root.dataset.idle,undefined);assert.equal(h.root.querySelector(".suggestion").hidden,false);assert.equal(label.textContent,"Enhance");
+  await h.root.querySelector(".discard-button").dispatch("click");await settle();assert.equal(h.root.dataset.idle,"icon");assert.equal(label.textContent,"mur");
+  h.emit("overlay-update",snap(2,NO_ENH,{held:HELD}));assert.equal(h.root.dataset.idle,undefined);assert.equal(label.textContent,"Focus changed");
+  h.emit("overlay-update",snap(3,NO_ENH,{held:null}));assert.equal(h.root.dataset.idle,"icon");assert.equal(label.textContent,"mur");
+  await pill.dispatch("mousedown",{button:0});await settle();assert.equal(h.root.dataset.idle,undefined,"the error needs the label");
+  assert.match(label.textContent,/Could not move overlay: Error: permission denied/);assert.equal(pill.hidden,false);
+  h.timers.tick(4000);assert.equal(h.root.dataset.idle,"icon");h.unload();
 });

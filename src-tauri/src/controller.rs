@@ -711,14 +711,14 @@ impl Controller {
         }
         if self.reset_at.is_some_and(|at| now >= at) {
             self.idle(state)?;
-            if state.config()?.overlay.idle_hide && !state.overlay_held() {
+            if state.config()?.overlay.hides_when_idle() && !state.overlay_held() {
                 overlay::hide(&state.app)?;
                 self.hide_at = None;
             }
         }
         if self.hide_at.is_some_and(|at| now >= at) {
             self.hide_at = None;
-            if state.config()?.overlay.idle_hide && !state.overlay_held() && !self.active {
+            if state.config()?.overlay.hides_when_idle() && !state.overlay_held() && !self.active {
                 overlay::hide(&state.app)?;
             }
         }

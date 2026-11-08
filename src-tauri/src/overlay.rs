@@ -17,7 +17,8 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
 
 /// Logical size before the view reports a measurement.
 pub const DEFAULT_SIZE: (f64, f64) = (608.0, 160.0);
-pub const MIN_SIZE: (f64, f64) = (120.0, 40.0);
+/// Small enough for the idle icon, so no transparent click-dead margin is left over apps.
+pub const MIN_SIZE: (f64, f64) = (40.0, 40.0);
 pub const MAX_SIZE: (f64, f64) = (1200.0, 900.0);
 /// Distance from the work-area edge for the preset positions, in logical px.
 const EDGE_INSET: f64 = 28.0;
@@ -409,7 +410,7 @@ fn apply_main(app: &AppHandle, prefs: &Overlay) -> Result<()> {
         .and_then(|s| s.status().ok())
         .is_none_or(|s| s.state == "idle");
     let held = state.as_ref().is_some_and(|s| s.overlay_held());
-    if !prefs.enabled || (prefs.idle_hide && idle && !held && !dragging()) {
+    if !prefs.enabled || (prefs.hides_when_idle() && idle && !held && !dragging()) {
         window.hide().context("Hide idle overlay")?;
         return Ok(());
     }
@@ -438,10 +439,10 @@ fn reveal_main(app: &AppHandle, prefs: &Overlay) -> Result<()> {
         return Ok(());
     }
     if let Some(window) = app.get_webview_window("overlay") {
-        if !window.is_visible().unwrap_or(false) {
-            if let Err(error) = position(app, prefs) {
-                tracing::warn!(%error, "Overlay placement");
-            }
+        // The idle icon keeps the window visible, so re-clamp every time: displays may
+        // have changed since it was placed. A drag in progress keeps its own position.
+        if let Err(error) = position(app, prefs) {
+            tracing::warn!(%error, "Overlay placement");
         }
         show_interactive(&window)?;
     }
