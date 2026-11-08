@@ -120,7 +120,7 @@ impl Session {
     fn set(&mut self, phase: Phase) {
         self.phase = PhaseState(phase);
     }
-    /// Pending or ready suggestions keep the overlay visible regardless of idle_hide.
+    /// Pending or ready suggestions keep the overlay visible even when the idle view is hidden.
     pub fn holds_overlay(&self) -> bool {
         self.phase() != Phase::None
     }

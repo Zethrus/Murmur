@@ -1,4 +1,4 @@
-import {call, on, startOverlayDrag, type Config, type DictationState, type Enhancement, type Events, type OverlaySnapshot} from "../bridge";
+import {call, on, startOverlayDrag, type Config, type DictationState, type Enhancement, type Events, type IdleView, type OverlaySnapshot} from "../bridge";
 import {heldPanel} from "./held";
 import {cssLength, isNewer, sizeChanged, windowSize, type Size} from "./layout";
 
@@ -21,12 +21,24 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined, expiry: ReturnType<typeof setTimeout> | undefined, noticeTimer: ReturnType<typeof setTimeout> | undefined;
   const disposers: (()=>void)[] = [];
   panel.hidden = true;
-  const scheduleHide = (ms: number): void => { clearTimeout(timer); timer = setTimeout(()=>{ if (!dragging && !active(enhancement) && !held.active()) pill.hidden = true; },ms); };
+  const idleView = (): IdleView => config?.overlay.idle_view ?? "icon";
+  /** Full pill chrome; dictation, suggestions, held text and drag errors always use it. */
+  const expand = (): void => { delete root.dataset.idle; pill.removeAttribute("title"); };
+  /** Settle into the idle presentation chosen in Settings: the small icon, the full pill, or nothing. */
+  const collapse = (): void => {
+    if (dragging || active(enhancement) || held.active()) return;
+    const view = idleView();
+    if (view === "icon") { root.dataset.idle = "icon"; pill.title = "Drag to move"; pill.hidden = !config?.overlay.enabled; return; }
+    expand(); if (view === "hidden") pill.hidden = true;
+  };
+  const scheduleCollapse = (ms: number): void => { clearTimeout(timer); timer = setTimeout(collapse,ms); };
 
   const apply = (next: Config): void => {
+    const viewChanged = config !== undefined && config.overlay.idle_view !== next.overlay.idle_view;
     config = next; document.documentElement.dataset.theme = next.general.theme;
     document.documentElement.style.setProperty("--overlay-scale",String(next.overlay.scale)); root.dataset.position = next.overlay.position;
     root.dataset.preview = String(next.overlay.show_preview); render(state);
+    if (viewChanged && state === "idle") collapse(); // a Settings change applies at once
     reported = undefined; void Promise.resolve().then(()=>measure());
   };
   /** Suggestion view; never hides the overlay while a rewrite is pending, ready, accepting or reporting. */
@@ -46,7 +58,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     discard.disabled = busy || acting || phase === "accepting";
     root.dataset.expanded = String(isExpanded());
     if (!panel.hidden) {
-      clearTimeout(timer); pill.hidden = config ? !config.overlay.enabled : true;
+      clearTimeout(timer); expand(); pill.hidden = config ? !config.overlay.enabled : true;
       label.textContent = "Enhance";
     }
   };
@@ -54,11 +66,12 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   const renderHeld = (): void => {
     held.show(state !== "listening" && state !== "transcribing");
     root.dataset.held = String(held.visible()); root.dataset.expanded = String(isExpanded());
-    if (held.visible()) { clearTimeout(timer); pill.hidden = config ? !config.overlay.enabled : true; label.textContent = "Focus changed"; }
+    if (held.visible()) { clearTimeout(timer); expand(); pill.hidden = config ? !config.overlay.enabled : true; label.textContent = "Focus changed"; }
   };
   const isExpanded = (): boolean => (state === "listening" && !!preview.textContent && !!config?.overlay.show_preview) || !panel.hidden || held.visible();
   const render = (next: DictationState): void => {
     const previous = state; state = next; clearTimeout(timer); root.dataset.state = next;
+    if (next !== "idle") expand(); // an idle re-render keeps the icon, so it never flashes the pill
     pill.hidden = config ? !config.overlay.enabled : true;
     indicator.textContent = next === "done" ? "✓" : next === "transcribing" ? "•••" : "";
     label.textContent = {idle:"mur",listening:"Listening",transcribing:"Finding your words",done:"Done",error:lastError}[next];
@@ -66,10 +79,10 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     if (next === "listening" && previous !== "listening") { setEnhancement(NONE); }
     renderEnhancement(); renderHeld();
     if ((active(enhancement) && !panel.hidden) || held.visible()) { bars.forEach(bar=>bar.style.removeProperty("--level")); return; }
-    if (next === "done") scheduleHide(900);
-    else if (next === "error") scheduleHide(1600);
-    else if (next === "idle" && config?.overlay.idle_hide) {
-      if (previous === "done" || previous === "error") { if (!dragging) pill.hidden = true; } else scheduleHide(1500);
+    if (next === "done") scheduleCollapse(900);
+    else if (next === "error") scheduleCollapse(1600);
+    else if (next === "idle") {
+      if (previous === "done" || previous === "error") collapse(); else scheduleCollapse(1500);
     }
     if (next !== "listening") bars.forEach(bar=>bar.style.removeProperty("--level"));
   };
@@ -87,7 +100,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   /** After a suggestion closes, fall back to the ordinary idle presentation. */
   const settle = (): void => {
     renderEnhancement(); renderHeld(); if (state === "listening" || state === "transcribing" || held.visible() || active(enhancement)) return;
-    if (config?.overlay.idle_hide) { if (!dragging) pill.hidden = true; } else render("idle");
+    render("idle"); collapse(); // render restores the idle label; collapse applies the idle view now
   };
   const applySnapshot = (snapshot: OverlaySnapshot): void => {
     if (!isNewer(revision,snapshot.revision)) return; revision = snapshot.revision;
@@ -126,7 +139,8 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   // Native drag from the dedicated handle only; text, buttons and scrollbars stay interactive and never start a move.
   // WebKitGTK can miss pointer-up during the compositor grab, suppressing the
   // next pointerdown. Mouse down continues to arrive for successive native drags.
-  handle.addEventListener("mousedown",(event: Event)=>{ const pointer = event as MouseEvent;
+  // The idle icon is itself the handle: the whole glyph starts a move.
+  const beginDrag = (event: Event): void => { const pointer = event as MouseEvent;
     if (pointer.button !== 0 || busy || dragging) return;
     pointer.preventDefault();
     dragging = true; root.dataset.dragging = "true"; delete root.dataset.dragError;
@@ -136,10 +150,12 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
       dragging = false; root.dataset.dragging = "false"; render(state); measure();
     }).catch(error=>{
       if (disposed) return;
-      dragging = false; root.dataset.dragging = "false"; root.dataset.dragError = "true";
+      dragging = false; root.dataset.dragging = "false"; root.dataset.dragError = "true"; expand();
       label.textContent = `Could not move overlay: ${String(error)}`; pill.hidden = false;
-      scheduleHide(NOTICE_MS); measure();
-    }); });
+      scheduleCollapse(NOTICE_MS); measure();
+    }); };
+  handle.addEventListener("mousedown",beginDrag);
+  pill.addEventListener("mousedown",event=>{ if (root.dataset.idle === "icon") beginDrag(event); });
 
   // Report the rendered surface size; Rust clamps it to the work area and keeps the placement anchor.
   const layoutInstance = `${Date.now()}-${Math.random()}`;

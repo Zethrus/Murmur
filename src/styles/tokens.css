@@ -118,6 +118,10 @@
   --drag-handle-w: 24px; --drag-handle-h: 24px; --drag-handle-dot: 3px; --drag-handle-gap: 2px;
   --drag-handle-radius: var(--r-pill); --drag-handle-opacity: 0.55; --drag-handle-hover-opacity: 1;
   --overlay-busy-opacity: 0.7; --work-area-inset: var(--sp-2);
+  /* Idle icon: the five bars of the app icon (heights 244/444/584 of 584 in murmur.svg). */
+  --idle-icon-inset: var(--sp-1); --idle-icon-canvas-padding: calc(var(--sp-1) * var(--overlay-scale));
+  --idle-icon-opacity: 0.55; --idle-icon-hover-opacity: 0.9;
+  --idle-icon-bar-1: 0.42; --idle-icon-bar-2: 0.76; --idle-icon-bar-3: 1;
   /* Enhance settings card. */
   --enhance-model-inset: var(--sp-4) var(--sp-5); --enhance-model-gap: var(--sp-1);
   --enhance-model-name-size: var(--fs-14); --enhance-statement-inset: var(--sp-4) var(--sp-5) 0;

@@ -18,6 +18,17 @@ body[data-window="overlay"] #app[data-position="top-center"] { align-items: flex
 .preview:empty, [data-preview="false"] .preview { display: none; }
 [data-expanded="true"] .pill { width: var(--pill-max-w); border-radius: var(--pill-expanded-radius); }
 [data-state="idle"] .pill { width: var(--pill-min-w); }
+/* Idle icon: only the app-icon bars, no pill chrome. The whole glyph is the drag handle. Must follow the idle width rule. */
+body[data-window="overlay"] #app[data-idle="icon"] { padding: var(--idle-icon-canvas-padding); }
+[data-idle="icon"] .pill { width: auto; min-height: 0; padding: var(--idle-icon-inset); background: none; border: none; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; opacity: var(--idle-icon-opacity); cursor: grab; transition: opacity var(--overlay-button-motion); }
+[data-idle="icon"] .pill:hover { opacity: var(--idle-icon-hover-opacity); }
+[data-idle="icon"][data-dragging="true"] .pill { cursor: grabbing; }
+[data-idle="icon"] .drag-handle, [data-idle="icon"] .indicator, [data-idle="icon"] .pill-label, [data-idle="icon"] .preview { display: none; }
+[data-idle="icon"] .bars { display: flex; }
+[data-idle="icon"] .bars i { background: var(--accent); }
+[data-idle="icon"] .bars i:nth-child(1), [data-idle="icon"] .bars i:nth-child(5) { transform: scaleY(var(--idle-icon-bar-1)); }
+[data-idle="icon"] .bars i:nth-child(2), [data-idle="icon"] .bars i:nth-child(4) { transform: scaleY(var(--idle-icon-bar-2)); }
+[data-idle="icon"] .bars i:nth-child(3) { transform: scaleY(var(--idle-icon-bar-3)); }
 [data-state="listening"] .bars { display: flex; }
 [data-state="listening"] .indicator { display: none; }
 [data-state="transcribing"] .indicator { width: var(--dots-w); height: var(--bar-h); background: var(--overlay-canvas-bg); color: var(--accent); letter-spacing: var(--dots-gap); animation: pulse var(--pulse-duration) infinite alternate; }

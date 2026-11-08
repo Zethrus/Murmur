@@ -22,7 +22,7 @@ Linux user install explicitly enables autostart without changing the app default
 | `overlay.position` | `"bottom-center"` | `bottom-center` or `top-center` |
 | `overlay.scale` | `1.0` | Scale, 0.8–1.6 |
 | `overlay.show_preview` | `true` | Live recognition preview |
-| `overlay.idle_hide` | `true` | Hide after returning to idle |
+| `overlay.idle_view` | `"icon"` | Between dictations: `icon` (small draggable app icon), `pill` (full pill), `hidden`. Replaces `idle_hide`; `idle_hide = false` migrates to `pill` |
 | `sounds.enabled` | `true` | Enable synthesized start/stop/error cues |
 | `sounds.volume` | `0.6` | Cue volume, 0–1 |
 | `sounds.muted` | `false` | Mute without changing volume |
