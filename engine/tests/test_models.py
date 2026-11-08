@@ -19,7 +19,12 @@ def test_reject_unlisted_paths(models: Models, name: str) -> None:
 
 def test_symlink_rejected(models: Models, tmp_path: Path) -> None:
     models.directory.mkdir()
-    (models.directory / "tiny.en").symlink_to(tmp_path, target_is_directory=True)
+    try:
+        (models.directory / "tiny.en").symlink_to(tmp_path, target_is_directory=True)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:  # ERROR_PRIVILEGE_NOT_HELD
+            pytest.skip("symlink creation needs SeCreateSymbolicLinkPrivilege (non-admin Windows runner)")
+        raise
     with pytest.raises(ValueError):
         models.remove("tiny.en")
 
