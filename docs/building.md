@@ -34,7 +34,7 @@ Installed layout (default XDG directories):
 | --- | --- |
 | `~/.local/bin/murmur` | Launcher; add `~/.local/bin` to PATH if needed |
 | `~/.local/share/murmur/bin/murmur` | App binary |
-| `~/.local/share/murmur/bin/murmur-engine` | Launcher that runs the engine venv (CUDA-aware) |
+| `~/.local/share/murmur/lib/murmur/engine/murmur-engine` | Launcher that runs the engine venv (CUDA-aware) |
 | `~/.local/share/murmur/engine/.venv` | Local inference runtime (faster-whisper + CUDA wheels) |
 | `~/.local/share/murmur/icons/<size>/murmur.png` | Private icon copies |
 | `~/.local/share/icons/hicolor/*/apps/murmur.png` | Desktop-theme icons |
@@ -82,68 +82,72 @@ For a release build without installing into your home directory:
 
 ```sh
 scripts/build-linux.sh          # frozen engine + bundled app, deb and AppImage
-# Keep the frozen engine beside the raw release binary for manual execution:
-cp src-tauri/binaries/murmur-engine-x86_64-unknown-linux-gnu src-tauri/target/release/murmur-engine
-src-tauri/target/release/murmur
+# Run the raw release binary against the onedir engine it was built with:
+MURMUR_ENGINE=engine/dist/murmur-engine src-tauri/target/release/murmur
 ```
 
 Linux release builds use CPython 3.12 and `scripts/prepare-linux-release.sh` in
 both local and CI builds. It creates a clean `engine/.release-venv` and installs
 the SHA-256 locked wheel set in `engine/requirements-linux-release.txt`; the
 development `engine/.venv` is separate. The lock pins faster-whisper 1.2.1,
-CTranslate2 4.6.3, PyInstaller 6.22.3, and the CUDA 12.9 cuBLAS, cuDNN 9.27,
-and NVRTC wheels. The CUDA wheel hashes were checked against PyPI's published
-files. `engine/requirements-linux-release.in` records the resolution inputs.
+CTranslate2 4.6.3, PyInstaller 6.22.3, and the CUDA 12.9 cuBLAS wheel. The
+NVRTC wheel is locked only because the cuBLAS wheel depends on it; it is not
+shipped. The CUDA wheel hashes were checked against PyPI's published files.
+`engine/requirements-linux-release.in` records the resolution inputs.
+
+`scripts/engine-sidecar.sh --build` freezes the engine with PyInstaller
+`--onedir` into `engine/dist/murmur-engine/` (executable plus `_internal/`).
+PyAV and hf_xet are excluded (`murmur_engine/runtime.py` stubs PyAV; Murmur
+sends decoded PCM and downloads over plain HTTPS). `scripts/check-engine-imports.py`
+then fails the build if any file in that folder references cuDNN or NVRTC.
 
 The default build directory is `src-tauri/target`; manual build-linux.sh honors
 Cargo target overrides. The installer and CI deliberately pin that directory.
 The final downloads are in `.cache/artifacts/linux`. AppImage creation is required.
 `scripts/bundle-linux-runtime.py` adds typing tools, missing client libraries,
-the pinned CUDA userspace libraries under `usr/lib/murmur/cuda`, and notices to
-Tauri's AppImage. It derives the portable archive and Debian package from that
-AppDir. `scripts/test-linux-bundle.py` checks the runtime manifest, library
-resolution, engine, Debian parity, and 2 GiB per-asset limit. The engine is included in the packages; loose app and engine files are not
-published separately. Models download inside Settings.
+the onedir engine under `usr/lib/murmur/engine`, cuBLAS under
+`usr/lib/murmur/cuda`, and notices to Tauri's AppImage. It replaces duplicate
+library copies with symlinks and repacks the SquashFS with zstd. The portable
+archive holds only that AppImage, named `murmur`. The `.deb` is Tauri's package
+(app in `/usr/bin`, system `Depends`) plus the same engine and cuBLAS folders
+under `/usr/lib/murmur`. `scripts/test-linux-bundle.py` checks the CUDA
+manifest, library resolution, the engine and its cuDNN gate, Debian/AppImage
+parity of the engine and cuBLAS, stripped binaries, symlinked libraries, the
+archive layout, and the size budgets; it also starts the extracted `.deb` app.
+Models download inside Settings.
 
-On the Ubuntu 24.04 validation build, the final AppImage and `murmur` were
-1,616.3 MiB each, the Debian package 1,612.7 MiB, the portable archive
-1,744.0 MiB, and the standalone engine 132.9 MiB. The Debian installed size
-was 2,645.4 MiB. These are local build measurements, not fixed sizes for
-later releases; the build rejects any release asset at or above 2 GiB.
+`python3 scripts/check-release.py sizes <files or folders>` prints download and
+unpacked sizes; `budgets <dir>` enforces the per-asset budgets. Current
+measurements are in [the size report](size-report.md).
 
 `scripts/test-linux-startup.py` launches the AppImage on an isolated X11 display
-and D-Bus session to check manual startup, background startup, autostart migration,
-and manual reactivation.
+and D-Bus session to check manual startup, that the packaged engine starts,
+background startup, autostart migration, and manual reactivation.
 
 These bundles still use the host's glibc, desktop services, and hardware drivers.
 Build on the oldest supported distribution; the current release baseline is
 Ubuntu 24.04 with glibc 2.39. GPU inference needs a compatible host NVIDIA
 driver. [NVIDIA lists](https://docs.nvidia.com/cuda/archive/12.9.0/cuda-toolkit-release-notes/index.html)
-575.51.03 as the minimum for CUDA 12.9 GA, and its
-[cuDNN 9.27 CUDA 12.x matrix](https://docs.nvidia.com/deeplearning/cudnn/backend/v9.27.0/reference/support-matrix.html)
-covers Ada GPUs; the affected RTX 4060 Laptop GPU uses
+575.51.03 as the minimum for CUDA 12.9 GA; the tested RTX 4060 Laptop GPU uses
 driver 580.178.04. Other hardware and driver combinations require validation.
-The build copies each selected NVIDIA wheel's `License.txt` into
+The build copies the cuBLAS wheel's `License.txt` into
 `usr/share/doc/murmur/bundled-runtime`. Before public distribution, review the
-exact wheel notices and the [CUDA](https://docs.nvidia.com/cuda/eula/index.html)
-and [cuDNN](https://docs.nvidia.com/deeplearning/cudnn/backend/latest/reference/eula.html)
+exact wheel notice and the [CUDA](https://docs.nvidia.com/cuda/eula/index.html)
 distribution terms for the intended package; this build check does not make a
 legal determination.
 
 For a trusted GPU host with an already staged model, run
 `python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux
---models-dir /path/to/staged/models`. It performs offline VAD-disabled forced
-CUDA, Auto, explicit CPU, and GPU-hidden Auto transcription, checks library
-origin, and writes `GPU-VALIDATION.json` tied to the built asset hashes. The
+--models-dir /path/to/staged/models`. It runs the cuDNN gate on the packaged
+engine, then performs offline VAD-disabled forced CUDA (with only the shipped
+cuBLAS folder on the loader path, plus every GPU precision with VAD on and off),
+Auto, explicit CPU, and GPU-hidden Auto transcription. It checks that cuBLAS
+loads from the package and that no cuDNN or NVRTC library loads, and writes
+`GPU-VALIDATION.json` tied to the built asset hashes. The
 fixture is a three-second excerpt of [OpenAI Whisper's `tests/jfk.flac`](https://github.com/openai/whisper/blob/main/tests/jfk.flac). Pass
 `--baseline-engine` and `--baseline-libraries` to compare ten warmed runs with
 a known working manual-path engine. The first inference is recorded separately.
-On the affected RTX 4060 Laptop GPU, this build's ten-run warmed median was
-65.0 ms, versus 62.0 ms for the working 0.4.2 engine with manual CUDA paths,
-using the same `distil-small.en` model, automatic `int8_float16` precision, and
-fixed fixture. Packaged cold inference was 993.4 ms; launch through the first
-reply was 2,594.4 ms. Forced CUDA and Auto stayed on GPU. Explicit CPU and
-GPU-hidden Auto completed transcription without a GPU failure warning.
+Timings for the current build are recorded in [the size report](size-report.md).
 
 ## Windows development build (deferred)
 
@@ -162,16 +166,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 
 This process-scoped execution-policy override does not change the machine policy.
 The script creates `engine\.venv`, installs requirements + PyInstaller, freezes
-`murmur-engine.exe` with the CUDA runtime hook and any installed NVIDIA modules,
-and copies the target-suffixed sidecar into `src-tauri\binaries`. It runs `npm ci`,
+the onedir engine into `engine\dist\murmur-engine\` (no CUDA inside; set
+`MURMUR_CUDA_DIR` to a folder with the CUDA DLLs), runs `npm ci`,
 `npm run build`, installs the Cargo Tauri CLI matching the locked npm CLI version,
 and runs `cargo tauri build --target x86_64-pc-windows-msvc`. The existing
-`tauri.windows.conf.json` selects NSIS automatically.
+`tauri.windows.conf.json` selects NSIS automatically. It then copies the engine
+folder to `engine\` beside `murmur.exe`, where the app looks for it.
 
 Printed outputs are under `src-tauri\target\x86_64-pc-windows-msvc\release`:
 
-- `murmur.exe` and `murmur-engine.exe`: portable pair; keep them in the same folder.
-- `bundle\nsis\*-setup.exe`: unsigned NSIS installer (per-user default).
+- `murmur.exe` and `engine\murmur-engine.exe`: portable layout; keep the `engine`
+  folder beside `murmur.exe`.
+- `bundle\nsis\*-setup.exe`: unsigned NSIS installer (per-user default). It does
+  not include the engine yet.
 
 Python is not required on the destination PC. Models are not bundled. WebView2
 and compatible NVIDIA drivers (for CUDA) remain runtime prerequisites. Unsigned

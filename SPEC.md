@@ -69,7 +69,6 @@ the repository root (./)
 │   ├── Cargo.toml  build.rs  tauri.conf.json
 │   ├── capabilities/default.json
 │   ├── icons/ (generate via `cargo tauri icon` from assets/murmur.png)
-│   ├── binaries/            # engine sidecar placed here at build time (gitignored)
 │   └── src/
 │       ├── main.rs          # tauri::Builder, plugins, tray, windows, command registration
 │       ├── app.rs           # AppState: config, engine client, controller handle, status
@@ -345,12 +344,12 @@ per-platform CSS forks.
 - `scripts/build-linux.sh`: `npm ci && npm run build && cargo tauri build` → binary +
   `.deb` (bundle targets `["deb","appimage"]`, appimage optional/allow failure).
 - **Windows**: `scripts/build-windows.ps1` (PowerShell, no admin): creates `engine\.venv`,
-  `pip install -r engine\requirements.txt pyinstaller`, builds `murmur-engine.exe` with
-  `--onefile`, copies to `src-tauri\binaries\murmur-engine-x86_64-pc-windows-msvc.exe`,
-  `npm ci`, `npm run build`, `cargo tauri build --target x86_64-pc-windows-msvc` → portable
-  `murmur.exe` in `target\release\` plus optional NSIS installer from the bundler.
-  `tauri.conf.json` must declare `bundle.externalBin: ["binaries/murmur-engine"]` and per-platform
-  targets so both builds work without editing config.
+  `pip install -r engine\requirements.txt pyinstaller`, builds the engine with `--onedir`
+  into `engine\dist\murmur-engine\`, `npm ci`, `npm run build`,
+  `cargo tauri build --target x86_64-pc-windows-msvc` → portable `murmur.exe` in
+  `target\release\` with the engine copied to `engine\` beside it, plus an NSIS installer.
+  The engine is not a Tauri `externalBin`; `engine.rs` resolves `MURMUR_ENGINE`, the dev venv
+  (debug builds), then the packaged onedir engine.
 - CI: `.github/workflows/windows-build.yml` (windows-latest: rust + node + python, cache cargo,
   upload artifacts exe + installer) and `linux-build.yml` (ubuntu-22.04: apt installs
   webkit2gtk-4.1-dev etc., build, upload deb/AppImage). `release.yml` on tag `v*` publishes both.

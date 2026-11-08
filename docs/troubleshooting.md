@@ -40,24 +40,26 @@ may refuse to refocus; the text is then held.
 
 ## GPU inference falls back to CPU
 
-Desktop builds from this checkout bundle NVIDIA CUDA userspace libraries;
-published 0.4.2 downloads do not. A compatible host
+Linux desktop packages ship cuBLAS (`libcublas.so.12`, `libcublasLt.so.12`) in
+`usr/lib/murmur/cuda` beside the engine. Since 0.5.0 they no longer ship cuDNN
+or NVRTC: the bundled CTranslate2 does not use them. A compatible host
 NVIDIA driver is still required. Device Auto falls back to CPU when CUDA
 initialization or inference fails, and stays there until the engine restarts or
 the device configuration changes. Engine Settings shows a reason for a genuine
 GPU failure; an ordinary CPU-only machine has no warning. A missing library
 suggests an incomplete package; a driver warning calls for checking driver
 compatibility. Forced CUDA reports the error instead of silently using CPU.
-The separately downloaded `murmur-engine` needs an external CUDA userspace
-runtime for GPU use.
-
 ## The engine does not start
 
-The AppImage, Debian package, and portable archive include the engine.
+The AppImage, Debian package, and portable archive include the engine. It lives
+in `usr/lib/murmur/engine/` (inside the AppImage, or under `/usr/lib/murmur/engine`
+for the `.deb`). "Speech engine is not installed" means that folder is missing or
+`MURMUR_ENGINE` points somewhere without `murmur-engine`; reinstall the package
+or fix the variable.
 
-The frozen engine extracts libraries into temporary storage. A full disk or a
-`noexec` temporary directory can prevent startup. Quit and restart after fixing
-the problem. The app retries a failed engine once before requiring a restart.
+Since 0.5.0 the engine is a folder, not a self-extracting file, so it no longer
+needs free space or exec permission in the temporary directory. The app retries
+a crashed engine once before requiring a restart.
 
 ## AppImage or package errors
 
@@ -66,9 +68,9 @@ prebuilt binary's baseline. Current downloads are built on Ubuntu 24.04 and need
 glibc 2.39 or newer. Build from source on the older distribution instead of
 replacing its system C library. AppImage does not remove this requirement.
 
-Try `--appimage-extract-and-run` if FUSE is unavailable. Release 0.4.2 and newer
-bundle WebKitGTK, GTK, audio client libraries, and typing tools in each desktop
-download. The host still needs a working X11 desktop, audio services, and hardware
+Try `--appimage-extract-and-run` if FUSE is unavailable. The AppImage bundles
+WebKitGTK, GTK, audio client libraries, and typing tools. Since 0.5.0 the `.deb`
+uses the distribution's packages instead (`apt` installs them as dependencies). The host still needs a working X11 desktop, audio services, and hardware
 drivers. Report a missing application library as a packaging bug.
 
 ## The Flipper does not connect

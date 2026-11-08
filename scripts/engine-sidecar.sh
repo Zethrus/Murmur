@@ -19,13 +19,15 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 if [[ "${1:-}" == --build ]]; then
   cd "$ROOT/engine"
-  "$PYTHON" -m PyInstaller --noconfirm --clean --onefile --name murmur-engine \
-    --paths . --exclude-module nvidia \
-    --collect-all faster_whisper --collect-all ctranslate2 \
-    --collect-all tokenizers --collect-all onnxruntime murmur_engine/__main__.py
-  TARGET="$(rustc -vV | while IFS=' ' read -r key value; do [[ "$key" != host: ]] || printf '%s' "$value"; done)"
-  mkdir -p "$ROOT/src-tauri/binaries"
-  cp dist/murmur-engine "$ROOT/src-tauri/binaries/murmur-engine-$TARGET"
+  # One directory, not onefile: no per-launch unpack into TMPDIR. PyAV (FFmpeg) and
+  # hf_xet are left out: Murmur sends decoded PCM and downloads over plain HTTPS
+  # (murmur_engine/runtime.py). CUDA userspace is staged by the desktop packaging.
+  "$PYTHON" -m PyInstaller --noconfirm --clean --onedir --name murmur-engine \
+    --paths . --exclude-module nvidia --exclude-module av --exclude-module hf_xet \
+    --collect-all faster_whisper --collect-all ctranslate2 --collect-all tokenizers \
+    --collect-binaries onnxruntime --collect-data onnxruntime \
+    --hidden-import onnxruntime.capi._pybind_state murmur_engine/__main__.py
+  printf 'Frozen engine: %s\n' "$ROOT/engine/dist/murmur-engine"
 else
   export HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
   # Dev runs use the venv's CUDA wheels directly; ctranslate2 dlopen()s them by soname.

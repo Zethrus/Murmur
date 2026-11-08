@@ -29,19 +29,20 @@ push-to-talk button and a screen for live text.
 Ubuntu 24.04 as their build baseline and require **glibc 2.39 or newer**, a working Linux desktop, and hardware drivers. On older distributions, build from source. Use an X11
 desktop with a working microphone and system tray. Native Wayland input is not verified.
 
-| Download | Use it for |
-| --- | --- |
-| `.deb` | Debian/Ubuntu installation with the application runtime included |
-| `.AppImage` | Recommended portable download, with runtime and typing tools included |
-| `murmur-linux-x86_64.tar.gz` | A portable directory containing the app and its engine |
-| `murmur-companion-vX.Y.Z.fap` | The Flipper Zero remote, matched to the desktop version |
-| `SHA256SUMS` | Checking that the downloaded files match the release |
+| Download | Download size | Use it for |
+| --- | ---: | --- |
+| `.deb` | 534 MB | Debian/Ubuntu installation; uses the distribution's WebKitGTK, GTK and xdotool (`apt` installs them) |
+| `.AppImage` | 679 MB | Recommended portable download, with runtime and typing tools included |
+| `murmur-linux-x86_64.tar.gz` | 678 MB | The same AppImage, named `murmur`, in a tarball |
+| `murmur-companion-vX.Y.Z.fap` | < 0.1 MB | The Flipper Zero remote, matched to the desktop version |
+| `SHA256SUMS` | — | Checking that the downloaded files match the release |
 
 [Get the latest release](https://github.com/Zethrus/Murmur/releases/latest).
 The speech engine is included in the desktop packages. There is no separate
-engine download to install.
-Linux desktop packages built from this checkout include pinned CUDA userspace
-libraries. Published 0.4.2 downloads predate this packaging change.
+engine download to install. For NVIDIA GPUs the packages include cuBLAS only;
+cuDNN and NVRTC are no longer shipped because the bundled CTranslate2 does not
+use them. Sizes and how they were measured: [size report](docs/size-report.md).
+Releases up to 0.4.7 were about 1.7 GB per download.
 
 The Android APK is planned for **November 6, 2026**. Windows builds are deferred
 until **November 6 or 7**. These are targets, subject to
@@ -71,8 +72,9 @@ chmod +x Murmur_*_amd64.AppImage
 ```
 
 If FUSE is unavailable, try `./Murmur_*_amd64.AppImage --appimage-extract-and-run`.
-`xdotool`, `xprop`, WebKitGTK, GTK, and the audio client libraries are bundled.
-No Python installation or separate typing utilities are needed.
+The AppImage bundles `xdotool`, `xprop`, WebKitGTK, GTK, and the audio client
+libraries. The `.deb` declares them as package dependencies instead. Neither
+needs a Python installation.
 
 For the portable archive:
 
@@ -98,8 +100,8 @@ hotkey to **Toggle** in General. Closing Settings keeps Murmur running; choose
 
 Models download only when you choose Install. After that, speech recognition
 works offline. Downloads include a Python runtime, so Python, Rust and Node are
-not needed to run them. New desktop builds include pinned CUDA userspace libraries;
-a compatible host NVIDIA driver is required for GPU inference. CPU inference
+not needed to run them. Desktop packages include cuBLAS for GPU inference;
+a compatible host NVIDIA driver is required. CPU inference
 works without a GPU. For the source installation, see
 [building from source](docs/building.md).
 

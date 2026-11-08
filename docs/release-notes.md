@@ -1,4 +1,7 @@
-# Unreleased
+# Murmur 0.5.0 (unreleased)
+
+Much smaller Linux downloads. Measured sizes are in
+[the size report](size-report.md).
 
 ## Always know where the overlay is
 
@@ -8,6 +11,40 @@
 - General → When idle offers Small app icon (default), Full pill, or Nothing.
   It replaces the Hide when idle switch. Existing installs that turned hiding
   off keep the full pill.
+
+## Smaller Linux packages
+
+- **No cuDNN or NVRTC.** The bundled CTranslate2 runs Whisper on NVIDIA GPUs
+  with cuBLAS alone, so packages now ship only `libcublas.so.12` and
+  `libcublasLt.so.12`. GPU inference was checked on an RTX 4060 with every
+  precision, VAD on and off. The build fails if a future CTranslate2 starts
+  referencing cuDNN or NVRTC.
+- **Leaner engine.** The speech engine is now a folder
+  (`usr/lib/murmur/engine/`) instead of a self-extracting file, so it starts
+  without unpacking into your temporary directory. It no longer carries PyAV/FFmpeg
+  or hf_xet, which Murmur never used. Model installs still work over HTTPS.
+- **Stripped binaries, symlinked libraries, zstd AppImage.**
+- **The `.deb` uses your system's libraries.** It installs the app to
+  `/usr/bin`, the engine to `/usr/lib/murmur/engine` and cuBLAS to
+  `/usr/lib/murmur/cuda`. WebKitGTK, GTK, xdotool and the other runtime
+  libraries come from Debian/Ubuntu packages, which `apt install
+  ./Murmur_*.deb` pulls in. The old `/opt/murmur` runtime is gone.
+- **The portable archive is just the AppImage** (as `murmur`). The second copy
+  of the engine it used to carry is gone; the AppImage already contains it.
+
+## For packagers and developers
+
+- `MURMUR_ENGINE` selects the engine executable (or its folder);
+  `MURMUR_CUDA_DIR` adds a CUDA folder to the engine's DLL search path on
+  Windows. See [configuration](configuration.md#environment-variables).
+- Release assets have size budgets enforced by `scripts/check-release.py`.
+
+## Known limitations
+
+- The engine and cuBLAS are still inside the Linux packages. A later release
+  moves them to optional, signed downloads.
+- Windows builds remain unverified on Windows hardware; the NSIS installer does
+  not include the engine yet.
 
 # Murmur 0.4.7
 

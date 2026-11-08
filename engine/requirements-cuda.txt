@@ -1,7 +1,7 @@
 # Linux desktop release pins. The standalone engine remains CPU-capable without them.
+# CTranslate2 4.6.3 on Linux runs Whisper on CUDA through cuBLAS only (no cuDNN or
+# NVRTC references); scripts/check-engine-imports.py enforces that for every build.
 -r requirements.txt
 nvidia-cublas-cu12==12.9.3.13 ; sys_platform == "linux"
-nvidia-cudnn-cu12==9.27.0.42 ; sys_platform == "linux"
-nvidia-cuda-nvrtc-cu12==12.9.86 ; sys_platform == "linux"
+# Windows CUDA packaging is unverified on hardware; revisit with the win_amd64 wheel.
 nvidia-cublas-cu12>=12.4 ; sys_platform == "win32"
-nvidia-cudnn-cu12>=9.1 ; sys_platform == "win32"

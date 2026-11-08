@@ -59,26 +59,24 @@ try {
     Write-Host '[2/5] Freezing murmur-engine.exe...'
     Push-Location (Join-Path $Root 'engine')
     try {
-        $FreezeArgs = @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
-            '--name', 'murmur-engine', '--paths', '.', '--runtime-hook', 'runtime_hook_cuda.py',
+        # Onedir engine without bundled CUDA: point MURMUR_CUDA_DIR at a CUDA folder
+        # (murmur_engine/runtime.py adds it to the DLL search path).
+        $FreezeArgs = @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir',
+            '--name', 'murmur-engine', '--paths', '.', '--exclude-module', 'nvidia',
+            '--exclude-module', 'av', '--exclude-module', 'hf_xet',
             '--collect-all', 'faster_whisper', '--collect-all', 'ctranslate2',
-            '--collect-all', 'tokenizers', '--collect-all', 'onnxruntime')
-        foreach ($Package in @('nvidia.cudnn', 'nvidia.cublas', 'nvidia.cuda_nvrtc')) {
-            # Missing optional modules must not fail a CPU-capable build.
-            $Probe = "import importlib.util, sys; top = importlib.util.find_spec('nvidia'); sys.exit(0 if top and importlib.util.find_spec('$Package') else 1)"
-            & $Python -c $Probe
-            if ($LASTEXITCODE -eq 0) { $FreezeArgs += @('--collect-all', $Package) }
-        }
-        $FreezeArgs += 'murmur_engine/__main__.py'
+            '--collect-all', 'tokenizers', '--collect-binaries', 'onnxruntime',
+            '--collect-data', 'onnxruntime', '--hidden-import', 'onnxruntime.capi._pybind_state',
+            'murmur_engine/__main__.py')
         Invoke-Native $Python $FreezeArgs
     } finally { Pop-Location }
-    $Frozen = Join-Path $Root 'engine\dist\murmur-engine.exe'
+    $FrozenDir = Join-Path $Root 'engine\dist\murmur-engine'
+    $Frozen = Join-Path $FrozenDir 'murmur-engine.exe'
     Assert-Artifact $Frozen
-    $Sidecar = Join-Path $Root 'src-tauri\binaries\murmur-engine-x86_64-pc-windows-msvc.exe'
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Sidecar) | Out-Null
-    Copy-Item -LiteralPath $Frozen -Destination $Sidecar -Force
-    if ((Get-FileHash $Frozen).Hash -ne (Get-FileHash $Sidecar).Hash) { throw 'Sidecar copy failed verification' }
-    Invoke-Native $Python @('-c', "import subprocess, sys; subprocess.run([sys.argv[1], '--help'], check=True, timeout=120)", $Sidecar)
+    Invoke-Native $Python @('-c', "import subprocess, sys; subprocess.run([sys.argv[1], '--help'], check=True, timeout=120)", $Frozen)
+    Invoke-Native $Python @('-m', 'pip', 'install', 'pefile')
+    Invoke-Native $Python @((Join-Path $PSScriptRoot 'check-engine-imports.py'), $FrozenDir,
+        '--site-packages', (Join-Path $Root 'engine\.venv\Lib\site-packages'))
 
     Write-Host '[3/5] Installing frontend dependencies and building UI...'
     Invoke-Native 'npm' @('ci')
@@ -93,17 +91,18 @@ try {
     Invoke-Native 'cargo' @('tauri', 'build', '--target', 'x86_64-pc-windows-msvc')
     $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
     $App = Join-Path $Release 'murmur.exe'
-    $PortableEngine = Join-Path $Release 'murmur-engine.exe'
+    $PortableEngine = Join-Path $Release 'engine\murmur-engine.exe'
     Assert-Artifact $App
     Invoke-Native 'python' @((Join-Path $PSScriptRoot 'audit-llama-cpu.py'), $Release, '--artifact', $App)
-    # The portable pair must work without the checkout or Python installed.
-    Copy-Item -LiteralPath $Frozen -Destination $PortableEngine -Force
+    # murmur.exe resolves engine\murmur-engine.exe beside itself (src-tauri/src/engine.rs).
+    $PortableEngineDir = Join-Path $Release 'engine'
+    if (Test-Path $PortableEngineDir) { Remove-Item $PortableEngineDir -Recurse -Force }
+    Copy-Item -LiteralPath $FrozenDir -Destination $PortableEngineDir -Recurse
     Assert-Artifact $PortableEngine
-    if ((Get-FileHash $Frozen).Hash -ne (Get-FileHash $PortableEngine).Hash) { throw 'Portable sidecar copy failed verification' }
     $Installers = @(Get-ChildItem -Path (Join-Path $Release 'bundle\nsis\*.exe') -File)
     if ($Installers.Count -eq 0) { throw 'NSIS installer was not generated' }
     Write-Host "Portable app: $App"
-    Write-Host "Required adjacent sidecar: $PortableEngine"
+    Write-Host "Required engine folder beside the app: $PortableEngine"
     foreach ($Installer in $Installers) {
         Assert-Artifact $Installer.FullName
         Write-Host "NSIS installer: $($Installer.FullName)"
