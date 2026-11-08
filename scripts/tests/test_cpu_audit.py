@@ -26,7 +26,7 @@ FLAGS = '-m64 -march=x86-64 -mavx -mavx2 -mfma -mf16c -mbmi2 -msse4.2'
 class AuditTests(unittest.TestCase):
     def test_effective_compiler_arguments(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             flags = cache.parent / 'flags.make'
             (cache.parent / 'extra.rsp').write_text('-mavx512f')
@@ -47,7 +47,7 @@ class AuditTests(unittest.TestCase):
 
     def test_quoted_and_conflicting_response_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
+            root = pathlib.Path(tmp).resolve()
             cache = root / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             directory = root / 'CMakeFiles' / 'cpu.dir'
@@ -71,7 +71,7 @@ class AuditTests(unittest.TestCase):
 
     def test_compile_commands_working_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
+            root = pathlib.Path(tmp).resolve()
             cache = root / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             directory = root / 'other'
@@ -95,7 +95,7 @@ class AuditTests(unittest.TestCase):
 
     def test_independent_baseline_options(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             (cache.parent / 'flags.make').write_text('CXX_FLAGS = ' + FLAGS)
             for missing in REQUIRED_ON + REQUIRED_OFF:
                 with self.subTest(missing=missing):
@@ -105,7 +105,7 @@ class AuditTests(unittest.TestCase):
 
     def test_unsupported_instruction_families(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             flags = cache.parent / 'flags.make'
             for flag in ('-msse3', '-mssse3', '-mpopcnt', '-maes', '-march=x86-64-v2',
@@ -124,7 +124,7 @@ class AuditTests(unittest.TestCase):
 
     def test_contract_regressions_in_both_directions(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             flags = cache.parent / 'flags.make'
             flags.write_text('CXX_FLAGS = ' + FLAGS)
             for name, old, new in [(name, 'ON', 'OFF') for name in REQUIRED_ON] + [
@@ -144,7 +144,7 @@ class AuditTests(unittest.TestCase):
 
     def test_all_flag_sources_are_audited(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
+            root = pathlib.Path(tmp).resolve()
             cache = root / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             (root / 'flags.make').write_text('CXX_FLAGS = ' + FLAGS)
@@ -169,7 +169,7 @@ class AuditTests(unittest.TestCase):
         # ggml emits /arch:AVX2 for MSVC instead of -march=x86-64; the audit must accept it
         # and still reject an AVX-512 or missing architecture switch.
         with tempfile.TemporaryDirectory() as tmp:
-            cache = pathlib.Path(tmp) / 'CMakeCache.txt'
+            cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'
             cache.write_text(CONTRACT)
             flags = cache.parent / 'flags.make'
             flags.write_text('CXX_FLAGS = /arch:AVX2 /O2 /EHsc')
@@ -207,7 +207,7 @@ class AuditTests(unittest.TestCase):
 
     def test_stale_newer_cache_is_not_selected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
+            root = pathlib.Path(tmp).resolve()
             fp = root / '.fingerprint'
             deps = root / 'deps'
             deps.mkdir()
