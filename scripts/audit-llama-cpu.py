@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Audit the llama.cpp native build actually referenced by a Cargo binary.
 
-Cargo fingerprint dependency hashes identify the precise sys crate and build-script output;
-cache timestamps are intentionally ignored. Run before stripping or packaging the binary.
+Cargo fingerprint dependency hashes identify the precise sys crate and build-script output.
+Timestamps are used in one place only: windows-msvc binaries carry no metadata hash, so their
+fingerprint record is the one Cargo wrote between linking and the artifact's last write.
+Run before stripping or packaging the binary.
 """
 import argparse
 import hashlib
@@ -81,15 +83,19 @@ def _linked_at(binary):
     return info.st_mtime
 
 
-def _newest_bin_fingerprint(fp, binary):
+def _newest_bin_fingerprint(fp, binary, slack=2):
     """Hash of the `murmur` binary fingerprint Cargo wrote for an unhashed deps binary.
 
-    Cargo records a binary's fingerprint right after linking it, so the matching record is the
-    newest `bin-murmur` and is not older than the binary; stale (cache-restored) records are."""
-    records = sorted(fp.glob("murmur-*/bin-murmur"), key=lambda path: path.stat().st_mtime)
-    if not records or records[-1].stat().st_mtime < _linked_at(binary) - 2:
-        raise ValueError(f"No Cargo fingerprint newer than {binary}")
-    return records[-1].parent.name.split("-", 1)[1]
+    Cargo writes a binary's fingerprint right after linking it, and tauri's bundle-type patch
+    (the artifact's last write) comes later still. So the record must fall between the link and
+    the artifact's modification time: cache-restored records are older, and a later `cargo
+    check`/`clippy` of the same profile is newer. Exactly one record must qualify."""
+    linked, written = _linked_at(binary), binary.stat().st_mtime
+    records = [path for path in fp.glob("murmur-*/bin-murmur")
+               if linked - slack <= path.stat().st_mtime <= written + slack]
+    if len(records) != 1:
+        raise ValueError(f"Expected one Cargo fingerprint written with {binary}, found {len(records)}")
+    return records[0].parent.name.split("-", 1)[1]
 
 
 def linked_cache(target, artifact):
@@ -241,6 +247,13 @@ def audit_cache(cache, windows=False):
             baseline |= audit_flags(line.split('=', 1)[1], cache, seen)
     if not baseline:
         raise ValueError(f"{cache}: compiler flags must contain -march=x86-64 or /arch:AVX2")
+    # FMA/F16C were accepted as absent above only because MSVC's /arch:AVX2 implies them;
+    # -march=x86-64 implies neither, so the MSVC switch itself must be present.
+    if windows and any(name not in values for name in MSVC_IMPLIED):
+        texts = [file.read_text(errors="replace") for file in files]
+        texts += [line for line in lines if line.startswith(("CMAKE_C_FLAGS", "CMAKE_CXX_FLAGS"))]
+        if not any("/arch:avx2" in text.lower() for text in texts):
+            raise ValueError(f"{cache}: GGML_FMA/F16C are implied only by /arch:AVX2, which is missing")
     return len(files)
 
 

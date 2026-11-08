@@ -77,22 +77,24 @@ jobs:
         # service user and exits without output. winget's Git adds only Git\cmd to PATH.
         shell: pwsh
         run: |
-          $Git = Split-Path (Split-Path (Get-Command git.exe).Source)
-          $Bin = Join-Path $Git 'bin'
-          if (-not (Test-Path (Join-Path $Bin 'bash.exe'))) { throw "Git Bash not found under $Bin" }
+          # Walk up from git.exe (Git\cmd, Git\bin or Git\mingw64\bin) to the folder holding bin\bash.exe.
+          $Dir = Split-Path (Get-Command git.exe).Source
+          while ($Dir -and -not (Test-Path (Join-Path $Dir 'bin\bash.exe'))) { $Dir = Split-Path $Dir }
+          if (-not $Dir) { throw "Git Bash (bin\bash.exe) not found above $((Get-Command git.exe).Source)" }
+          $Bin = Join-Path $Dir 'bin'
           $Bin | Out-File -FilePath $env:GITHUB_PATH -Append
           & (Join-Path $Bin 'bash.exe') --version | Select-Object -First 1
 
       - uses: actions/setup-python@v5
         # Hosted runners only: on a self-hosted machine this action runs the Python MSI and
         # deletes HKLM registry keys, which the non-admin runner user cannot do.
-        if: vars.WINDOWS_RUNNER == ''
+        if: runner.environment != 'self-hosted'
         with:
           python-version: '3.12'
           architecture: x64
 
       - name: Use the machine-wide Python 3.12 (self-hosted runner)
-        if: vars.WINDOWS_RUNNER != ''
+        if: runner.environment == 'self-hosted'
         shell: pwsh
         run: |
           $Python = & py -3.12 -c "import sys; print(sys.executable)"
@@ -142,7 +144,7 @@ jobs:
         run: |
           # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
           Push-Location scripts/tests
-          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci
+          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_cpu_audit
           $Code = $LASTEXITCODE
           Pop-Location
           if ($Code -ne 0) { throw 'Script tests failed' }

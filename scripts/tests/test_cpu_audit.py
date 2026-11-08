@@ -5,6 +5,7 @@ import pathlib
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / 'audit-llama-cpu.py'
 spec = importlib.util.spec_from_file_location('cpu_audit', SCRIPT)
@@ -186,6 +187,11 @@ class AuditTests(unittest.TestCase):
                               if not line.startswith(('GGML_FMA:', 'GGML_F16C:', 'GGML_AMX')))
             cache.write_text(msvc)
             self.assertEqual(audit.audit_cache(cache, windows=True), 1)
+            # Implied FMA/F16C need /arch:AVX2 itself; -march=x86-64 implies neither.
+            flags.write_text('CXX_FLAGS = -march=x86-64 /O2')
+            with self.assertRaisesRegex(ValueError, 'implied only by /arch:AVX2'):
+                audit.audit_cache(cache, windows=True)
+            flags.write_text('CXX_FLAGS = /arch:AVX2 /O2 /EHsc')
             with self.assertRaisesRegex(ValueError, 'GGML_FMA must be ON'):
                 audit.audit_cache(cache, windows=False)
             cache.write_text(msvc + '\nGGML_FMA:BOOL=OFF')
@@ -245,13 +251,28 @@ class AuditTests(unittest.TestCase):
             stale_fp.mkdir()
             (stale_fp / 'bin-murmur').write_text('00')
             (stale_fp / 'bin-murmur.json').write_text(json.dumps({'deps': [[0, 'llama_cpp_sys_2', False, 99]]}))
+            # Linked at t=1000; Cargo's record follows within a second; a cache-restored record is
+            # older and a later `cargo check` record (decoy, pointing elsewhere) is newer.
+            good = unhashed_root / '.fingerprint' / 'murmur-0123456789abcdef' / 'bin-murmur'
+            good.write_text('11')
+            decoy = unhashed_root / '.fingerprint' / 'murmur-eeeeeeeeeeeeeeee'
+            decoy.mkdir()
+            (decoy / 'bin-murmur').write_text('22')
+            (decoy / 'bin-murmur.json').write_text(json.dumps({'deps': [[0, 'llama_cpp_sys_2', False, 98]]}))
             os.utime(stale_fp / 'bin-murmur', (1, 1))
-            os.utime(unhashed_root / 'deps' / name, (1000, 1000))
-            (unhashed_root / '.fingerprint' / 'murmur-0123456789abcdef' / 'bin-murmur').write_text('11')
+            os.utime(good, (1001, 1001))
+            os.utime(decoy / 'bin-murmur', (5000, 5000))
+            os.utime(unhashed_root / 'deps' / name, (1001, 1001))
             exe = unhashed_root / name
             exe.write_bytes((unhashed_root / 'deps' / name).read_bytes())
             cache_msvc = unhashed_root / 'build' / run.parent.name / 'out' / 'build' / 'CMakeCache.txt'
-            self.assertEqual(audit.linked_cache(unhashed_root, exe), cache_msvc.resolve())
+            # The link time is the creation time on Windows; these files were created just now.
+            with mock.patch.object(audit, '_linked_at', lambda path: path.stat().st_mtime):
+                self.assertEqual(audit.linked_cache(unhashed_root, exe), cache_msvc.resolve())
+                # Two records inside the window: ambiguous, refused.
+                os.utime(decoy / 'bin-murmur', (1000, 1000))
+                with self.assertRaisesRegex(ValueError, 'Expected one Cargo fingerprint'):
+                    audit.linked_cache(unhashed_root, exe)
             # A few patched bytes elsewhere (Windows rewrites a PE section) still match ...
             bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_NSS enD')
             self.assertEqual(audit.linked_cache(root, bundled), cache)

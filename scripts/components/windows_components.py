@@ -117,6 +117,9 @@ def build_cuda(wheel, lock, version, output):
         raise RuntimeError(f"{wheel.name} is not the pinned win_amd64 wheel {pinned_version}")
     gate = _gate()
     output.mkdir(parents=True, exist_ok=True)
+    # Trees a scanner kept hold of in earlier runs (~770 MB each on the persistent runner).
+    for stale in output.parent.glob("murmur-cuda-win-*"):
+        _remove_staging(stale, attempts=3)
     temporary = Path(tempfile.mkdtemp(prefix="murmur-cuda-win-", dir=output.parent))
     try:
         stage = temporary / "cuda"

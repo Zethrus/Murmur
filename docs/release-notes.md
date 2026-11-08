@@ -67,12 +67,12 @@ a signed list, and installs it into your data folder. Measured sizes are in
 - **Blocked on the release key.** Until the owner creates Murmur's offline
   release key ([signing](signing.md)), builds refuse to install components
   ("Release trust root missing") and tag builds upload nothing.
-- **Windows is a preview that has not run on Windows hardware.** Everything
-  below was compiled (GNU cross-check) and reviewed, not executed; the self-hosted
-  Windows runner is still being set up. Windows builds are **unsigned**
-  (SmartScreen warns).
+- **Windows is a preview.** The build, every automated test, packaging and GPU
+  inference run in CI on real Windows hardware (an RTX 3060); the interactive
+  behaviour below (overlay, hotkeys, typing, tray) has not yet been checked on a
+  Windows desktop. Windows builds are **unsigned** (SmartScreen warns).
 
-## Windows (preview, unverified on hardware)
+## Windows (preview)
 
 - **Small per-user installer and portable zip** with the app only; the engine
   downloads on first run like on Linux. The installer needs no administrator
@@ -80,8 +80,8 @@ a signed list, and installs it into your data folder. Measured sizes are in
   connection). Requires Windows 10 1809+ x64.
 - **Windows engine and GPU components** in the signed manifest: the engine
   frozen from hash-locked win_amd64 wheels, and a cuBLAS-only GPU add-on
-  (`cublas64_12.dll`, `cublasLt64_12.dll`). The GPU option stays hidden on Windows
-  until it passes validation on Windows hardware.
+  (`cublas64_12.dll`, `cublasLt64_12.dll`). GPU inference passes in CI on an RTX
+  3060, but the GPU option stays hidden on Windows until the desktop checks pass.
 - **Text is never typed where it cannot arrive.** Windows running as
   administrator (when Murmur is not), the UAC prompt and the lock screen are
   detected; the text is held with Copy/Discard and the overlay says why.

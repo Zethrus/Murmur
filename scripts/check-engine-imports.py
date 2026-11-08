@@ -181,15 +181,16 @@ BENIGN = {"onnxruntime/__init__.py",
 CUDA_PROVIDER = re.compile(r"onnxruntime_providers_cuda", re.IGNORECASE)
 
 
-def _is_metadata(path):
+def _is_metadata(path, root):
     """Wheel metadata (`*.dist-info/RECORD`, METADATA, WHEEL): text listing file names the
-    package once shipped, such as a pruned cudnn64_9.dll. Nothing loads from it."""
-    return any(parent.name.endswith(".dist-info") for parent in path.parents)
+    package once shipped, such as a pruned cudnn64_9.dll. Nothing loads from it. Only folders
+    below the scanned root count, so a workspace path containing ".dist-info" skips nothing."""
+    return any(parent.name.endswith(".dist-info") for parent in path.relative_to(root).parents)
 
 
 def _problems(files, root, platform):
     return {str(path.relative_to(root)): sorted(names)
-            for path in files if not _is_metadata(path) and (names := references(path, platform))}
+            for path in files if not _is_metadata(path, root) and (names := references(path, platform))}
 
 
 def check(directory, platform=sys.platform, site_packages=None):
