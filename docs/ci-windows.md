@@ -63,7 +63,7 @@ runner. The release jobs that use Edison's GPU hard-code the labels
 
 Pull requests and manual runs (`workflow_dispatch`, input `gpu`):
 
-1. Python 3.12, Node 22, Rust (isolated toolchain), MSVC + CMake + libclang
+1. Python 3.12 (`actions/setup-python` on hosted runners; the machine-wide install on Edison, because setup-python runs the MSI and edits HKLM, which the non-admin runner user cannot), Node 22, Rust (isolated toolchain), MSVC + CMake + libclang
    (`scripts/prepare-windows-native.ps1`).
 2. Freeze the engine (`scripts/windows/freeze-engine.ps1`): onedir PyInstaller
    from `engine/requirements-windows-release.txt` with `--require-hashes`, prune

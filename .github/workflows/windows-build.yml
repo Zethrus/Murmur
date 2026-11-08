@@ -69,9 +69,25 @@ jobs:
           & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command 'Get-ExecutionPolicy -List'
 
       - uses: actions/setup-python@v5
+        # Hosted runners only: on a self-hosted machine this action runs the Python MSI and
+        # deletes HKLM registry keys, which the non-admin runner user cannot do.
+        if: vars.WINDOWS_RUNNER == ''
         with:
           python-version: '3.12'
           architecture: x64
+
+      - name: Use the machine-wide Python 3.12 (self-hosted runner)
+        if: vars.WINDOWS_RUNNER != ''
+        shell: pwsh
+        run: |
+          $Python = & py -3.12 -c "import sys; print(sys.executable)"
+          if ($LASTEXITCODE -ne 0 -or -not $Python) {
+            throw 'Python 3.12 is not installed machine-wide; run scripts/windows/provision-runner.ps1'
+          }
+          $Dir = Split-Path $Python
+          "$Dir`n$Dir\Scripts" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "pythonLocation=$Dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $Python --version
 
       - uses: actions/setup-node@v4
         with:
