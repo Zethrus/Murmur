@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate release versions, the required Linux/Flipper download set and size budgets."""
+"""Validate release versions, the required Linux/Flipper/component download set and budgets."""
 import hashlib
 import json
 from pathlib import Path
@@ -12,26 +12,35 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 MiB = 1024 ** 2
-# Interim budgets while the engine and cuBLAS still ship inside the Linux packages.
-# cuBLAS alone compresses to ~446 MiB, so the 400 MiB first proposed cannot hold;
-# these are the measured sizes (AppImage 646.6, .deb 508.9 MiB) plus ~8 % headroom.
-# PR-B (component manager) moves both out and lowers these to 125/125/130 MiB.
-APPIMAGE_BUDGET = 700 * MiB
-DEB_BUDGET = 550 * MiB
-TARBALL_BUDGET = 710 * MiB
-BUDGETS = {
-    ".AppImage": APPIMAGE_BUDGET,
-    ".deb": DEB_BUDGET,
-    ".tar.gz": TARBALL_BUDGET,
-    ".fap": 2 * MiB,
-    ".json": 1 * MiB,
-}
+# The packages carry only the app; the speech engine and the CUDA add-on are signed
+# components downloaded on request (docs/components.md).
+APPIMAGE_BUDGET = 125 * MiB
+DEB_BUDGET = 125 * MiB
+TARBALL_BUDGET = 130 * MiB
+ENGINE_ZIP_BUDGET = 130 * MiB
+CUDA_ZIP_BUDGET = 520 * MiB
+# (prefix, suffix, limit); the first match wins.
+BUDGETS = (
+    ("murmur-engine-", ".zip", ENGINE_ZIP_BUDGET),
+    ("murmur-cuda-", ".zip", CUDA_ZIP_BUDGET),
+    ("", ".AppImage", APPIMAGE_BUDGET),
+    ("", ".deb", DEB_BUDGET),
+    ("", ".tar.gz", TARBALL_BUDGET),
+    ("", ".fap", 2 * MiB),
+    ("", ".json", 1 * MiB),
+    ("", ".sig", 1 * MiB),
+    ("", ".asc", 1 * MiB),
+)
 UNBUDGETED = {"SHA256SUMS"}
+MANIFEST = "components-manifest.json"
+SIGNATURE = "components-manifest.json.sig"
+CERTIFICATE = "murmur-release.asc"
+RELEASE_URL = "https://github.com/Zethrus/Murmur/releases/download/{tag}/"
 
 
 def budget(path):
-    for suffix, limit in BUDGETS.items():
-        if path.name.endswith(suffix):
+    for prefix, suffix, limit in BUDGETS:
+        if path.name.startswith(prefix) and path.name.endswith(suffix):
             return limit
     raise ValueError(f"No size budget for release file: {path.name}")
 
@@ -72,6 +81,10 @@ def unpacked_size(path):
     if path.name.endswith(".tar.gz"):
         with tarfile.open(path) as archive:
             return sum(member.size for member in archive.getmembers() if member.isfile())
+    if path.name.endswith(".zip"):
+        import zipfile
+        with zipfile.ZipFile(path) as archive:
+            return sum(info.file_size for info in archive.infolist())
     return path.stat().st_size
 
 
@@ -116,6 +129,8 @@ def check_assets(tag, directory):
         "murmur-linux-x86_64.tar.gz",
         f"Murmur_{version}_amd64.deb", f"Murmur_{version}_amd64.AppImage",
         f"murmur-companion-{tag}.fap", "GPU-VALIDATION.json",
+        f"murmur-engine-linux-x86_64-{version}.zip", f"murmur-cuda-linux-x86_64-{version}.zip",
+        MANIFEST, SIGNATURE, CERTIFICATE,
     }
     actual = {p.name for p in directory.iterdir() if p.name != "SHA256SUMS"}
     if actual != required:
@@ -126,8 +141,9 @@ def check_assets(tag, directory):
             raise ValueError(f"Missing, empty or unsafe asset: {name}")
     check_budgets(directory / name for name in sorted(required))
     check_portable(directory / "murmur-linux-x86_64.tar.gz", directory / f"Murmur_{version}_amd64.AppImage")
+    check_manifest(tag, directory)
     evidence = json.loads((directory / "GPU-VALIDATION.json").read_text())
-    linux = required - {"GPU-VALIDATION.json", f"murmur-companion-{tag}.fap"}
+    linux = required - {"GPU-VALIDATION.json", f"murmur-companion-{tag}.fap", SIGNATURE, CERTIFICATE}
     if evidence.get("assets") != {name: _sha256(directory / name) for name in linux}:
         raise ValueError("GPU validation is not tied to the final release assets")
     if evidence.get("gpu", {}).get("status", {}).get("device") != "cuda" or evidence["gpu"]["status"].get("cpu_fallback"):
@@ -137,11 +153,12 @@ def check_assets(tag, directory):
     if len(evidence["gpu"].get("warm_runs_ms", [])) != 10 or not evidence.get("driver") or evidence.get("origin_validated") is not True:
         raise ValueError("GPU hardware evidence is incomplete")
     libraries = evidence["gpu"].get("libraries", [])
-    if not any("/usr/lib/murmur/cuda/libcublas.so" in path for path in libraries) or not any("/libcuda.so" in path and "/murmur/cuda/" not in path for path in libraries):
+    if not any(re.search(r"/components/cuda/[^/]+/libcublas\.so", path) for path in libraries) or not any(
+            "/libcuda.so" in path and "/components/cuda/" not in path for path in libraries):
         raise ValueError("GPU library-origin evidence is incomplete")
     probe = evidence.get("runtime_probe", {})
     if set(probe) != {"libcublas.so.12", "libcublasLt.so.12"} or any(
-        not path.endswith(f"/usr/lib/murmur/cuda/{name}") for name, path in probe.items()
+        not re.search(rf"/components/cuda/[^/]+/{re.escape(name)}$", path) for name, path in probe.items()
     ):
         raise ValueError("CUDA userspace origin evidence is incomplete")
     lines = []
@@ -149,6 +166,47 @@ def check_assets(tag, directory):
         with (directory / name).open("rb") as stream:
             lines.append(f'{hashlib.file_digest(stream, "sha256").hexdigest()}  {name}\n')
     (directory / "SHA256SUMS").write_text("".join(lines))
+
+
+def check_manifest(tag, directory):
+    """Zip components must be the release's own assets: same URL, size and SHA-256."""
+    try:
+        manifest = json.loads((directory / MANIFEST).read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Unreadable component manifest: {error}") from error
+    if manifest.get("schema_version") != 1 or manifest.get("channel") != "stable":
+        raise ValueError("Component manifest must be schema 1 on the stable channel")
+    base = RELEASE_URL.format(tag=tag)
+    zips = [c for c in manifest.get("components", []) if c.get("archive") == "zip" and c.get("os") == "linux"]
+    if {c.get("id") for c in zips} != {"engine", "cuda"}:
+        raise ValueError("Component manifest must list the Linux engine and CUDA add-on")
+    for component in zips:
+        urls = component.get("urls", [])
+        if len(urls) != 1 or not urls[0].startswith(base):
+            raise ValueError(f"{component['id']} must download from this release ({base})")
+        asset = directory / urls[0][len(base):]
+        if "/" in urls[0][len(base):] or not asset.is_file():
+            raise ValueError(f"{component['id']} points at a file that is not a release asset")
+        if asset.stat().st_size != component.get("size_bytes") or _sha256(asset) != component.get("sha256"):
+            raise ValueError(f"{component['id']} size or SHA-256 differs from {asset.name}")
+    for component in manifest.get("components", []):
+        for file in component.get("files", []):
+            if not all(url.startswith("https://huggingface.co/") for url in file.get("urls", [])):
+                raise ValueError(f"{component['id']} model files must come from huggingface.co")
+
+
+def check_signature(directory, fingerprint):
+    """gpg-verify the manifest with the shipped certificate; the primary must be `fingerprint`."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="murmur-verify-") as home:
+        env = {"GNUPGHOME": home, "PATH": "/usr/bin:/bin"}
+        subprocess.run(["gpg", "--batch", "--quiet", "--import", str(directory / CERTIFICATE)], env=env,
+                       check=True, capture_output=True)
+        status = subprocess.run(["gpg", "--batch", "--status-fd", "1", "--verify", str(directory / SIGNATURE),
+                                 str(directory / MANIFEST)], env=env, capture_output=True, text=True)
+    valid = [line.split() for line in status.stdout.splitlines() if line.startswith("[GNUPG:] VALIDSIG")]
+    if status.returncode or not valid or valid[0][-1].upper() != fingerprint.upper():
+        raise ValueError("Component manifest is not signed by the release key")
 
 
 def check_portable(archive_path, image):
@@ -176,12 +234,14 @@ if __name__ == "__main__":
             check_version(sys.argv[2])
         elif len(sys.argv) == 4 and sys.argv[1] == "assets":
             check_assets(sys.argv[2], Path(sys.argv[3]))
+        elif len(sys.argv) == 4 and sys.argv[1] == "signature":
+            check_signature(Path(sys.argv[2]), sys.argv[3])
         elif len(sys.argv) == 3 and sys.argv[1] == "budgets":
             check_budgets(sorted(p for p in Path(sys.argv[2]).iterdir() if p.is_file()))
         elif len(sys.argv) >= 3 and sys.argv[1] == "sizes":
             print(size_table([Path(arg) for arg in sys.argv[2:]]))
         else:
             raise ValueError("Usage: check-release.py version TAG | assets TAG DIRECTORY | "
-                             "budgets DIRECTORY | sizes PATH... (Python 3.11+)")
+                             "signature DIRECTORY FINGERPRINT | budgets DIRECTORY | sizes PATH... (Python 3.11+)")
     except (ValueError, OSError, tarfile.TarError, subprocess.CalledProcessError) as error:
         sys.exit(str(error))

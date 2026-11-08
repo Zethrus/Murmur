@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 import base64
@@ -134,3 +135,26 @@ def test_overlong_coding_prompt_rejected(models: Models) -> None:
     encoded = base64.b64encode(np.zeros(16000 * 91 + 1, dtype="<f4")).decode()
     with pytest.raises(ValueError, match="91 seconds"):
         Speech(models).transcribe({"sample_rate": 16000, "pcm_b64": encoded})
+
+
+def test_explicit_model_path_overrides_catalog_lookup(models: Models, tmp_path: Path) -> None:
+    speech = Speech(models)
+    verified = tmp_path / "components" / "speech-tiny.en" / "0d3d19a32d33"
+    verified.mkdir(parents=True)
+    speech.configure({"model": "tiny.en", "model_path": str(verified)})
+    assert not speech.status()["model_available"], "required files missing"
+    for name in ("model.bin", "config.json", "tokenizer.json"):
+        (verified / name).write_bytes(b"x")
+    assert speech.status()["model_available"]
+    assert speech.directory() == verified
+    # null = the app found no verified copy: never fall back to the legacy folder.
+    legacy = models.directory / "tiny.en"
+    legacy.mkdir(parents=True)
+    for name in (".complete", "model.bin", "config.json", "tokenizer.json"):
+        (legacy / name).write_bytes(b"x")
+    speech.configure({"model": "tiny.en", "model_path": None})
+    assert not speech.status()["model_available"]
+    with pytest.raises(RuntimeError, match="Choose a speech model"):
+        speech._load()
+    with pytest.raises(ValueError):
+        speech.configure({"model": "tiny.en", "model_path": "relative/dir"})

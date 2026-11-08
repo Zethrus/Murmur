@@ -1,16 +1,17 @@
-import {call, on, appVersion, type Config, type ConfigPatch, type Events, type Status} from "../bridge";
+import {call, on, appVersion, type ComponentsSnapshot, type Config, type ConfigPatch, type Events, type Status} from "../bridge";
 import type {PageContext} from "./context";
 import {el, button} from "./widgets/row";
 import {general} from "./pages/general";
-import {engine} from "./pages/engine";
+import {components} from "./pages/components";
+import {setupWizard} from "../setup/setup";
 import {audio} from "./pages/audio";
 import {behavior} from "./pages/behavior";
 import {privacy} from "./pages/privacy";
 import {companion} from "./pages/companion";
-const pages = {General:general, Engine:engine, Audio:audio, Behavior:behavior, Privacy:privacy, Companion:companion};
+const pages = {General:general, Components:components, Audio:audio, Behavior:behavior, Privacy:privacy, Companion:companion};
 type Page = keyof typeof pages;
 const descriptions: Record<Page,string> = {
-  General:"A quieter way to get your thoughts down.", Engine:"A capable voice, running entirely on your device.",
+  General:"A quieter way to get your thoughts down.", Components:"The speech engine, models and add-ons on this device.",
   Audio:"Help Murmur hear you clearly.", Behavior:"Your words, delivered just the way you work.", Privacy:"Private by default. Always under your control.",
   Companion:"Connect your Flipper Zero or pair a phone as a remote for Murmur."
 };
@@ -51,7 +52,10 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   const disposers: (()=>void)[] = [], pageDisposers: (()=>void)[] = [];
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   window.addEventListener("beforeunload",()=>{disposed = true; disposers.forEach(f=>f()); pageDisposers.forEach(f=>f()); clearTimeout(refreshTimer);},{once:true});
+  let snapshot: ComponentsSnapshot | null = null;
   [config,status,version] = await Promise.all([call("get_config"),call("get_status"),appVersion()]);
+  // Local only; a failure here must not keep Settings from opening.
+  snapshot = await call("components_snapshot").catch(() => null);
   if (disposed) return;
   const shell = el("div","settings-shell"), sidebar = el("aside","sidebar"), brand = el("div","brand"), nav = el("nav","navigation"), footer = el("footer","sidebar-footer"), main = el("main","settings-main");
   brand.append(brandMark(),el("span","brand-name","murmur")); nav.setAttribute("aria-label","Settings pages");
@@ -59,14 +63,32 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   footer.append(footerLine,el("span","version",`Version ${version} · On-device dictation`));
   const header = el("header","page-header"), eyebrow = el("p","eyebrow","YOUR WORKSPACE"), title = el("h1"), description = el("p","page-description"), content = el("div","page-content"), notice = el("p","app-notice"), banner = el("div","model-banner");
   notice.setAttribute("role","status"); notice.setAttribute("aria-live","polite");
-  banner.append(el("span","","Choose a speech model to start dictating"),button("Choose model",()=>navigate("Engine"),"primary"));
+  const bannerText = el("span",""), bannerAction = button("",()=>{ if (snapshot && !snapshot.engine_installed) openSetup(); else navigate("Components"); },"primary");
+  banner.append(bannerText,bannerAction);
+  const layer = el("div","setup-layer"); layer.hidden = true;
   const heading = el("div","page-heading"), headingText = el("div","page-heading-text");
   headingText.append(eyebrow,title,description); heading.append(appLogo(),headingText); header.append(heading);
-  main.append(header,banner,notice,content); sidebar.append(brand,nav,footer); shell.append(sidebar,main); root.replaceChildren(shell);
+  main.append(header,banner,notice,content); sidebar.append(brand,nav,footer); shell.append(sidebar,main); root.replaceChildren(shell,layer);
   const report = (e: unknown): void => { notice.textContent = String(e); notice.dataset.tone = "error"; };
   const theme = (): void => { document.documentElement.dataset.theme = config.general.theme; };
-  const chrome = (): void => { dot.dataset.online = String(status.sidecar_alive); engineStatus.textContent = !status.sidecar_alive ? "Engine offline" : !status.model_available ? "No model selected" : status.state === "idle" ? "Ready when you are" : status.state;
-    banner.hidden = status.model_available; if (status.error) report(status.error); };
+  const noEngine = (): boolean => snapshot !== null && !snapshot.engine_installed;
+  const chrome = (): void => { dot.dataset.online = String(status.sidecar_alive); engineStatus.textContent = noEngine() ? "Speech engine not installed" : !status.sidecar_alive ? "Engine offline" : !status.model_available ? "No model selected" : status.state === "idle" ? "Ready when you are" : status.state;
+    banner.hidden = status.model_available && !noEngine();
+    bannerText.textContent = noEngine() ? "The speech engine is not installed. Dictation needs it and one speech model." : "Choose a speech model to start dictating";
+    bannerAction.textContent = noEngine() ? "Finish setup" : "Choose model";
+    if (status.error && !noEngine()) report(status.error); };
+  let setupOpen = false;
+  function closeSetup(): void { if (!setupOpen) return; setupOpen = false; layer.hidden = true; layer.replaceChildren(); shell.hidden = false; pageDisposers.splice(0).forEach(f=>f()); void refreshSnapshot().then(()=>{chrome(); renderPage();}); }
+  function openSetup(): void {
+    if (!snapshot) return;
+    setupOpen = true; pageDisposers.splice(0).forEach(f=>f()); generation++; const current = generation;
+    shell.hidden = true; layer.hidden = false;
+    layer.replaceChildren(setupWizard({config, snapshot, save,
+      subscribe(event,handler) { void on(event,data=>{if (generation === current && !disposed) handler(data);}).then(off=>{ if (generation !== current || disposed) off(); else pageDisposers.push(off); }).catch(report); },
+      later: async () => { await save({setup:{postponed:true}}); closeSetup(); },
+      done: closeSetup}));
+  }
+  const refreshSnapshot = async (): Promise<void> => { snapshot = await call("components_snapshot").catch(() => snapshot); };
   let writes: Promise<void> = Promise.resolve();
   const save = (patch: ConfigPatch): Promise<void> => {
     const job = writes.then(() => persist(patch));
@@ -81,10 +103,11 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
     renderPage();
   };
   function renderPage(): void {
+    if (setupOpen) return;
     generation++; const current = generation; pageDisposers.splice(0).forEach(f=>f());
     const focused = document.activeElement instanceof HTMLElement ? document.activeElement.id : "";
     const scroll = main.scrollTop;
-    const ctx: PageContext = {config,status,lastTranscript,save,report,cleanup:fn=>pageDisposers.push(fn),subscribe(event,handler) {
+    const ctx: PageContext = {config,status,lastTranscript,save,report,openSetup,cleanup:fn=>pageDisposers.push(fn),subscribe(event,handler) {
       void on(event,data=>{if (generation === current && !disposed) handler(data);}).then(off=>{
         if (generation !== current || disposed) off(); else pageDisposers.push(off);
       }).catch(report);
@@ -99,15 +122,19 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   const subscribe = async <K extends keyof Events>(event: K, handler: (data: Events[K])=>void): Promise<void> => {
     const off = await on(event,handler); if (disposed) off(); else disposers.push(off);
   };
-  await subscribe("config",next=>{config = next; theme(); if (!saving) renderPage();});
+  // Closing the window during setup postpones it (Rust side); hide the wizard to match.
+  await subscribe("config",next=>{config = next; theme(); if (setupOpen && next.setup.postponed) closeSetup(); else if (!saving) renderPage();});
   await subscribe("latency",event=>{if (event.text !== undefined) lastTranscript = event.text;});
   const refreshStatus = (): void => { if (refreshTimer !== undefined) return;
     refreshTimer = setTimeout(()=>{refreshTimer = undefined; void call("get_status").then(next=>{
       if (disposed) return; const changed = next.sidecar_alive !== status.sidecar_alive || next.model_available !== status.model_available || next.device !== status.device || next.compute !== status.compute || next.fallback_reason !== status.fallback_reason;
-      status = next; chrome(); if (changed && page === "Engine") renderPage();
+      status = next; chrome(); if (changed && page === "Components") renderPage();
     }).catch(report);},250);
   };
   await subscribe("error",event=>{report(event.message); refreshStatus();});
   await subscribe("state",refreshStatus);
+  await subscribe("components/changed",()=>{ void refreshSnapshot().then(()=>{ chrome(); refreshStatus(); }); });
   theme(); chrome(); renderPage();
+  // First run: open setup automatically unless the user chose "Set up later" before.
+  if (noEngine() && !config.setup.postponed && snapshot?.trust.ok) openSetup();
 }

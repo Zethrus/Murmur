@@ -68,41 +68,91 @@ pub fn companion_pairing_code(
 pub fn companion_revoke_device(state: State<'_, AppState>, id: String) -> Reply<bool> {
     state.companion_network.revoke(&id).map_err(error)
 }
+fn component_error(error: crate::components::ComponentError) -> String {
+    error.message
+}
+/// Everything the setup wizard and the Components page show. Local only: no network.
 #[tauri::command]
-pub async fn list_models(app: AppHandle) -> Reply<Value> {
-    blocking(move || {
-        app.state::<AppState>()
-            .engine
-            .request("models.list", json!({}))
-    })
-    .await
+pub async fn components_snapshot(app: AppHandle) -> Reply<Value> {
+    blocking(move || Ok(app.state::<AppState>().components.snapshot())).await
+}
+/// Queue installs. Called only from an explicit click in Settings.
+#[tauri::command]
+pub fn components_install(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Reply<()> {
+    require_window(&window, "settings")?;
+    state.components.install(&ids).map_err(component_error)
+}
+/// Cancel (discard partial download) or pause (keep it) a queued or running job.
+#[tauri::command]
+pub fn components_stop(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+    pause: bool,
+) -> Reply<()> {
+    require_window(&window, "settings")?;
+    state.components.stop(&id, pause).map_err(component_error)
 }
 #[tauri::command]
-pub async fn install_model(app: AppHandle, name: String) -> Reply<Value> {
-    blocking(move || {
-        let state = app.state::<AppState>();
-        let result = state
-            .engine
-            .request("models.install", json!({"name":name}))?;
-        state.refresh_engine()?;
-        Ok(result)
-    })
-    .await
+pub fn components_resume(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> Reply<()> {
+    require_window(&window, "settings")?;
+    state.components.resume(&id).map_err(component_error)
 }
 #[tauri::command]
-pub async fn remove_model(app: AppHandle, name: String) -> Reply<Value> {
-    blocking(move || {
+pub fn components_discard(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> Reply<()> {
+    require_window(&window, "settings")?;
+    state.components.discard(&id).map_err(component_error)
+}
+#[tauri::command]
+pub async fn components_remove(app: AppHandle, window: WebviewWindow, id: String) -> Reply<()> {
+    require_window(&window, "settings")?;
+    tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        if state.status()?.state != "idle" {
-            anyhow::bail!("Stop dictation before removing a model");
+        if state.status().map(|s| s.state != "idle").unwrap_or(true) {
+            return Err("Stop dictation before removing a component".to_owned());
         }
-        let result = state
-            .engine
-            .request("models.remove", json!({"name":name}))?;
-        state.refresh_engine()?;
-        Ok(result)
+        state.components.remove(&id).map_err(component_error)
     })
     .await
+    .map_err(error)?
+}
+#[tauri::command]
+pub async fn components_verify(app: AppHandle, window: WebviewWindow, id: String) -> Reply<Value> {
+    require_window(&window, "settings")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>()
+            .components
+            .verify(&id)
+            .map(|v| json!({"verdict": v}))
+            .map_err(component_error)
+    })
+    .await
+    .map_err(error)?
+}
+/// Explicit "Check for updates": the only network request outside an install.
+#[tauri::command]
+pub async fn components_check_updates(app: AppHandle, window: WebviewWindow) -> Reply<()> {
+    require_window(&window, "settings")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>()
+            .components
+            .check_updates()
+            .map_err(component_error)
+    })
+    .await
+    .map_err(error)?
 }
 #[tauri::command]
 pub async fn test_engine(app: AppHandle) -> Reply<Value> {
@@ -227,6 +277,7 @@ pub async fn open_path(app: AppHandle, kind: String) -> Reply<()> {
                 .ok_or_else(|| anyhow::anyhow!("Config directory missing"))?,
             "data" | "logs" | "history" => &state.paths.data,
             "models" => &state.paths.models,
+            "components" => &state.components.store.root,
             "enhance_models" => &state.paths.enhance_models,
             _ => anyhow::bail!("Unknown app folder kind"),
         };

@@ -6,7 +6,8 @@ import binascii
 import logging
 import time
 import numpy as np
-from .models import Models
+from pathlib import Path
+from .models import Models, REQUIRED
 from .devices import detect
 
 
@@ -20,6 +21,10 @@ class Speech:
     compute: str = "unloaded"
     cpu_fallback: bool = False
     fallback_reason: str | None = None
+    # Directory verified by the app's component manager. `explicit` means the app sent the
+    # key: then only that directory counts (None = not installed or unverified).
+    model_path: str | None = None
+    explicit: bool = False
     _session: Any = field(default=None, repr=False)
     _key: tuple[str, str, str] | None = None
     _attempted_device: str = "unloaded"
@@ -34,11 +39,28 @@ class Speech:
             raise ValueError("Invalid compute type")
         if model:
             self.models.definition(model)
-        if (model, device, compute) != (self.model, self.requested_device, self.requested_compute):
+        explicit, path = self.explicit, self.model_path
+        if "model_path" in params:
+            path = params["model_path"]
+            if path is not None and (not isinstance(path, str) or not Path(path).is_absolute()):
+                raise ValueError("model_path must be an absolute directory or null")
+            explicit = True
+        if (model, device, compute, path) != (self.model, self.requested_device, self.requested_compute, self.model_path):
             self.unload()
             self.cpu_fallback = False
             self.fallback_reason = None
         self.model, self.requested_device, self.requested_compute = model, device, compute
+        self.model_path, self.explicit = path, explicit
+
+    def available(self) -> bool:
+        if not self.model:
+            return False
+        if self.explicit:
+            return self.model_path is not None and all((Path(self.model_path) / f).is_file() for f in REQUIRED)
+        return self.models.installed(self.model)
+
+    def directory(self) -> Path:
+        return Path(self.model_path) if self.explicit and self.model_path else self.models.path(self.model)
 
     def unload(self) -> None:
         self._session = None
@@ -47,13 +69,13 @@ class Speech:
 
     def status(self) -> dict[str, Any]:
         return {"model": self.model, "device": self.device, "compute": self.compute,
-                "model_available": bool(self.model) and self.models.installed(self.model),
+                "model_available": self.available(),
                 "loaded": self._session is not None, "cpu_fallback": self.cpu_fallback,
                 "fallback_reason": self.fallback_reason if self.requested_device == "auto" else None,
                 "hardware": detect().to_dict()}
 
     def _load(self) -> None:
-        if not self.model or not self.models.installed(self.model):
+        if not self.available():
             raise RuntimeError("Choose a speech model to start dictating")
         device = self.requested_device
         if device == "auto":
@@ -68,7 +90,7 @@ class Speech:
         if key == self._key and self._session is not None:
             return
         from faster_whisper import WhisperModel
-        self._session = WhisperModel(str(self.models.path(self.model)), device=device,
+        self._session = WhisperModel(str(self.directory()), device=device,
                                      compute_type=compute, local_files_only=True)
         self.device, self.compute, self._key = device, compute, key
 
@@ -121,7 +143,7 @@ def _gpu_failure_reason(error: Exception) -> str:
     """Classify failures without leaking paths, prompts, or model content into status."""
     message = str(error).lower()
     if any(name in message for name in ("libcublas", "libcudnn", "libnvrtc")):
-        return "A required CUDA library could not be loaded. Reinstall the desktop package."
+        return "A required CUDA library could not be loaded. Reinstall GPU acceleration in Settings, Components."
     if any(name in message for name in ("driver", "libcuda", "insufficient cuda")):
         return "The NVIDIA driver could not run this CUDA runtime. Check driver compatibility."
-    return "GPU initialization or inference failed. Check the NVIDIA driver and desktop package."
+    return "GPU initialization or inference failed. Check the NVIDIA driver and the GPU acceleration component."

@@ -32,7 +32,8 @@ class Server:
         if method == "models.list":
             return self.models.list()
         if method == "models.install":
-            return self.models.install(params["name"], self.emit)
+            # Downloads are the app's job (signed manifest, pinned hashes); never here.
+            return self.models.install(params.get("name", ""))
         if method == "models.remove":
             if params["name"] == self.speech.model:
                 self.speech.unload()

@@ -113,3 +113,46 @@ h1 { margin: 0; font-size: var(--page-title-size); line-height: var(--page-title
 .enhance-consent .hint { margin: 0; }
 .card > .button-group { padding: var(--card-note-inset); }
 .card > .field-error[data-tone="ok"] { color: var(--text-muted); }
+
+/* First-run setup: a full-window layer over the Settings shell. */
+.setup-layer { height: var(--viewport-height); overflow: auto; background: var(--bg); }
+.setup { max-width: var(--setup-max-w); margin-inline: auto; padding: var(--setup-inset); display: flex; flex-direction: column; gap: var(--setup-gap); }
+.setup-title { font-size: var(--setup-title-size); }
+.setup-title:focus { outline: none; }
+.setup-title:focus-visible { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
+.setup-lead { font-size: var(--setup-lead-size); margin: 0; }
+.setup-points { margin: 0; padding: var(--setup-points-inset); display: flex; flex-direction: column; gap: var(--gap-sm); color: var(--text-muted); }
+.setup-body { display: flex; flex-direction: column; gap: var(--setup-gap); }
+.setup-footer { display: flex; gap: var(--gap-sm); justify-content: flex-end; flex-wrap: wrap; border-top: var(--card-border); padding: var(--card-note-inset); padding-top: var(--gap-lg); }
+.setup-status { margin: 0; color: var(--text-muted); min-height: var(--notice-h); }
+.setup-status:empty { display: none; }
+.setup-toggle { display: flex; align-items: center; justify-content: space-between; gap: var(--gap-md); }
+.choice-group { border: none; margin: 0; padding: var(--space-none); display: flex; flex-direction: column; gap: var(--choice-gap); min-width: 0; }
+.choice-legend { font-weight: var(--row-label-weight); margin-bottom: var(--gap-sm); padding: var(--space-none); }
+.choice-card { display: flex; gap: var(--gap-md); align-items: flex-start; padding: var(--choice-inset); border: var(--card-border); border-radius: var(--choice-radius); background: var(--surface); cursor: pointer; transition: border-color var(--control-motion), background var(--control-motion); }
+.choice-card:hover { border-color: var(--accent); }
+.choice-card[data-selected="true"] { border-color: var(--accent); background: var(--nav-active-bg); }
+.choice-card:has(.choice-input:focus-visible) { outline: var(--focus-ring); outline-offset: var(--focus-offset); }
+.choice-input { accent-color: var(--accent); margin-top: var(--gap-xs); flex-shrink: 0; }
+.choice-copy { display: flex; flex-direction: column; gap: var(--gap-xs); min-width: 0; }
+.choice-title { display: flex; gap: var(--gap-sm); align-items: center; flex-wrap: wrap; font-size: var(--choice-title-size); font-weight: var(--row-label-weight); }
+.choice-title .badge { color: var(--accent); }
+.summary-list { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--summary-gap); margin: 0; }
+.summary-list dt { color: var(--text); }
+.summary-list dd { margin: 0; color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
+.summary-totals { border-top: var(--card-border); padding-top: var(--gap-md); }
+.summary-totals dt { font-weight: var(--row-label-weight); }
+.setup-progress { display: flex; flex-direction: column; gap: var(--gap-xs); }
+.setup-progress .progress-block { padding: var(--space-none); }
+/* Components page. */
+.component-list { display: flex; flex-direction: column; }
+.component-row { display: flex; flex-direction: column; gap: var(--component-gap); padding: var(--component-inset); border-top: var(--card-border); min-width: 0; }
+.component-row p { margin: 0; }
+.component-head { display: flex; gap: var(--gap-sm); align-items: center; justify-content: space-between; }
+.component-title { margin: 0; font-size: var(--model-title-size); font-weight: var(--row-label-weight); overflow-wrap: anywhere; }
+.component-row .progress-block { padding: var(--space-none); }
+.model-grid .component-row { border: var(--card-border); border-radius: var(--model-card-radius); background: var(--surface-raised); }
+.model-grid .component-row[data-state="active"] { border-color: var(--accent); background: var(--nav-active-bg); }
+.badge[data-state="active"], .badge[data-state="installed"] { color: var(--ok); }
+.badge[data-state="failed"], .badge[data-state="corrupt"], .badge[data-state="unverified"] { color: var(--danger); }
+.card > .component-list > .hint, .card > .component-list > .empty { padding: var(--card-note-inset); }

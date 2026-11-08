@@ -18,11 +18,11 @@ _DLL_DIRECTORIES: list[Any] = []
 
 
 def configure_environment(environ: MutableMapping[str, str] = os.environ) -> None:
-    """Offline by default; model installs opt in per request (models.explicit_network)."""
+    """Always offline: the app downloads and verifies models; the engine never does."""
     environ["HF_HUB_OFFLINE"] = "1"
     environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
     environ["DO_NOT_TRACK"] = "1"
-    # The frozen engine omits hf_xet; use the plain HTTPS download path everywhere.
+    # The frozen engine omits hf_xet; keep huggingface_hub from looking for it.
     environ["HF_HUB_DISABLE_XET"] = "1"
 
 

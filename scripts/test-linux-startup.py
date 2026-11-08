@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Verify manual/login launches on a private X11 display and D-Bus session."""
+"""Verify manual/login launches on a private X11 display and D-Bus session.
+
+Without --components the app must run with no speech engine (setup pending, no engine
+process, no respawn loop). With --components the engine component is installed into the
+throwaway profile first, through the app's own verifier, and must be the one that starts.
+"""
 import argparse
 import os
 from pathlib import Path
@@ -7,6 +12,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import linux_components
 
 BUS_CONFIG = '''<busconfig>
 <type>session</type><listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth>
@@ -24,13 +30,13 @@ def visible_settings():
 
 
 def launch_timeout(executable):
-    # Extract-and-run unpacks the engine and cuBLAS on every invocation,
-    # including second-instance launches. Keep the extracted-app check tight.
-    return 180 if executable.suffix == '.AppImage' else 25
+    # Extract-and-run unpacks the AppImage on every invocation, including
+    # second-instance launches. Keep the extracted-app check tight.
+    return 90 if executable.suffix == '.AppImage' else 25
 
 
 def engine_running(session):
-    """True once the packaged onedir engine runs inside the app's session."""
+    """True once the engine component runs inside the app's session."""
     for stat in Path('/proc').glob('[0-9]*/stat'):
         try:
             fields = stat.read_text().rsplit(')', 1)[1].split()
@@ -38,7 +44,7 @@ def engine_running(session):
         except (OSError, IndexError):
             continue
         # Fields after the command name: state, ppid, pgrp, session, ...
-        if int(fields[3]) == session and command.endswith(b'/lib/murmur/engine/murmur-engine'):
+        if int(fields[3]) == session and b'/components/engine/' in command and command.endswith(b'/murmur-engine'):
             return True
     return False
 
@@ -54,7 +60,7 @@ def wait_for(condition, app, message, timeout=25):
     raise AssertionError(message)
 
 
-def exercise(executable, background):
+def exercise(executable, background, components=None):
     timeout = launch_timeout(executable)
     with tempfile.TemporaryDirectory(prefix='murmur-startup-') as directory:
         profile = Path(directory)
@@ -65,6 +71,10 @@ def exercise(executable, background):
                'XDG_DATA_HOME': str(profile / 'data'),
                'XDG_CACHE_HOME': str(profile / 'cache'),
                'XDG_RUNTIME_DIR': str(runtime)}
+        if components:
+            env = {**linux_components.environment(profile, components, env), 'XDG_RUNTIME_DIR': str(runtime)}
+            engine_zip, = Path(components).glob('murmur-engine-linux-x86_64-*.zip')
+            linux_components.install(executable, components, engine_zip, env)
         # Exercise migration of a pre-0.4.3 login entry, not just new installs.
         entry = profile / 'config/autostart/murmur.desktop'
         legacy = profile / '.config/autostart/Murmur.desktop'
@@ -97,8 +107,17 @@ def exercise(executable, background):
                 else:
                     wait_for(visible_settings, app, 'Manual launch did not open Settings', timeout)
                     assert not entry.exists() and not legacy.exists(), 'Disabled autostart entries remain'
-                    wait_for(lambda: engine_running(app.pid), app, 'Packaged speech engine did not start', timeout)
-                print(('Login, autostart migration, and manual relaunch' if background else 'Manual launch and engine') + ': passed', flush=True)
+                    if components:
+                        wait_for(lambda: engine_running(app.pid), app, 'Engine component did not start', timeout)
+                    else:
+                        # No engine: the app keeps running, reports it once and never respawns.
+                        time.sleep(6)
+                        assert app.poll() is None, 'Murmur exited without an engine'
+                        assert not engine_running(app.pid)
+                        log = (profile / 'data/murmur/murmur.log').read_text()
+                        assert log.count('Speech engine not installed') == 1, log[-2000:]
+                print(('Login, autostart migration, and manual relaunch' if background else
+                       'Manual launch with engine component' if components else 'Manual launch without engine') + ': passed', flush=True)
             except Exception:
                 log.flush()
                 print((profile / 'stderr.log').read_text(), flush=True)
@@ -121,19 +140,24 @@ def exercise(executable, background):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('executable', type=Path)
+    parser.add_argument('--components', type=Path, help='install the engine component from this release directory first')
     parser.add_argument('--session', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     executable = args.executable.resolve()
+    components = args.components.resolve() if args.components else None
     if args.session:
         exercise(executable, False)
+        if components:
+            exercise(executable, False, components)
         exercise(executable, True)
     else:
         with tempfile.TemporaryDirectory(prefix='murmur-startup-bus-') as directory:
             config = Path(directory) / 'session.conf'
             config.write_text(BUS_CONFIG)
             subprocess.run(['xvfb-run', '-a', 'dbus-run-session', '--config-file=' + str(config),
-                            'python3', str(Path(__file__).resolve()), str(executable), '--session'],
-                           check=True, timeout=5 * launch_timeout(executable) + 60)
+                            'python3', str(Path(__file__).resolve()), str(executable), '--session',
+                            *(['--components', str(components)] if components else [])],
+                           check=True, timeout=6 * launch_timeout(executable) + 120)
 
 
 if __name__ == '__main__':

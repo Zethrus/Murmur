@@ -4,6 +4,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -88,46 +89,59 @@ class EngineStagingTests(unittest.TestCase):
             (engine / "murmur-engine").write_bytes(b"onefile")
             (engine / "murmur-engine").chmod(0o755)
             with self.assertRaisesRegex(RuntimeError, "Not a onedir"):
-                bundle.stage_engine(engine, Path(temporary) / "out")
+                bundle.check_engine(engine)
 
 
-class DebianRuntimeTests(unittest.TestCase):
-    def test_engine_and_cuda_move_to_usr_lib_and_are_traversable(self):
+class ComponentZipTests(unittest.TestCase):
+    def tree(self, root):
+        (root / "_internal/pkg.libs").mkdir(parents=True)
+        (root / "murmur-engine").write_bytes(b"engine")
+        (root / "murmur-engine").chmod(0o755)
+        (root / "_internal/pkg.libs/libx.so.1").write_bytes(b"library")
+        (root / "_internal/pkg.libs/libx.so.1").chmod(0o644)
+        # PyInstaller's convenience link to a file inside the tree.
+        (root / "_internal/libx.so.1").symlink_to("pkg.libs/libx.so.1")
+
+    def test_zip_is_deterministic_keeps_modes_and_drops_internal_links(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            # Mirror AppImage extraction under mktemp: private directories.
-            appdir = root / "squashfs-root"
-            engine = appdir / bundle.ENGINE
-            (engine / "_internal").mkdir(parents=True)
-            (engine / "murmur-engine").write_bytes(b"engine")
-            (engine / "murmur-engine").chmod(0o755)
-            cuda = appdir / bundle.CUDA
-            cuda.mkdir(parents=True)
-            (cuda / "libcublas.so.12").write_bytes(b"cublas")
-            (cuda / "libcublas.so.12").chmod(0o644)
-            notices = appdir / bundle.DOC
-            notices.mkdir(parents=True)
-            (notices / "nvidia-cublas-cu12.License.txt").write_text("notice")
-            (notices / "cuda-manifest.json").write_text("{}")
-            (notices / "xdotool.copyright").write_text("AppImage only")
-            for directory in (appdir, *(p for p in appdir.rglob("*") if p.is_dir())):
-                directory.chmod(0o700)
-            package_dir = root / "deb"
+            self.tree(root / "engine")
+            first = bundle.write_zip(root / "engine", root / "a.zip")
+            second = bundle.write_zip(root / "engine", root / "b.zip")
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            with zipfile.ZipFile(first) as archive:
+                infos = {info.filename: info for info in archive.infolist()}
+                self.assertEqual(set(infos), {"murmur-engine", "_internal/pkg.libs/libx.so.1"})
+                self.assertEqual(infos["murmur-engine"].external_attr >> 16, 0o100755)
+                self.assertEqual(infos["_internal/pkg.libs/libx.so.1"].external_attr >> 16, 0o100644)
+                self.assertTrue(all(i.compress_type == zipfile.ZIP_LZMA for i in infos.values()))
+                self.assertEqual(archive.read("murmur-engine"), b"engine")
+
+    def test_escaping_or_dangling_links_fail(self):
+        for target in ("/etc/passwd", "missing.so"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.tree(root / "engine")
+                (root / "engine/_internal/bad.so").symlink_to(target)
+                with self.assertRaisesRegex(RuntimeError, "Unsupported link"):
+                    bundle.write_zip(root / "engine", root / "a.zip")
+
+
+class DebianPackageTests(unittest.TestCase):
+    def test_deb_holds_only_the_app_with_traversable_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package_dir = Path(temporary) / "deb"
             (package_dir / "usr/bin").mkdir(parents=True)
+            (package_dir / "usr/share/applications").mkdir(parents=True)
             (package_dir / "DEBIAN").mkdir()
             (package_dir / "usr/bin/murmur").write_bytes(b"tauri binary")
-            bundle.install_debian_runtime(appdir, package_dir)
-            lib = package_dir / "usr/lib/murmur"
-            for directory in (lib, *(p for p in lib.rglob("*") if p.is_dir())):
+            for directory in (p for p in package_dir.rglob("*") if p.is_dir()):
+                directory.chmod(0o700)
+            bundle.finish_debian(package_dir)
+            for directory in (p for p in (package_dir / "usr").rglob("*") if p.is_dir()):
                 self.assertEqual(directory.stat().st_mode & 0o777, 0o755, directory)
-            self.assertEqual((lib / "engine/murmur-engine").stat().st_mode & 0o777, 0o755)
-            self.assertEqual((lib / "cuda/libcublas.so.12").stat().st_mode & 0o777, 0o644)
-            self.assertEqual((package_dir / "usr/bin/murmur").read_bytes(), b"tauri binary")
-            self.assertFalse((package_dir / "opt").exists())
-            shipped = {p.name for p in (package_dir / bundle.DOC).iterdir()}
-            self.assertEqual(shipped, {"nvidia-cublas-cu12.License.txt", "cuda-manifest.json"})
+            self.assertFalse((package_dir / "usr/lib/murmur").exists())
             sums = (package_dir / "DEBIAN/md5sums").read_text()
-            self.assertIn("usr/lib/murmur/engine/murmur-engine", sums)
             self.assertIn("usr/bin/murmur", sums)
             self.assertNotIn("DEBIAN", sums)
 

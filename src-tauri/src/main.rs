@@ -6,6 +6,7 @@ mod autostart;
 #[cfg(test)]
 mod coding_tests;
 mod companion;
+mod components;
 mod config;
 mod controller;
 mod engine;
@@ -144,6 +145,9 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         enabled,
     })?;
     state.start()?;
+    // Adopt pre-0.5 models whose hashes match the manifest; local hashing only.
+    let migrating = state.components.clone();
+    std::thread::Builder::new().name("murmur-migrate".into()).spawn(move || migrating.migrate())?;
     if show_settings_on_launch(std::env::args_os()) {
         platform::open_settings(&handle)?;
     }
@@ -159,7 +163,43 @@ fn show_settings_on_launch(args: impl IntoIterator<Item = impl AsRef<std::ffi::O
         .any(|arg| arg.as_ref() == "--background")
 }
 
+/// Hidden test/maintenance entry point, no window:
+/// `murmur --install-component <zip|model dir> --manifest <json> --manifest-sig <sig> [--trust-root <asc>]`.
+/// Uses the same verification as the app; a development trust root needs a debug build or
+/// MURMUR_DEV_TRUST_ROOT_ACK (see components::trust).
+fn install_component_cli(args: &[std::ffi::OsString]) -> Option<i32> {
+    let position = args.iter().position(|a| a == "--install-component")?;
+    let value = |flag: &str| {
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from)
+    };
+    let (Some(path), Some(manifest), Some(signature)) = (args.get(position + 1).map(std::path::PathBuf::from), value("--manifest"), value("--manifest-sig")) else {
+        eprintln!("usage: murmur --install-component <zip|dir> --manifest <json> --manifest-sig <sig> [--trust-root <asc>]");
+        return Some(2);
+    };
+    if let Some(root) = value("--trust-root") {
+        std::env::set_var(components::trust::DEV_TRUST_ROOT_ENV, root);
+    }
+    let _ = tracing_subscriber::fmt().with_writer(std::io::stderr).try_init();
+    let result = platform::Paths::discover()
+        .map_err(|e| e.to_string())
+        .and_then(|paths| components::install_from_files(&paths.data, &path, &manifest, &signature).map_err(|e| e.message));
+    match result {
+        Ok(id) => {
+            println!("{}", serde_json::json!({"installed": id}));
+            Some(0)
+        }
+        Err(message) => {
+            eprintln!("Component install failed: {message}");
+            Some(1)
+        }
+    }
+}
+
 fn main() {
+    let args: Vec<_> = std::env::args_os().collect();
+    if let Some(code) = install_component_cli(&args) {
+        std::process::exit(code);
+    }
     let application = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if show_settings_on_launch(args) {
@@ -187,6 +227,13 @@ fn main() {
                     if let Err(error) = window.hide() {
                         tracing::warn!(%error, "Hide settings");
                     }
+                    // Closing the window during first-run setup means "Set up later".
+                    let app = window.app_handle().clone();
+                    let _ = std::thread::Builder::new().name("murmur-setup-postpone".into()).spawn(move || {
+                        if let Some(state) = app.try_state::<app::AppState>() {
+                            state.postpone_setup_if_pending();
+                        }
+                    });
                 }
             }
         })
@@ -200,9 +247,14 @@ fn main() {
             ipc::companion_network_status,
             ipc::companion_pairing_code,
             ipc::companion_revoke_device,
-            ipc::list_models,
-            ipc::install_model,
-            ipc::remove_model,
+            ipc::components_snapshot,
+            ipc::components_install,
+            ipc::components_stop,
+            ipc::components_resume,
+            ipc::components_discard,
+            ipc::components_remove,
+            ipc::components_verify,
+            ipc::components_check_updates,
             ipc::test_engine,
             ipc::list_devices,
             ipc::set_hotkey,

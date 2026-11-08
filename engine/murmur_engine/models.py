@@ -1,10 +1,14 @@
-"""Explicit installs only. A completion marker distinguishes usable downloads."""
-from contextlib import contextmanager
+"""Speech model catalog and pre-0.5 on-disk lookup.
+
+Since 0.5 the app downloads, verifies and stores speech models itself (component manager)
+and passes the verified directory as `model_path`. The engine never downloads anything.
+"""
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
-import os
+from typing import Any
 import shutil
+
+REQUIRED = ("model.bin", "config.json", "tokenizer.json")
 
 
 @dataclass(frozen=True)
@@ -27,24 +31,6 @@ def catalog() -> tuple[Model, ...]:
     )
 
 
-@contextmanager
-def explicit_network() -> Iterator[None]:
-    # huggingface_hub caches the offline flag at import, so update both forms.
-    from huggingface_hub import constants
-    previous = os.environ.get("HF_HUB_OFFLINE")
-    old_constant = constants.HF_HUB_OFFLINE
-    os.environ["HF_HUB_OFFLINE"] = "0"
-    constants.HF_HUB_OFFLINE = False
-    try:
-        yield
-    finally:
-        constants.HF_HUB_OFFLINE = old_constant
-        if previous is None:
-            os.environ["HF_HUB_OFFLINE"] = "1"
-        else:
-            os.environ["HF_HUB_OFFLINE"] = previous
-
-
 @dataclass
 class Models:
     directory: Path
@@ -65,35 +51,13 @@ class Models:
 
     def installed(self, name: str) -> bool:
         path = self.path(name)
-        return all((path / item).is_file() for item in (".complete", "model.bin", "config.json", "tokenizer.json"))
+        return all((path / item).is_file() for item in (".complete", *REQUIRED))
 
     def list(self) -> list[dict[str, Any]]:
         return [dict(asdict(item), installed=self.installed(item.name)) for item in catalog()]
 
-    def install(self, name: str, emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
-        model, path = self.definition(name), self.path(name)
-        if self.installed(name):
-            return {"name": name, "installed": True}
-        path.mkdir(parents=True, exist_ok=True)
-        emit({"event": "download", "name": name, "phase": "starting", "progress": 0})
-        from huggingface_hub import hf_hub_download, list_repo_files
-        try:
-            with explicit_network():
-                files = [item for item in list_repo_files(model.repo) if item in
-                         ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt", "vocabulary.json", "preprocessor_config.json")]
-                required = {"model.bin", "config.json", "tokenizer.json"}
-                if not required.issubset(files):
-                    raise RuntimeError("Model repository is missing required inference files")
-                for index, filename in enumerate(files):
-                    hf_hub_download(repo_id=model.repo, filename=filename, local_dir=str(path), local_files_only=False)
-                    emit({"event": "download", "name": name, "phase": "downloading",
-                          "file": filename, "progress": (index + 1) / len(files)})
-            (path / ".complete").write_text("1\n", encoding="utf-8")
-        except Exception:
-            emit({"event": "download", "name": name, "phase": "error"})
-            raise
-        emit({"event": "download", "name": name, "phase": "complete", "progress": 1})
-        return {"name": name, "installed": True}
+    def install(self, name: str, emit: Any = None) -> dict[str, Any]:
+        raise RuntimeError("Speech model installs are managed by the Murmur app")
 
     def remove(self, name: str) -> dict[str, Any]:
         path = self.path(name)

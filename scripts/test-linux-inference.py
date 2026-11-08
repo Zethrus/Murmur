@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Offline artifact inference and library-origin gate on a trusted Linux GPU host."""
+"""Offline artifact inference and library-origin gate on a trusted Linux GPU host.
+
+The engine, the CUDA add-on and the speech model are installed from the release components
+into a throwaway data directory by the app's own verifier (linux_components), then the
+installed engine runs the full GPU precision x VAD matrix with only the add-on's cuBLAS on
+the loader path, Auto on GPU, and CPU with the GPU hidden.
+"""
 import argparse
 import base64
 import hashlib
@@ -15,9 +21,8 @@ import tempfile
 import time
 import wave
 
-from linux_cuda_runtime import CUDA, REQUIRED, sha256, verify
-
-ENGINE = Path("usr/lib/murmur/engine/murmur-engine")
+import linux_components
+from linux_cuda_runtime import REQUIRED, sha256
 # Every GPU precision Murmur offers, with Silero VAD on and off.
 MATRIX = [(compute, vad) for compute in ("int8_float16", "float16", "float32", "int8") for vad in (False, True)]
 
@@ -70,7 +75,7 @@ def loaded_libraries(pid):
     return sorted(paths)
 
 
-def run_engine(engine, models, model, pcm, library_path, device, runs, home, hidden=False, matrix=()):
+def run_engine(engine, model_path, model, pcm, library_path, device, runs, home, hidden=False, matrix=()):
     env = {key: value for key, value in os.environ.items()
            if key not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH", "CUDA_HOME", "CUDA_PATH")}
     env.update(HOME=str(home), XDG_CACHE_HOME=str(home / "cache"),
@@ -81,7 +86,7 @@ def run_engine(engine, models, model, pcm, library_path, device, runs, home, hid
     else:
         env.pop("CUDA_VISIBLE_DEVICES", None)
     launched = time.perf_counter()
-    process = subprocess.Popen([str(engine), "--models-dir", str(models)], env=env,
+    process = subprocess.Popen([str(engine), "--models-dir", str(home / "no-legacy-models")], env=env,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, bufsize=1, start_new_session=True)
     number = 0
@@ -103,14 +108,14 @@ def run_engine(engine, models, model, pcm, library_path, device, runs, home, hid
         return reply["result"]
 
     try:
-        params = {"model": model, "device": device, "compute_type": "auto",
+        params = {"model": model, "model_path": str(model_path), "device": device, "compute_type": "auto",
                   "pcm_b64": pcm, "sample_rate": 16000, "beam_size": 1, "vad": False}
         first = request("transcribe", params)
         startup_ms = round((time.perf_counter() - launched) * 1000, 2)
         if not first["text"].strip():
             raise RuntimeError(f"{device} fixture produced no transcript")
         times = [request("transcribe", params)["infer_ms"] for _ in range(runs)]
-        status = request("status", {"model": model, "device": device, "compute_type": "auto"})
+        status = request("status", {"model": model, "model_path": str(model_path), "device": device, "compute_type": "auto"})
         combinations = []
         for compute, vad in matrix:
             reply = request("transcribe", dict(params, compute_type=compute, vad=vad))
@@ -180,41 +185,42 @@ print(json.dumps(paths))
     return paths
 
 
-def check(artifacts, models, model, fixture, runs, baseline_engine=None, baseline_libraries=None):
+def check(artifacts, components, models, model, fixture, runs, baseline_engine=None, baseline_libraries=None):
     image, = artifacts.glob("*.AppImage")
     with tempfile.TemporaryDirectory(prefix="murmur inference ") as temporary:
         work = Path(temporary)
         subprocess.run([str(image), "--appimage-extract"], cwd=work, check=True, stdout=subprocess.DEVNULL)
-        appdir = work / "squashfs-root"
-        verify(appdir)
-        engine = appdir / ENGINE
+        app = work / "squashfs-root/usr/bin/murmur"
+        env = linux_components.environment(work / "profile", components)
+        installed = linux_components.install_release(app, components, env, [models / model])
+        engine, cuda, model_path = installed["engine"] / "murmur-engine", installed["cuda"], installed[f"speech-{model}"]
         _engine_gate()(engine.parent)
-        cuda = appdir / CUDA
-        search = os.pathsep.join((str(cuda), str(appdir / "usr/lib")))
+        search = str(cuda)
         pcm = fixture_pcm(fixture)
-        # Forced CUDA sees only the shipped cuBLAS directory: proves nothing else is needed.
-        gpu = run_engine(engine, models, model, pcm, str(cuda), "cuda", runs, work / "gpu", matrix=MATRIX)
+        # Forced CUDA sees only the add-on's cuBLAS directory: proves nothing else is needed.
+        gpu = run_engine(engine, model_path, model, pcm, str(cuda), "cuda", runs, work / "gpu", matrix=MATRIX)
         if gpu["status"]["device"] != "cuda" or gpu["status"]["cpu_fallback"]:
             raise RuntimeError(f"Forced CUDA did not remain on GPU: {gpu['status']}")
         check_origin(gpu, cuda)
         runtime_probe = probe_runtime_origin(cuda)
-        auto = run_engine(engine, models, model, pcm, search, "auto", 1, work / "auto")
+        auto = run_engine(engine, model_path, model, pcm, search, "auto", 1, work / "auto")
         if auto["status"]["device"] != "cuda" or auto["status"]["cpu_fallback"]:
             raise RuntimeError(f"Auto did not use GPU: {auto['status']}")
-        cpu = run_engine(engine, models, model, pcm, str(appdir / "usr/lib"), "cpu", 1, work / "cpu", True)
+        cpu = run_engine(engine, model_path, model, pcm, "", "cpu", 1, work / "cpu", True)
         if cpu["status"]["device"] != "cpu" or cpu["status"]["fallback_reason"]:
             raise RuntimeError(f"Explicit CPU failed: {cpu['status']}")
-        cpu_auto = run_engine(engine, models, model, pcm, str(appdir / "usr/lib"), "auto", 1, work / "cpu-auto", True)
+        cpu_auto = run_engine(engine, model_path, model, pcm, "", "auto", 1, work / "cpu-auto", True)
         if cpu_auto["status"]["device"] != "cpu" or cpu_auto["status"]["fallback_reason"]:
             raise RuntimeError(f"CPU-only Auto failed: {cpu_auto['status']}")
         baseline = None
         if baseline_engine:
-            baseline = run_engine(baseline_engine, models, model, pcm, baseline_libraries,
+            baseline = run_engine(baseline_engine, model_path, model, pcm, baseline_libraries,
                                   "cuda", runs, work / "baseline")
             limit = baseline["warm_median_ms"] * 1.2 + 100
             if gpu["warm_median_ms"] > limit:
                 raise RuntimeError(f"Packaged GPU median {gpu['warm_median_ms']} ms exceeds baseline limit {limit} ms")
-        assets = {path.name: sha256(path) for path in artifacts.iterdir() if path.is_file() and path.name != "GPU-VALIDATION.json"}
+        assets = {path.name: sha256(path) for directory in (artifacts, components) for path in directory.iterdir()
+                  if path.is_file() and path.name not in ("GPU-VALIDATION.json", linux_components.SIGNATURE, linux_components.CERTIFICATE)}
         return {"assets": assets, "model": model, "fixture_sha256": sha256(fixture),
                 "origin_validated": True, "runtime_probe": runtime_probe,
                 "gpu": gpu, "auto": auto, "cpu": cpu, "cpu_auto": cpu_auto,
@@ -225,7 +231,8 @@ def check(artifacts, models, model, fixture, runs, baseline_engine=None, baselin
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts", type=Path, required=True)
-    parser.add_argument("--models-dir", type=Path, required=True)
+    parser.add_argument("--components", type=Path, required=True, help="component zips, manifest, signature and certificate")
+    parser.add_argument("--models-dir", type=Path, required=True, help="offline staged models, verified against the manifest on install")
     parser.add_argument("--model", default="distil-small.en")
     parser.add_argument("--fixture", type=Path, default=Path(__file__).parent / "tests/jfk-3s.wav")
     parser.add_argument("--runs", type=int, default=10)
@@ -234,7 +241,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.runs < 1 or bool(args.baseline_engine) != bool(args.baseline_libraries):
         parser.error("runs must be positive; baseline engine and libraries must be paired")
-    report = check(args.artifacts.resolve(), args.models_dir.resolve(), args.model,
+    report = check(args.artifacts.resolve(), args.components.resolve(), args.models_dir.resolve(), args.model,
                    args.fixture.resolve(), args.runs, args.baseline_engine, args.baseline_libraries)
     path = args.artifacts / "GPU-VALIDATION.json"
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
