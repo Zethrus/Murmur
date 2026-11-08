@@ -33,6 +33,8 @@ try {
         [Environment]::SetEnvironmentVariable($Flag, 'OFF', 'Process')
     }
     if (-not $env:CMAKE_BUILD_PARALLEL_LEVEL) { $env:CMAKE_BUILD_PARALLEL_LEVEL = '2' }
+    # The CPU audit reads llama.cpp flags from build.ninja (Visual Studio projects are not audited).
+    if (-not $env:CMAKE_GENERATOR) { $env:CMAKE_GENERATOR = 'Ninja' }
     if (-not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = '2' }
     Invoke-Native 'node' @('-e', "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)")
     $env:TMP = Join-Path $Root '.cache\tmp'

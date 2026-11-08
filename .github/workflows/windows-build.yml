@@ -49,6 +49,9 @@ jobs:
       PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
       PYINSTALLER_CONFIG_DIR: ${{ github.workspace }}/.cache/pyinstaller
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      # Ninja (bundled with Visual Studio) instead of the default Visual Studio generator: the
+      # CPU audit reads llama.cpp's compiler flags from build.ninja; .vcxproj files are not audited.
+      CMAKE_GENERATOR: Ninja
       CARGO_BUILD_JOBS: '2'
       PYTHONUTF8: '1'
     steps:

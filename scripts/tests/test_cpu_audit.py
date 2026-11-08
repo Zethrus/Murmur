@@ -173,6 +173,18 @@ class AuditTests(unittest.TestCase):
             flags = cache.parent / 'flags.make'
             flags.write_text('CXX_FLAGS = /arch:AVX2 /O2 /EHsc')
             self.assertEqual(audit.audit_cache(cache, windows=True), 1)
+            # MSVC caches have no FMA, F16C or AMX entries (ggml declares them only for
+            # non-MSVC); accepted on Windows, still required elsewhere.
+            msvc = '\n'.join(line for line in CONTRACT.splitlines()
+                              if not line.startswith(('GGML_FMA:', 'GGML_F16C:', 'GGML_AMX')))
+            cache.write_text(msvc)
+            self.assertEqual(audit.audit_cache(cache, windows=True), 1)
+            with self.assertRaisesRegex(ValueError, 'GGML_FMA must be ON'):
+                audit.audit_cache(cache, windows=False)
+            cache.write_text(msvc + '\nGGML_FMA:BOOL=OFF')
+            with self.assertRaisesRegex(ValueError, 'GGML_FMA must be ON'):
+                audit.audit_cache(cache, windows=True)
+            cache.write_text(CONTRACT)
             flags.write_text('CXX_FLAGS = /arch:AVX512')
             with self.assertRaisesRegex(ValueError, 'unsupported CPU flag'):
                 audit.audit_cache(cache, windows=True)

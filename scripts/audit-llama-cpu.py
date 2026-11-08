@@ -13,6 +13,8 @@ import shlex
 import sys
 
 BASELINE_ON = ("GGML_AVX", "GGML_AVX2", "GGML_FMA", "GGML_F16C", "GGML_BMI2", "GGML_SSE42")
+# Options ggml's CMakeLists only declares `if (NOT MSVC)`.
+MSVC_IMPLIED = ("GGML_FMA", "GGML_F16C")
 BASELINE_OFF = (
     "GGML_NATIVE", "GGML_AVX512", "GGML_AVX512_BF16", "GGML_AVX512_VBMI",
     "GGML_AVX512_VNNI", "GGML_AVX_VNNI", "GGML_CPU_ALL_VARIANTS",
@@ -183,10 +185,16 @@ def audit_cache(cache, windows=False):
     lines = cache.read_text().splitlines()
     values = dict(line.split(":BOOL=", 1) for line in lines if ":BOOL=" in line)
     for name in BASELINE_ON:
+        # ggml does not define FMA/F16C for MSVC: /arch:AVX2 (checked below) implies them.
+        if windows and name in MSVC_IMPLIED and name not in values:
+            continue
         if values.get(name) != "ON":
             raise ValueError(f"{cache}: {name} must be ON, got {values.get(name)!r}")
     disabled = set(BASELINE_OFF) | {name for name in values if name.startswith(("GGML_AVX512", "GGML_AMX"))}
     for name in sorted(disabled):
+        # Nor the AMX options (MSVC cannot build AMX); absent there means not built.
+        if windows and name.startswith("GGML_AMX") and name not in values:
+            continue
         if values.get(name) != "OFF":
             raise ValueError(f"{cache}: {name} must be OFF, got {values.get(name)!r}")
     files = [p for pattern in ('flags.make', 'compile_commands.json', 'build.ninja')
