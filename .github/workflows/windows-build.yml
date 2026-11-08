@@ -68,7 +68,7 @@ jobs:
           Set-ItemProperty -Path $Key -Name ExecutionPolicy -Value RemoteSigned
           & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command 'Get-ExecutionPolicy -List'
 
-      - name: Prefer Git Bash over the WSL launcher for `shell: bash`
+      - name: Prefer Git Bash over the WSL launcher for bash steps
         # The runner resolves `bash` through PATH. On a machine with WSL enabled that finds
         # C:\Windows\System32\bash.exe (the WSL launcher) first, which cannot run under the
         # service user and exits without output. winget's Git adds only Git\cmd to PATH.
