@@ -165,7 +165,12 @@ def audit_flags(text, origin, seen):
     stripped = re.sub(r'(?:-Xclang\s+)?-target-feature\s+(?:-Xclang\s+)?[+-][\w.-]+', '', text)
     if re.search(r'(?<![\w-])(?:-Xclang|-target-feature|-mattr=|-target-cpu=|/clang:)', stripped):
         raise ValueError(f"{origin}: unsupported compiler feature arguments")
+    unsupported = []
     for match in CPU_SWITCH.finditer(text):
+        # Upper-case -M switches are never CPU flags: GCC/Clang dependency output (-MD, -MT,
+        # -MF) and MSVC runtime selection (-MD, -MT, -MDd); CPU switches are lower-case -m.
+        if match.group(0).startswith("-M"):
+            continue
         flag = match.group(0).lower()
         if flag.startswith('-m') and not flag.startswith(('-march=', '-mcpu=')):
             if flag[2:] in ALLOWED_M or flag.startswith('-mtune='):
@@ -177,7 +182,11 @@ def audit_flags(text, origin, seen):
             # MSVC spells the same baseline switch differently; ggml emits it for GGML_AVX2.
             baseline = True
             continue
-        raise ValueError(f"{origin}: unsupported CPU flag {flag}")
+        if flag not in unsupported:
+            unsupported.append(flag)
+    if unsupported:
+        # Every offending flag at once: a Windows CI round trip costs most of an hour.
+        raise ValueError(f"{origin}: unsupported CPU flag {', '.join(unsupported)}")
     return baseline
 
 

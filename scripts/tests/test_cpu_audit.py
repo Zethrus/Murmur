@@ -173,6 +173,13 @@ class AuditTests(unittest.TestCase):
             flags = cache.parent / 'flags.make'
             flags.write_text('CXX_FLAGS = /arch:AVX2 /O2 /EHsc')
             self.assertEqual(audit.audit_cache(cache, windows=True), 1)
+            # Ninja + MSVC compile commands select the runtime with -MD/-MT; GCC writes -MD -MF.
+            flags.write_text('CXX_FLAGS = -MD -MDd -MT -MTd /arch:AVX2 /O2 -MF x.d')
+            self.assertEqual(audit.audit_cache(cache, windows=True), 1)
+            flags.write_text('CXX_FLAGS = /arch:AVX2 -mavx512f')
+            with self.assertRaisesRegex(ValueError, 'unsupported CPU flag -mavx512f'):
+                audit.audit_cache(cache, windows=True)
+            flags.write_text('CXX_FLAGS = /arch:AVX2 /O2 /EHsc')
             # MSVC caches have no FMA, F16C or AMX entries (ggml declares them only for
             # non-MSVC); accepted on Windows, still required elsewhere.
             msvc = '\n'.join(line for line in CONTRACT.splitlines()
