@@ -53,17 +53,41 @@ def _unpatched_digest(path):
     return hashlib.sha256(BUNDLE_TYPE.sub(b"__TAURI_BUNDLE_TYPE_VAR_UNK", path.read_bytes())).digest()
 
 
+PATCH_TOLERANCE = 64
+
+
+def _differing_bytes(a, b, limit=PATCH_TOLERANCE + 1, chunk=1 << 16):
+    """Count differing bytes between two same-size files, stopping once `limit` is reached."""
+    count = 0
+    with a.open("rb") as left, b.open("rb") as right:
+        while (x := left.read(chunk)):
+            y = right.read(chunk)
+            if x != y:
+                count += sum(1 for i, j in zip(x, y) if i != j)
+                if count >= limit:
+                    return count
+    return count
+
+
 def linked_cache(target, artifact):
     target = target.resolve()
     artifact = artifact.resolve()
     deps = target / "deps"
     if artifact == target / ("murmur.exe" if sys.platform == "win32" else "murmur"):
         digest = _unpatched_digest(artifact)
-        binaries = [p for p in deps.glob("murmur-*") if p.is_file() and p.suffix not in (".d", ".pdb")
-                    and p.stat().st_size == artifact.stat().st_size
-                    and _unpatched_digest(p) == digest]
+        candidates = [p for p in deps.glob("murmur-*") if p.is_file() and p.suffix not in (".d", ".pdb")]
+        same_size = [p for p in candidates if p.stat().st_size == artifact.stat().st_size]
+        binaries = [p for p in same_size if _unpatched_digest(p) == digest]
+        if not binaries:
+            # On Windows the bundle type lives in a PE section that tauri rewrites, not only
+            # the text marker; allow a few patched bytes. Separate builds differ far more.
+            binaries = [p for p in same_size if _differing_bytes(artifact, p) <= PATCH_TOLERANCE]
         if len(binaries) != 1:
-            raise ValueError(f"Cannot uniquely match {artifact} to a Cargo binary (stripped or stale artifact?)")
+            details = ", ".join(f"{p.name} ({p.stat().st_size} B"
+                                + (f", {_differing_bytes(artifact, p)} bytes differ" if p in same_size else "")
+                                + ")" for p in candidates) or "none"
+            raise ValueError(f"Cannot uniquely match {artifact} ({artifact.stat().st_size} B) to a Cargo "
+                             f"binary (stripped or stale artifact?); candidates: {details}")
         artifact = binaries[0]
     if artifact.parent != deps or not re.fullmatch(r"murmur-[0-9a-f]{16}(?:\.exe)?", artifact.name):
         raise ValueError("Artifact must be a current unstripped Cargo binary or target/<profile>/murmur")

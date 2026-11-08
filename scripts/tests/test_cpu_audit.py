@@ -215,8 +215,13 @@ class AuditTests(unittest.TestCase):
             bundled = root / ('murmur.exe' if audit.sys.platform == 'win32' else 'murmur')
             bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_NSS end')
             self.assertEqual(audit.linked_cache(root, bundled), cache)
+            # A few patched bytes elsewhere (Windows rewrites a PE section) still match ...
             bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_NSS enD')
-            with self.assertRaisesRegex(ValueError, 'Cannot uniquely match'):
+            self.assertEqual(audit.linked_cache(root, bundled), cache)
+            # ... a different build of the same size does not.
+            artifact.write_bytes(bytes(200))
+            bundled.write_bytes(bytes(range(200)))
+            with self.assertRaisesRegex(ValueError, 'Cannot uniquely match.*bytes differ'):
                 audit.linked_cache(root, bundled)
             cache.write_text(cache.read_text().replace('GGML_AVX2:BOOL=ON', 'GGML_AVX2:BOOL=OFF'))
             with self.assertRaisesRegex(ValueError, 'GGML_AVX2 must be ON'):
