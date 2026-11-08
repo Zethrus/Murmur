@@ -145,11 +145,12 @@ impl Fixture {
     fn engine_zip(&self, script: &str) -> serde_json::Value {
         let zip = self.data.join("engine.zip");
         let mode = 0o755;
+        let program = fake_engine(script);
         archive::tests::build(
             &zip,
             &[archive::tests::Item::File(
                 store::ENGINE_FILE,
-                script.as_bytes(),
+                &program,
                 mode,
             )],
         );
@@ -159,8 +160,61 @@ impl Fixture {
         value["urls"] = json!([self.url("engine.zip")]);
         value["size_bytes"] = json!(bytes.len());
         value["sha256"] = json!(sha(&bytes));
-        value["installed_size_bytes"] = json!(script.len());
+        value["installed_size_bytes"] = json!(program.len());
         value
+    }
+}
+
+/// The fake engine executable for a test script. Unix runs the `#!/bin/sh` script itself;
+/// Windows cannot, so a tiny real program with the same outcome is compiled once with the
+/// toolchain running the tests: scripts containing `exit <non-zero>` fail, the rest succeed
+/// for `--help` (which is all the smoke test asks).
+fn fake_engine(script: &str) -> Vec<u8> {
+    #[cfg(not(windows))]
+    {
+        script.as_bytes().to_vec()
+    }
+    #[cfg(windows)]
+    {
+        use std::sync::OnceLock;
+        static PROGRAMS: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
+        let (passes, fails) = PROGRAMS.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("murmur-fake-engine-{}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            let build = |name: &str, body: &str| {
+                let source = dir.join(format!("{name}.rs"));
+                let exe = dir.join(format!("{name}.exe"));
+                fs::write(&source, body).unwrap();
+                let rustc = Path::new(env!("CARGO")).with_file_name("rustc.exe");
+                let status = std::process::Command::new(&rustc)
+                    .args(["-O", "-C", "debuginfo=0", "-o"])
+                    .arg(&exe)
+                    .arg(&source)
+                    .status()
+                    .unwrap_or_else(|e| panic!("cannot run {}: {e}", rustc.display()));
+                assert!(status.success(), "rustc failed for the fake engine");
+                fs::read(&exe).unwrap()
+            };
+            let programs = (
+                build(
+                    "passes",
+                    "fn main() { std::process::exit(if std::env::args().nth(1).as_deref() == Some(\"--help\") { 0 } else { 2 }) }",
+                ),
+                build("fails", "fn main() { std::process::exit(1) }"),
+            );
+            let _ = fs::remove_dir_all(&dir);
+            programs
+        });
+        let failing = script.lines().any(|line| {
+            line.trim()
+                .strip_prefix("exit ")
+                .is_some_and(|code| code.trim() != "0")
+        });
+        if failing {
+            fails.clone()
+        } else {
+            passes.clone()
+        }
     }
 }
 impl Drop for Fixture {
