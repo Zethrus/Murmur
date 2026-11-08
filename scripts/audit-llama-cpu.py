@@ -69,13 +69,23 @@ def _differing_bytes(a, b, limit=PATCH_TOLERANCE + 1, chunk=1 << 16):
     return count
 
 
+def _linked_at(binary):
+    """When the linker wrote `binary`. On Windows target/<profile>/murmur.exe is a hard link to
+    deps/murmur.exe, so tauri's in-place bundle-type patch moves the modification time of both;
+    the creation time stays at (or before) the link."""
+    info = binary.stat()
+    if sys.platform == "win32":
+        return getattr(info, "st_birthtime", info.st_ctime)
+    return info.st_mtime
+
+
 def _newest_bin_fingerprint(fp, binary):
     """Hash of the `murmur` binary fingerprint Cargo wrote for an unhashed deps binary.
 
     Cargo records a binary's fingerprint right after linking it, so the matching record is the
     newest `bin-murmur` and is not older than the binary; stale (cache-restored) records are."""
     records = sorted(fp.glob("murmur-*/bin-murmur"), key=lambda path: path.stat().st_mtime)
-    if not records or records[-1].stat().st_mtime < binary.stat().st_mtime - 2:
+    if not records or records[-1].stat().st_mtime < _linked_at(binary) - 2:
         raise ValueError(f"No Cargo fingerprint newer than {binary}")
     return records[-1].parent.name.split("-", 1)[1]
 
