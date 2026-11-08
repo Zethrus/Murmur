@@ -94,8 +94,14 @@ def transcription_runs(request, model, model_path, device, pcm, runs, matrix, la
             "transcript_sha256": hashlib.sha256(first["text"].encode()).hexdigest()}
 
 
-def require_device(result, device, label):
-    """Forced/Auto runs must stay on `device` without a CPU fallback."""
+def require_device(result, device, label, no_gpu_auto=False):
+    """Forced/Auto runs must stay on `device` without a CPU fallback.
+
+    `no_gpu_auto`: Auto with the GPU hidden. The engine then records `cpu_fallback` (it chose
+    the CPU because no CUDA device exists), which is required here, but no `fallback_reason`:
+    a reason means a CUDA attempt failed, which must never happen without a GPU to try."""
     status = result["status"]
-    if status["device"] != device or status.get("cpu_fallback") or (device == "cpu" and status.get("fallback_reason")):
+    fallback = bool(status.get("cpu_fallback"))
+    if (status["device"] != device or fallback != no_gpu_auto
+            or (device == "cpu" and status.get("fallback_reason"))):
         raise RuntimeError(f"{label} did not stay on {device}: {status}")

@@ -60,6 +60,19 @@ class SharedInferenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "did not stay on cpu"):
             inference_common.require_device(result, "cpu", "CPU")
 
+    def test_cpu_only_auto_requires_the_no_gpu_fallback_without_a_reason(self):
+        # Seen on Edison: Auto with the GPU hidden picks the CPU and records cpu_fallback.
+        status = {"device": "cpu", "cpu_fallback": True, "fallback_reason": None}
+        inference_common.require_device({"status": status}, "cpu", "CPU-only Auto", no_gpu_auto=True)
+        with self.assertRaisesRegex(RuntimeError, "did not stay on cpu"):
+            inference_common.require_device({"status": status}, "cpu", "Explicit CPU")
+        failed = dict(status, fallback_reason="CUDA failed")
+        with self.assertRaisesRegex(RuntimeError, "did not stay on cpu"):
+            inference_common.require_device({"status": failed}, "cpu", "CPU-only Auto", no_gpu_auto=True)
+        with self.assertRaisesRegex(RuntimeError, "did not stay on cpu"):
+            inference_common.require_device({"status": dict(status, cpu_fallback=False)}, "cpu",
+                                            "CPU-only Auto", no_gpu_auto=True)
+
     def test_timeouts_and_engine_errors_are_reported(self):
         engine = FakeEngine()
         def timeout(_):

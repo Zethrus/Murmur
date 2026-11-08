@@ -141,7 +141,7 @@ def check(artifacts, components, models, model, fixture, runs):
         cpu = run_engine(engine, model_path, model, pcm, None, "cpu", 1, work / "cpu", hidden=True)
         inference_common.require_device(cpu, "cpu", "Explicit CPU")
         cpu_auto = run_engine(engine, model_path, model, pcm, cuda, "auto", 1, work / "cpu-auto", hidden=True)
-        inference_common.require_device(cpu_auto, "cpu", "CPU-only Auto")
+        inference_common.require_device(cpu_auto, "cpu", "CPU-only Auto", no_gpu_auto=True)
         driver = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
                                 check=True, capture_output=True, text=True).stdout.strip()
         return {"assets": evidence_assets(artifacts, components), "model": model, "fixture_sha256": sha256(fixture),
