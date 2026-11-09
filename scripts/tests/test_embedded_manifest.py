@@ -1,5 +1,6 @@
 """Release guard: no throwaway-signed manifest may be shipped (scripts/check-embedded-manifest.py)."""
 import base64
+import contextlib
 import importlib.util
 import io
 import os
@@ -138,9 +139,10 @@ class GuardTests(unittest.TestCase):
 
     def test_cli_treats_a_missing_release_certificate_as_absent(self):
         app = self.write("murmur.exe", binary_with(self.signed(self.release_sub)))
-        self.assertEqual(guard.main([str(app), "--trusted-cert", str(self.work / "missing.asc")]), 1)
         clean = self.write("clean.exe", b"MZ")
-        self.assertEqual(guard.main([str(clean), "--trusted-cert", str(self.work / "missing.asc")]), 0)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(guard.main([str(app), "--trusted-cert", str(self.work / "missing.asc")]), 1)
+            self.assertEqual(guard.main([str(clean), "--trusted-cert", str(self.work / "missing.asc")]), 0)
 
 
 @unittest.skipUnless(shutil.which("gpg") and os.name != "nt", "needs GnuPG (Linux CI)")

@@ -1,0 +1,500 @@
+"""Pure parts of the Windows desktop harness (scripts/windows/desktop), runnable on any OS."""
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+import tomllib
+import unittest
+import wave
+
+HARNESS = Path(__file__).resolve().parents[1] / "windows" / "desktop"
+sys.path.insert(0, str(HARNESS))
+
+import catalog  # noqa: E402
+import fixtures  # noqa: E402
+import golden  # noqa: E402
+import guard  # noqa: E402
+import handoff  # noqa: E402
+import manual  # noqa: E402
+import report  # noqa: E402
+import restore  # noqa: E402
+import run  # noqa: E402
+import tomlconfig  # noqa: E402
+import win32  # noqa: E402
+from context import Fail, Skip  # noqa: E402
+
+SHA = "a" * 40
+OTHER = "b" * 40
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+class ImportTests(unittest.TestCase):
+    def test_windows_modules_import_on_any_os(self):
+        import capture  # noqa: F401
+        import context  # noqa: F401
+        import murmur  # noqa: F401
+        import targets  # noqa: F401
+        import uia  # noqa: F401
+        self.assertEqual(win32.parse_combo("Ctrl+Alt+Shift+F9"), (["ctrl", "alt", "shift"], "f9"))
+        with self.assertRaises(ValueError):
+            win32.parse_combo("Ctrl+Alt")
+        with self.assertRaises(ValueError):
+            win32.parse_combo("Ctrl+Hyper+X")
+
+    def test_guard_injected_flags(self):
+        self.assertTrue(guard.is_injected_key(0x10))
+        self.assertFalse(guard.is_injected_key(0x00))
+        self.assertTrue(guard.is_injected_mouse(0x01))
+        self.assertFalse(guard.is_injected_mouse(0x00))
+
+
+class ReportTests(unittest.TestCase):
+    def result(self, status, reason="", attempt=1, **extra):
+        return report.Result("H1", status, reason, "Hold", "hotkeys", attempt=attempt, **extra)
+
+    def test_fail_and_skip_need_a_reason(self):
+        with self.assertRaises(ValueError):
+            report.Result("H1", report.FAIL)
+        with self.assertRaises(ValueError):
+            report.Result("H1", report.SKIPPED)
+        with self.assertRaises(ValueError):
+            report.Result("H1", "maybe", "x")
+
+    def test_aggregate_marks_flaky_failures(self):
+        row = report.aggregate([self.result(report.PASS), self.result(report.FAIL, "late", 2),
+                                self.result(report.PASS, attempt=3)])
+        self.assertEqual(row.status, report.FAIL)
+        self.assertIn("flaky: failed 1 of 3", row.reason)
+        self.assertEqual(row.attempt, 3)
+
+    def test_aggregate_all_skipped_stays_skipped(self):
+        row = report.aggregate([self.result(report.SKIPPED, "icon hidden")])
+        self.assertEqual((row.status, row.reason), (report.SKIPPED, "icon hidden"))
+
+    def test_markdown_has_one_row_per_id_and_escapes_pipes(self):
+        attempts = [self.result(report.PASS, artifacts=["C:/out/H1-notepad.png"]),
+                    report.Result("I3", report.SKIPPED, "no | buffer", best_effort=True)]
+        text = report.markdown({"sha": SHA}, attempts)
+        self.assertIn("| H1 | pass |  | `H1-notepad.png` |", text)
+        self.assertIn("| I3 (best effort) | skipped | no \\| buffer |  |", text)
+        self.assertIn("1 pass · 0 fail · 1 skipped · 0 aborted", text)
+
+    def test_write_and_load_round_trip_and_manual_merge(self):
+        work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, work)
+        attempts = [self.result(report.PASS), report.Result("S2", report.SKIPPED, "manual")]
+        report.write(work, {"sha": SHA}, attempts)
+        meta, loaded = report.load(work / "desktop-report.json")
+        self.assertEqual(meta["sha"], SHA)
+        self.assertEqual([r.id for r in loaded], ["H1", "S2"])
+        merged = report.merge(loaded, [report.Result("S2", report.PASS, source="manual")])
+        self.assertEqual([(r.id, r.status) for r in merged], [("H1", report.PASS), ("S2", report.PASS)])
+        data = json.loads((work / "desktop-report.json").read_text())
+        self.assertEqual(data["schema"], report.SCHEMA)
+        self.assertEqual(len(data["rows"]), 2)
+
+
+class GoldenTests(unittest.TestCase):
+    def test_compare(self):
+        self.assertIsNone(golden.compare("The fox. ", "The fox. "))
+        self.assertIn("differs at character 4", golden.compare("The fox. ", "The Fox. "))
+        self.assertIn("more than once", golden.compare("Hi there. ", "Hi there. Hi there. "))
+        self.assertIn("nothing delivered", golden.compare("x", None))
+        self.assertIn("lengths 4 vs 3", golden.compare("abcd", "abc"))
+
+    def test_store_records_first_delivery_and_checks_later_ones(self):
+        store = golden.GoldenStore()
+        key = golden.key("A", "hold", "Ctrl+Alt+Shift+F9")
+        self.assertEqual(key, golden.key("A", "hold", "ctrl+alt+shift+f9"))
+        with self.assertRaises(ValueError):
+            store.record(key, "  ")
+        store.record(key, "The quick brown fox. ")
+        with self.assertRaises(ValueError):
+            store.record(key, "again")
+        self.assertIsNone(store.check(key, "The quick brown fox. "))
+        self.assertIsNotNone(store.check(key, "The quick brown fox."))
+        with self.assertRaises(KeyError):
+            store.check(golden.key("B"), "x")
+        self.assertNotEqual(key, golden.key("A", "hold", "Ctrl+Alt+Shift+F9", style="code"))
+
+
+class ConfigWriterTests(unittest.TestCase):
+    def test_partial_config_round_trips_through_toml(self):
+        config = tomlconfig.merge(run.base_config("Ctrl+Alt+Shift+F9"), {
+            "postproc": {"replacements": {"marker phrase": "café déjà vu", 'say "x"': "y\\z"}},
+            "injection": {"exclude_apps": ["notepad"], "focus_change": "refocus"},
+            "overlay": {"scale": 1.6, "placement": {"x_fraction": 0.25, "monitor_width": 1920}},
+        })
+        text = tomlconfig.dumps(config)
+        parsed = tomllib.loads(text)
+        self.assertEqual(parsed["postproc"]["replacements"]["marker phrase"], "café déjà vu")
+        self.assertEqual(parsed["postproc"]["replacements"]['say "x"'], "y\\z")
+        self.assertEqual(parsed["injection"]["exclude_apps"], ["notepad"])
+        self.assertEqual(parsed["overlay"]["placement"]["x_fraction"], 0.25)
+        self.assertEqual(parsed["general"]["hotkey"], "Ctrl+Alt+Shift+F9")
+        self.assertLess(text.index("[overlay]"), text.index("[overlay.placement]"))
+
+    def test_keys_and_values_follow_the_app_schema(self):
+        for bad in ({"general": {"hot_key": "x"}}, {"nope": {"a": 1}}, {"general": {"hotkey_mode": "press"}},
+                    {"injection": {"focus_change": "steal"}}, {"overlay": {"scale": 2.0}},
+                    {"general": {"autostart": "yes"}}, {"injection": {"exclude_apps": [1]}},
+                    {"audio": {"silence_timeout_ms": 50}}, {"engine": {"beam_size": True}}):
+            with self.subTest(bad=bad), self.assertRaises(tomlconfig.ConfigError):
+                tomlconfig.dumps(bad)
+
+    def test_schema_keys_exist_in_config_rs(self):
+        source = (HARNESS.parents[2] / "src-tauri" / "src" / "config.rs").read_text(encoding="utf-8")
+        for section, keys in tomlconfig.SCHEMA.items():
+            for key in keys:
+                with self.subTest(key=f"{section}.{key}"):
+                    self.assertRegex(source, rf"\b{key}: ")
+
+    def test_merge_replaces_replacements_and_deep_merges_tables(self):
+        base = {"general": {"hotkey": "A", "theme": "light"}, "postproc": {"replacements": {"a": "b"}}}
+        merged = tomlconfig.merge(base, {"general": {"theme": "dark"}, "postproc": {"replacements": {"c": "d"}}})
+        self.assertEqual(merged, {"general": {"hotkey": "A", "theme": "dark"}, "postproc": {"replacements": {"c": "d"}}})
+        self.assertEqual(base["general"]["theme"], "light")
+
+
+class CatalogTests(unittest.TestCase):
+    def test_47_automated_checks_with_unique_ids(self):
+        ids = [c.id for c in catalog.CHECKS]
+        self.assertEqual(len(ids), 47)
+        self.assertEqual(len(set(ids)), 47)
+        self.assertEqual({c.id for c in catalog.CHECKS if c.best_effort}, {"T1", "T2", "I3", "K1"})
+
+    def test_every_check_function_exists_in_its_group_module(self):
+        for check in catalog.CHECKS:
+            source = (HARNESS / "checks" / f"{check.group}.py").read_text(encoding="utf-8")
+            with self.subTest(check=check.id):
+                self.assertRegex(source, rf"(?m)^def {check.function}\(ctx\):")
+                self.assertTrue(check.function.startswith(check.id.lower() + "_"))
+
+    def test_automated_and_manual_ids_cover_the_checklist(self):
+        text = (HARNESS.parents[2] / "docs" / "parity" / "windows-checklist.md").read_text(encoding="utf-8")
+        listed = set(re.findall(r"(?m)^\| ([A-Z]\d+) ", text))
+        covered = {c.id for c in catalog.CHECKS} | {i.split("-")[0] for i, _ in catalog.MANUAL}
+        self.assertEqual(listed - covered, set())
+
+    def test_selection(self):
+        self.assertEqual([c.id for c in catalog.select("f2, h1")], ["H1", "F2"])
+        self.assertEqual([c.group for c in catalog.select(group="focus")], ["focus"] * 11)
+        self.assertEqual([c.id for c in catalog.select("H1,F2", "focus")], ["F2"])
+        self.assertEqual(catalog.select()[0].id, "P1")
+        self.assertEqual(catalog.select()[-1].id, "C3")
+        with self.assertRaisesRegex(catalog.SelectionError, "manual"):
+            catalog.select("S2")
+        with self.assertRaisesRegex(catalog.SelectionError, "Unknown group"):
+            catalog.select(group="network")
+        with self.assertRaisesRegex(catalog.SelectionError, "matches no checks"):
+            catalog.select("H1", "focus")
+        self.assertEqual(catalog.parse_ids(" h1 ;H1, f13 "), ["H1", "F13"])
+
+    def test_overlay_error_state_check_is_ordered_before_the_drag(self):
+        overlay = [c.id for c in catalog.select(group="overlay")]
+        self.assertEqual(overlay[0], "O1")
+
+
+class RestoreTests(unittest.TestCase):
+    def test_undo_runs_newest_first_and_survives_failures(self):
+        calls = []
+        restorer = restore.Restorer(log=lambda _: None)
+        restorer.push("first", lambda: calls.append(1))
+        restorer.push("broken", lambda: 1 / 0)
+        restorer.push("third", lambda: calls.append(3))
+        errors = restorer.restore_all()
+        self.assertEqual(calls, [3, 1])
+        self.assertEqual([label for label, _ in errors], ["broken"])
+        self.assertEqual(restorer.pending, [])
+
+    def test_restore_to_mark_keeps_session_level_entries(self):
+        calls = []
+        restorer = restore.Restorer()
+        restorer.push("session", lambda: calls.append("session"))
+        mark = restorer.mark()
+        token = restorer.push("check", lambda: calls.append("check"))
+        restorer.push("check 2", lambda: calls.append("check 2"))
+        restorer.discard(token)
+        restorer.restore_to(mark)
+        self.assertEqual(calls, ["check 2"])
+        self.assertEqual(restorer.pending, ["session"])
+
+    def test_registry_value_restores_missing_and_existing_values(self):
+        class Backend:
+            def __init__(self):
+                self.data = {("Run", "Murmur"): ("C:\\owner\\murmur.exe --background", 1)}
+
+            def read(self, path, name):
+                return self.data.get((path, name), restore.MISSING)
+
+            def write(self, path, name, value, kind):
+                self.data[(path, name)] = (value, kind)
+
+            def delete(self, path, name):
+                del self.data[(path, name)]
+
+        backend, restorer = Backend(), restore.Restorer()
+        restore.RegistryValue(backend, "Run", "Murmur").set(restorer, "C:\\test\\murmur.exe", 1)
+        restore.RegistryValue(backend, "Consent", "Value").set(restorer, "Deny", 1)
+        self.assertEqual(backend.data[("Consent", "Value")], ("Deny", 1))
+        restorer.restore_all()
+        self.assertEqual(backend.data, {("Run", "Murmur"): ("C:\\owner\\murmur.exe --background", 1)})
+
+
+class HandoffTests(unittest.TestCase):
+    FILES = {
+        "Murmur_0.5.0_x64-setup.exe": b"installer",
+        "murmur-windows-x86_64.zip": b"portable",
+        "murmur-engine-windows-x86_64-0.5.0.zip": b"engine",
+        "murmur-cuda-windows-x86_64-0.5.0.zip": b"cuda",
+        "components-manifest.json": b"{}",
+        "components-manifest.json.sig": b"sig",
+        "murmur-release.asc": b"cert",
+        "components-windows-inputs.json": b"[]",
+    }
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.work)
+        self.source = self.work / "murmur-ci-out" / SHA
+        self.source.mkdir(parents=True)
+        for name, data in self.FILES.items():
+            (self.source / name).write_bytes(data)
+        self.sums = {name: digest(data) for name, data in self.FILES.items()}
+        (self.source / "SHA256SUMS").write_text("".join(f"{h}  {n}\n" for n, h in sorted(self.sums.items())))
+
+    def log(self, commit=SHA, sums=None):
+        lines = ["build\tHand the build\t2026-11-09T10:00:00.0000000Z ##[group]Run $Commit = $env:GITHUB_SHA",
+                 'build\tHand the build\t2026-11-09T10:00:00.1Z   Write-Host "MURMUR-HANDOFF-SHA256 $Commit $Hash $($File.Name)"']
+        for name, value in sorted((sums or self.sums).items()):
+            lines.append(f"build\tHand the build\t2026-11-09T10:00:01.0000000Z MURMUR-HANDOFF-SHA256 {commit} {value} {name}\r")
+        return "\n".join(lines)
+
+    def gh(self, runs, logs):
+        def fake(*arguments):
+            if arguments[0] == "api":
+                self.assertIn(f"head_sha={SHA}", arguments[1])
+                return json.dumps({"workflow_runs": runs})
+            self.assertEqual(arguments[:2], ("run", "view"))
+            return logs[int(arguments[2])]
+        return fake
+
+    def test_sha_must_be_the_dispatched_commit(self):
+        self.assertEqual(handoff.check_sha(SHA.upper(), SHA), SHA)
+        with self.assertRaisesRegex(handoff.HandoffError, "not the dispatched commit"):
+            handoff.check_sha(OTHER, SHA)
+        with self.assertRaisesRegex(handoff.HandoffError, "40-character"):
+            handoff.check_sha("abc123", "abc123")
+        with self.assertRaises(handoff.HandoffError):
+            handoff.check_sha("", "")
+
+    def test_sums_parsing_is_strict(self):
+        self.assertEqual(handoff.parse_sums((self.source / "SHA256SUMS").read_text()), self.sums)
+        for bad in (f"{'0' * 64} ../evil.exe\n", f"{'0' * 64}  sub/file\n", "zz  file\n", "",
+                    f"{'0' * 64}  a\n{'1' * 64}  a\n"):
+            with self.subTest(bad=bad), self.assertRaises(handoff.HandoffError):
+                handoff.parse_sums(bad)
+
+    def test_log_parsing_ignores_the_script_echo_and_other_commits(self):
+        text = self.log() + "\n" + self.log(commit=OTHER, sums={"murmur-windows-x86_64.zip": "f" * 64})
+        self.assertEqual(handoff.parse_log(text, SHA), self.sums)
+        conflicting = self.log() + f"\nMURMUR-HANDOFF-SHA256 {SHA} {'f' * 64} murmur-windows-x86_64.zip"
+        with self.assertRaisesRegex(handoff.HandoffError, "two different hashes"):
+            handoff.parse_log(conflicting, SHA)
+
+    def test_compare_and_required_files(self):
+        handoff.compare(self.sums, dict(self.sums))
+        with self.assertRaisesRegex(handoff.HandoffError, "no MURMUR-HANDOFF"):
+            handoff.compare(self.sums, {})
+        with self.assertRaisesRegex(handoff.HandoffError, "disagrees"):
+            handoff.compare(self.sums, dict(self.sums, **{"murmur-release.asc": "0" * 64}))
+        handoff.check_required(self.sums)
+        with self.assertRaisesRegex(handoff.HandoffError, "Unexpected"):
+            handoff.check_required(dict(self.sums, **{"evil.dll": "0" * 64}))
+        missing = dict(self.sums)
+        del missing["murmur-release.asc"]
+        with self.assertRaisesRegex(handoff.HandoffError, "murmur-release.asc"):
+            handoff.check_required(missing)
+
+    def test_verify_copies_and_checks_against_the_matching_log(self):
+        runs = [{"id": 2, "head_sha": SHA, "conclusion": "success", "run_started_at": "2026-11-09T10:00:00Z",
+                 "html_url": "https://example.invalid/2", "event": "pull_request"},
+                {"id": 1, "head_sha": SHA, "conclusion": "success", "run_started_at": "2026-11-08T10:00:00Z",
+                 "html_url": "https://example.invalid/1", "event": "workflow_dispatch"}]
+        stale = dict(self.sums, **{"murmur-windows-x86_64.zip": "0" * 64})
+        dest = self.work / "copy"
+        record = handoff.verify(SHA, SHA, self.source, dest, "o/r", self.gh(runs, {2: self.log(sums=stale), 1: self.log()}))
+        self.assertEqual(record["build_run"]["id"], 1)
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), sorted([*self.FILES, "build.json"]))
+        self.assertEqual(json.loads((dest / "build.json").read_text())["sha"], SHA)
+
+    def test_tampered_folder_is_refused(self):
+        runs = [{"id": 1, "head_sha": SHA, "conclusion": "success", "event": "workflow_dispatch"}]
+        fake = self.gh(runs, {1: self.log()})
+        (self.source / "murmur-windows-x86_64.zip").write_bytes(b"tampered")
+        with self.assertRaisesRegex(handoff.HandoffError, "murmur-windows-x86_64.zip: SHA-256"):
+            handoff.verify(SHA, SHA, self.source, self.work / "copy", "o/r", fake)
+        # Rewriting SHA256SUMS to match does not help: the build log disagrees.
+        sums = dict(self.sums, **{"murmur-windows-x86_64.zip": digest(b"tampered")})
+        (self.source / "SHA256SUMS").write_text("".join(f"{h}  {n}\n" for n, h in sorted(sums.items())))
+        with self.assertRaisesRegex(handoff.HandoffError, "No build log matches"):
+            handoff.verify(SHA, SHA, self.source, self.work / "copy", "o/r", fake)
+
+    def test_extra_file_and_wrong_commit_are_refused(self):
+        runs = [{"id": 1, "head_sha": SHA, "conclusion": "success"}]
+        (self.source / "extra.dll").write_bytes(b"x")
+        with self.assertRaisesRegex(handoff.HandoffError, "differs from SHA256SUMS"):
+            handoff.verify(SHA, SHA, self.source, self.work / "copy", "o/r", self.gh(runs, {1: self.log()}))
+        with self.assertRaisesRegex(handoff.HandoffError, "not the dispatched commit"):
+            handoff.verify(SHA, OTHER, self.source, self.work / "copy", "o/r", self.gh(runs, {1: self.log()}))
+
+    def test_no_successful_build_run(self):
+        with self.assertRaisesRegex(handoff.HandoffError, "No successful"):
+            handoff.matching_run("o/r", SHA, self.sums, self.gh([], {}))
+
+
+class FixtureTests(unittest.TestCase):
+    def test_padding_appends_silence_and_reports_speech_length(self):
+        work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, work)
+        source = work / "speech.wav"
+        with wave.open(str(source), "wb") as writer:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(fixtures.RATE)
+            writer.writeframes(b"\x01\x00" * fixtures.RATE * 2)
+        speech = fixtures.pad_silence(source, work / "padded.wav", 20.0)
+        self.assertAlmostEqual(speech, 2.0)
+        self.assertAlmostEqual(fixtures.duration(work / "padded.wav"), 22.0)
+        with wave.open(str(work / "padded.wav"), "rb") as reader:
+            reader.setpos(fixtures.RATE * 2)
+            self.assertEqual(set(reader.readframes(100)), {0})
+
+    def test_padding_outlasts_the_longest_hold_and_stays_below_the_utterance_limit(self):
+        self.assertGreater(fixtures.PAD_SECONDS, 15)
+        self.assertLess(fixtures.PAD_SECONDS + 10, 90)
+
+    def test_sentences_cover_the_checks(self):
+        self.assertGreater(len(fixtures.SENTENCES["LONG"]), 60)
+        self.assertIn("d", fixtures.SENTENCES["D"].lower())
+        self.assertIn(fixtures.REPLACEMENT[0], fixtures.SENTENCES["MARKER"])
+        self.assertNotEqual(fixtures.cache_name("A", "x"), fixtures.cache_name("A", "y"))
+
+    def test_speak_script_escapes_quotes(self):
+        script = fixtures.speak_script("It's here", Path("C:/t/o'k.wav"))
+        self.assertIn("Speak('It''s here')", script)
+        self.assertIn("o''k.wav", script)
+
+
+class FakeContext:
+    def __init__(self, work):
+        self.restorer = restore.Restorer(log=lambda _: None)
+        self.out = Path(work)
+        self.artifacts, self.notes, self.check_id = [], [], ""
+
+    def begin(self, check_id):
+        self.check_id, self.artifacts, self.notes = check_id, [], []
+
+    def artifact(self, suffix):
+        path = self.out / f"{self.check_id}-{suffix}"
+        self.artifacts.append(str(path))
+        return path
+
+    def note(self, text):
+        self.notes.append(text)
+
+
+class RunnerTests(unittest.TestCase):
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.work)
+        self.ctx = FakeContext(self.work)
+
+    def run_with(self, behaviours, ids, repeat=1):
+        undone = []
+
+        def lookup(check):
+            def function(ctx):
+                ctx.restorer.push(f"undo {check.id}", lambda: undone.append(check.id))
+                behaviours[check.id](ctx)
+            return function
+
+        results, aborted = run.run_checks(self.ctx, catalog.select(ids), repeat, lookup, log=lambda _: None)
+        return results, aborted, undone
+
+    def test_statuses_and_per_check_restore(self):
+        def fail(_):
+            raise Fail("text differs")
+
+        def skip(_):
+            raise Skip("VS Code not installed")
+
+        def crash(_):
+            raise RuntimeError("boom")
+
+        results, aborted, undone = self.run_with(
+            {"H1": lambda c: None, "H2": fail, "I2": skip, "T1": crash, "I1": crash}, "H1,H2,I1,I2,T1")
+        statuses = {r.id: (r.status, r.reason) for r in results}
+        self.assertEqual(statuses["H1"], (report.PASS, ""))
+        self.assertEqual(statuses["H2"], (report.FAIL, "text differs"))
+        self.assertEqual(statuses["I2"], (report.SKIPPED, "VS Code not installed"))
+        self.assertEqual(statuses["I1"][0], report.FAIL)
+        self.assertEqual(statuses["T1"][0], report.SKIPPED)  # best effort: never a pass, never a crash
+        self.assertIn("could not run", statuses["T1"][1])
+        self.assertEqual(aborted, "")
+        self.assertEqual(undone, ["H1", "H2", "I1", "I2", "T1"])
+        self.assertTrue((self.work / "T1-harness-error.txt").is_file())
+
+    def test_user_input_aborts_the_remaining_checks(self):
+        def touched(_):
+            raise guard.UserInput("real keyboard input")
+
+        results, aborted, undone = self.run_with({"H1": lambda c: None, "H2": touched}, "H1,H2,H3", repeat=2)
+        self.assertIn("user input", aborted)
+        self.assertEqual([(r.id, r.status) for r in results],
+                         [("H1", report.PASS), ("H2", report.ABORTED), ("H3", report.ABORTED),
+                          ("H1", report.ABORTED), ("H2", report.ABORTED), ("H3", report.ABORTED)])
+        self.assertEqual(undone, ["H1", "H2"])
+
+    def test_preflight_reports_every_problem(self):
+        class FakeWin32:
+            def input_desktop(self):
+                return None
+
+            def pids(self, name):
+                return {"murmur.exe": [42], "Notepad.exe": [7]}.get(name, [])
+
+            def idle_seconds(self):
+                return 5.0
+
+        problems = run.preflight(self.work, catalog.select("H1"), FakeWin32())
+        text = "\n".join(problems)
+        for expected in ("not a verified build", "locked", "another Murmur", "Notepad is running", "idle for 60"):
+            self.assertIn(expected, text)
+        (self.work / "build.json").write_text("{}")
+        self.assertEqual(len(run.preflight(self.work, catalog.select("F1"), FakeWin32())), 3)
+
+
+class ManualTests(unittest.TestCase):
+    def test_answers_items_and_results(self):
+        self.assertEqual(manual.parse_answer(" P "), report.PASS)
+        self.assertEqual(manual.parse_answer("fail"), report.FAIL)
+        self.assertIsNone(manual.parse_answer("maybe"))
+        self.assertEqual([i for i, _ in manual.items("k2,s2")], ["S2", "K2"])
+        with self.assertRaises(catalog.SelectionError):
+            manual.items("H1")
+        self.assertEqual(set(manual.STEPS), {i for i, _ in catalog.MANUAL})
+        failed = manual.manual_result("K2", "Narrator", report.FAIL, "")
+        self.assertEqual((failed.reason, failed.source), ("no note given", "manual"))
+        passed = manual.manual_result("K3", "Motion", report.PASS, "reduced")
+        self.assertEqual((passed.reason, passed.notes), ("", ["reduced"]))
+
+
+if __name__ == "__main__":
+    unittest.main()
