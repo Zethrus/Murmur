@@ -11,7 +11,10 @@ window. Every item below is tagged:
   evidence files. *best effort* items depend on Windows UI details and report
   "skipped" with the reason, never "pass", when they cannot run. Where the
   harness deviates from the manual steps (tiny.en instead of distil-small.en,
-  a harness-owned hotkey instead of Win+E in H6, the harness's TargetApp window
+  a harness-owned hotkey instead of Win+E in H6, set through the config file
+  because Windows never delivers an owned combination to the capture field, so
+  the Settings capture half of H6 stays a manual observation; an extra F13 pass
+  that keeps Ctrl+Alt held while the text is typed; the harness's TargetApp window
   instead of a second Notepad in the focus items, the held transcript's buttons
   instead of Enhance's Accept in O3), the report says so.
 - *manual*: run once per release with

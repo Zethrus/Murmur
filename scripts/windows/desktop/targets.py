@@ -51,7 +51,8 @@ def run_target_app(title, state_path, role):
                 time.sleep(0.01)
 
     def on_key(event):
-        record["keys"].append({"char": event.char, "keysym": event.keysym, "t": time.time()})
+        record["keys"].append({"char": event.char, "keysym": event.keysym, "state": event.state,
+                               "t": time.time()})
         root.after(1, save)
 
     def on_focus(kind):
@@ -131,6 +132,9 @@ def show_banner(seconds):
 class TargetApp:
     """Handle on one TargetApp window. Use clear() between deliveries."""
 
+    # A click with the hold-mode modifiers down is harmless here: the window is empty.
+    CLICK_WHILE_HELD = True
+
     def __init__(self, work, name, role="prose", guard=None):
         import win32
         self.win32 = win32
@@ -203,6 +207,10 @@ class TargetApp:
         keys = self.keys()
         return keys[0]["t"] if keys else None
 
+    def first_key(self):
+        keys = self.keys()
+        return keys[0] if keys else None
+
     def close(self):
         if self.process and self.process.poll() is None:
             self.state_path.with_suffix(".cmd").write_text("quit", encoding="utf-8")
@@ -234,14 +242,19 @@ class Notepad:
             raise RuntimeError("Notepad did not open")
         return self
 
+    # Shift+click would extend Notepad's selection from the caret, and the next typed character
+    # would replace it: while hotkey modifiers are held, activate without clicking.
+    CLICK_WHILE_HELD = False
+
     def document(self):
         return self.uia.text_element(self.uia.from_handle(self.hwnd), timeout=5)
 
-    def focus(self):
+    def focus(self, click=True):
         left, top, right, bottom = self.win32.window_rect(self.hwnd)
         point = ((left + right) // 2, (top + bottom) // 2)
-        self.win32.activate(self.hwnd, click_at=point)
-        self.win32.click(*point)
+        self.win32.activate(self.hwnd, click_at=None if not click else point)
+        if click:
+            self.win32.click(*point)
         if not self.win32.wait_for(lambda: self.win32.foreground() == self.hwnd, 3):
             raise RuntimeError("Could not focus Notepad")
 

@@ -4,7 +4,10 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-import winreg
+try:
+    import winreg
+except ImportError:  # not Windows: the module still imports for the unit tests
+    winreg = None
 
 import tomlconfig
 import uia

@@ -162,11 +162,12 @@ class EmbeddedManifestTests(unittest.TestCase):
 
 
 class DesktopHandoffTests(unittest.TestCase):
-    def test_handoff_is_the_last_step_and_self_hosted_only(self):
+    def test_handoff_is_the_last_step_self_hosted_and_manual_only(self):
         blocks = steps("windows-build.yml")
         self.assertIn("Hand the build to the desktop runner", blocks[-1])
         self.assertEqual(condition(blocks[-1]),
-                         "runner.environment == 'self-hosted' && !startsWith(github.ref, 'refs/tags/')")
+                         "runner.environment == 'self-hosted' && github.event_name == 'workflow_dispatch' "
+                         "&& !startsWith(github.ref, 'refs/tags/')")
 
     def test_handoff_prints_hashes_writes_sums_and_keeps_three(self):
         block = step("windows-build.yml", "Hand the build to the desktop runner")

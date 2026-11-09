@@ -138,11 +138,19 @@ def f11_drag_delivery(ctx):
     ctx.restorer.push("reset the overlay placement", lambda: setattr(ctx.murmur, "config", {}))
     app = ctx.target("A")
     app.focus()
-    ctx.dictate("A")
-    # Grab the pill by its drag handle (left end) while the transcript is being finished.
-    left, top, right, bottom = win32.window_rect(ctx.murmur.overlay_hwnd())
-    handle = (left + max(8, round(14 * win32.dpi_scale(ctx.murmur.overlay_hwnd()))), (top + bottom) // 2)
-    win32.drag(handle, (handle[0] + 80, handle[1] - 60), steps=10, release=False)
+    grabbed = {}
+
+    def grab(_ctx):
+        # Grab the pill by its drag handle (left end) while the hotkey is still held, so the
+        # transcript cannot be delivered before the drag has started.
+        left, top, right, bottom = win32.window_rect(ctx.murmur.overlay_hwnd())
+        handle = (left + max(8, round(14 * win32.dpi_scale(ctx.murmur.overlay_hwnd()))), (top + bottom) // 2)
+        win32.drag(handle, (handle[0] + 80, handle[1] - 60), steps=10, release=False)
+        grabbed["origin"] = (left, top)
+
+    ctx.restorer.push("release the mouse button", win32.mouse_up)
+    ctx.dictate("A", during=grab)
+    left, top = grabbed["origin"]
     ctx.sleep(4.0)
     early = app.text()
     released = time.time()
@@ -174,12 +182,52 @@ def f12_log_privacy(ctx):
     ctx.note(f"{len(texts)} golden texts searched in {len(log.splitlines())} log lines")
 
 
+def _hold_modifiers_through_delivery(ctx, app, expected):
+    """Direct delivery with Ctrl+Alt still physically held while the transcript is typed: the
+    path where a typed 'd' could fire WM_HOTKEY again (hotkey.rs ignore_dictation_press)."""
+    modifiers, key = win32.parse_combo(D_HOTKEY)
+    app.focus()
+    ctx.press(D_HOTKEY)
+    if not ctx.murmur.wait_state("listening", 5):
+        ctx.release(D_HOTKEY, "together")
+        raise Fail(f"Dictation did not start (overlay: {ctx.murmur.overlay_state()})")
+    ctx.restorer.push("release the hotkey modifiers", lambda: win32.key_up(*reversed(modifiers)))
+    ctx.sleep(ctx.fixtures["D"].speech_seconds + 0.8)
+    win32.key_up(key)
+    restarted = False
+    deadline = time.monotonic() + 20
+    # Keep Ctrl+Alt down past Murmur's 600 ms modifier wait, until typing has finished.
+    while time.monotonic() < deadline:
+        state = ctx.murmur.overlay_state()
+        restarted = restarted or (state == "listening" and bool(app.text()))
+        if app.text() and time.monotonic() - (app.keys()[-1]["t"] if app.keys() else 0) > 1.5:
+            break
+        ctx.sleep(0.05)
+    typed_while_held = bool(app.text())
+    win32.key_up(*reversed(modifiers))
+    text = app.wait_text()
+    restarted = restarted or win32.wait_for(lambda: ctx.murmur.overlay_state() == "listening", 2.0, 0.05,
+                                            sleep=ctx.sleep)
+    ctx.settle()
+    if restarted:
+        raise Fail("Typing a 'd' with Ctrl+Alt held restarted dictation")
+    if not typed_while_held:
+        ctx.note("typing had not started while Ctrl+Alt were held (20 s); the retrigger path was not reached")
+        raise Fail("Delivery did not start while the modifiers were held, so the retrigger path was not tested")
+    ctx.note(f"typed with Ctrl+Alt held: {text!r}")
+    if text != expected:
+        # Characters typed with Ctrl+Alt down may be interpreted as AltGr combinations by the target.
+        ctx.note(f"text differs from the clean golden {expected!r} (modifiers were down while typing)")
+
+
 def f13_no_retrigger(ctx):
+    expected = ctx.golden("D", hotkey=D_HOTKEY)
+    if "d" not in expected.lower():
+        raise Fail(f"The fixture transcript has no 'd': {expected!r}")
+    ctx.murmur.ensure(ctx.fixtures["D"].path, {"general": {"hotkey": D_HOTKEY}})
+    _hold_modifiers_through_delivery(ctx, ctx.target("direct"), expected)
     for prefer_paste in (False, True):
         config = {"general": {"hotkey": D_HOTKEY}, "injection": {"prefer_paste": prefer_paste}}
-        expected = ctx.golden("D", hotkey=D_HOTKEY)
-        if "d" not in expected.lower():
-            raise Fail(f"The fixture transcript has no 'd': {expected!r}")
         a, b = ctx.target(f"A{int(prefer_paste)}"), ctx.target(f"B{int(prefer_paste)}")
         ctx.murmur.ensure(ctx.fixtures["D"].path, config)
         a.focus()

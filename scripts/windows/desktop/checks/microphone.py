@@ -4,7 +4,10 @@ M1 changes only the per-user consent value Murmur reads (HKCU ConsentStore\\micr
 it tests the explanation, not Windows blocking capture. The value is restored after the check.
 """
 import time
-import winreg
+try:
+    import winreg
+except ImportError:  # not Windows: the module still imports for the unit tests
+    winreg = None
 
 import uia
 import win32

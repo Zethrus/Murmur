@@ -1,7 +1,6 @@
 """H1-H7: hold, release orders, B8 Shift, toggle, Escape, conflicts, code hotkey."""
 import re
 
-import uia
 import win32
 from checks.common import BLOCKED_HOTKEY, CODE_HOTKEY, SHIFT_HOTKEY
 from context import Fail
@@ -54,8 +53,13 @@ def h3_shift_held(ctx):
     ctx.settle()
     if not text:
         raise Fail("Nothing delivered with Shift held after the key")
-    if text[0] != expected[0]:
-        raise Fail(f"First character {text[0]!r} differs from the clean release ({expected[0]!r}): shifted")
+    first = app.first_key()
+    # Tk reports the modifier state of each key event; bit 0x1 is Shift. Unicode (VK_PACKET)
+    # typing keeps its character either way, so the state bit is what shows B8.
+    if first is None or first.get("state") is None:
+        raise Fail("TargetApp recorded no key state for the first character")
+    if first["state"] & 0x1:
+        raise Fail(f"First character {first.get('char')!r} arrived while Shift was still held (B8)")
     ctx.expect(expected, text, "Shift held 300 ms")
     after_shift = app.first_key_time() - shift_up
     after_key = after_shift + 0.3
@@ -97,35 +101,44 @@ def h5_escape(ctx):
 
 
 def h6_conflict(ctx):
+    """A shortcut another app owns: Murmur must refuse it and keep the previous one.
+
+    Driven through the config file (what Settings saves and what Murmur reloads), not by pressing
+    the combination into Settings' capture field: Windows delivers a RegisterHotKey-owned
+    combination only to its owner as WM_HOTKEY, so the capture field never sees it (true for a
+    person pressing Win+E too). The harness owns the combination itself, so nothing else opens."""
     expected = ctx.golden("A")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     blocker = win32.HotkeyBlocker(BLOCKED_HOTKEY).start()
     ctx.restorer.push("release the blocking hotkey", blocker.stop)
-    window = ctx.murmur.page("General")
-    button = uia.find_following(window, "Dictation shortcut", control_type_=uia.BUTTON, timeout=10, sleep=ctx.sleep)
-    win32.activate(ctx.murmur.settings_hwnd(), click_at=uia.center(button))
-    win32.click(*uia.center(button))
-    ctx.sleep(0.5)
-    ctx.press(BLOCKED_HOTKEY)
-    ctx.sleep(0.2)
-    ctx.release(BLOCKED_HOTKEY, "together")
-    names = win32.wait_for(lambda: [n for n in uia.names(window) if "unavailable" in n.lower()], 5, 0.25,
-                           sleep=ctx.sleep)
-    ctx.screenshot(ctx.murmur.settings_hwnd(), "conflict.png")
-    capturing = any(n == "Press a combination…" for n in uia.names(window))
-    if capturing:
-        win32.tap("esc")
-    ctx.note("the conflicting shortcut is held by the harness (RegisterHotKey) instead of Win+E, so Explorer "
-             "does not open")
+    ctx.restorer.push("restore the config file", lambda: ctx.murmur.write_config({}))
+    log_before = len(ctx.murmur.log())
+    ctx.murmur.write_config({"general": {"hotkey": BLOCKED_HOTKEY}})
+    needle = "is unavailable"
+
+    def refused():
+        state = ctx.murmur.overlay_state()
+        if state.startswith("error:") and needle in state:
+            return state
+        tail = ctx.murmur.log()[log_before:]
+        return next((line for line in tail.splitlines() if needle in line), None)
+
+    evidence = win32.wait_for(refused, 10, 0.2, sleep=ctx.sleep)
+    ctx.screenshot(ctx.murmur.overlay_hwnd(), "overlay.png")
+    # Put the file back to the running config (reload compares and finds nothing to change).
+    ctx.murmur.write_config({})
+    ctx.sleep(2.5)  # the error state resets after 1.6 s
     blocker.stop()
+    ctx.note("conflict driven through the config file with a combination the harness registered "
+             "(RegisterHotKey); pressing it into the capture field cannot work on Windows, see docstring")
+    if not evidence:
+        raise Fail(f"No 'Shortcut ... {needle}' error after configuring a shortcut another app owns "
+                   f"(overlay: {ctx.murmur.overlay_state()})")
+    ctx.note(f"error: {evidence.strip()[:200]!r}")
     app = ctx.target("A")
     app.focus()
     ctx.dictate("A")
     ctx.expect(expected, app.wait_text(), "previous hotkey after the conflict")
-    if not names:
-        raise Fail("No inline 'unavailable' error" + (": the capture never received the key (the owner of a "
-                                                       "registered hotkey swallows it)" if capturing else ""))
-    ctx.note(f"error: {names[0]!r}")
 
 
 def _words(text):

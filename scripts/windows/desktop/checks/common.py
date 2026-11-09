@@ -61,7 +61,15 @@ def focus_change_dictation(ctx, fixture, start, finish, config=None, hotkey=None
     """Start in `start`, click `finish` while the hotkey is held, release. Returns release time."""
     ctx.murmur.ensure(ctx.fixtures[fixture].path, config or {})
     start.focus()
-    return ctx.dictate(fixture, hotkey=hotkey, during=lambda c: finish.focus())
+    return ctx.dictate(fixture, hotkey=hotkey, during=lambda c: focus_while_held(finish))
+
+
+def focus_while_held(target):
+    """Focus a target while the hold-mode modifiers are down (no Shift+click where it matters)."""
+    if getattr(target, "CLICK_WHILE_HELD", True):
+        target.focus()
+    else:
+        target.focus(click=False)
 
 
 def produce_held(ctx, fixture, a, b, config=None):

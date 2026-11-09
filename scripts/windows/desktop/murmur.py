@@ -13,7 +13,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import time
 import urllib.request
 import zipfile
 
@@ -198,8 +197,12 @@ class MurmurSession:
                 except subprocess.TimeoutExpired:
                     pass
             self.process = None
+        # An engine orphaned by the kill above: only ones started from this session's profile.
+        mine = str(self.home.resolve()).lower()
         for pid in win32.pids("murmur-engine.exe"):
-            win32.kill(pid)
+            path = win32.process_path(pid)
+            if path and path.lower().startswith(mine):
+                win32.kill(pid)
 
     def restart(self, wav=None, config=None, args=()):
         self.stop()

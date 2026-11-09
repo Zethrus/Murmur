@@ -155,6 +155,9 @@ def _declare():
         ("Process32NextW", (handle, ctypes.POINTER(PROCESSENTRY32W)), wintypes.BOOL),
         ("CloseHandle", (handle,), wintypes.BOOL),
         ("GetLongPathNameW", (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD), wintypes.DWORD),
+        ("OpenProcess", (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD), handle),
+        ("QueryFullProcessImageNameW", (handle, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)),
+         wintypes.BOOL),
     ):
         function = getattr(kernel32, name)
         function.argtypes, function.restype = args, res
@@ -517,6 +520,22 @@ def pids(name):
     return [pid for pid, exe in processes() if exe.lower() == name.lower()]
 
 
+def process_path(pid):
+    """Full executable path of a process, None when it cannot be opened (gone or protected)."""
+    require_windows()
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return None
+        return buffer.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def kill(pid, tree=True):
     arguments = ["taskkill", "/PID", str(pid), "/F"] + (["/T"] if tree else [])
     subprocess.run(arguments, capture_output=True, creationflags=CREATE_NO_WINDOW)
@@ -680,15 +699,19 @@ class Registry:
 
     def values(self, path):
         """{name: value} of a key, {} when absent."""
+        return {name: value for name, (value, _kind) in self.typed_values(path).items()}
+
+    def typed_values(self, path):
+        """{name: (value, registry type)} of a key, {} when absent (restores keep the type)."""
         try:
             with self.winreg.OpenKey(self.winreg.HKEY_CURRENT_USER, path) as key:
                 result, index = {}, 0
                 while True:
                     try:
-                        name, value, _ = self.winreg.EnumValue(key, index)
+                        name, value, kind = self.winreg.EnumValue(key, index)
                     except OSError:
                         return result
-                    result[name] = value
+                    result[name] = (value, kind)
                     index += 1
         except FileNotFoundError:
             return {}

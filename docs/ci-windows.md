@@ -210,16 +210,15 @@ The runner:
   `contents: read` and `actions: read`, checkout without persisted credentials.
 
 **Build hand-off.** Artifact storage is billing-locked, so `windows-build.yml`
-(pull requests and manual runs on Edison) ends by copying the installer,
+(manual runs on Edison only, so a pull-request run cannot write into the folder) ends by copying the installer,
 portable zip, component zips, manifest and signature, the throwaway certificate
 and `components-windows-inputs.json` to `C:\murmur-ci-out\<commit>\`, writes
 `SHA256SUMS` and prints every hash to its job log as
 `MURMUR-HANDOFF-SHA256 <commit> <sha256> <file>`. The newest three commits are
 kept. When `C:\murmur-ci-out` does not exist the step only prints a notice.
 Folder ACLs (`murmur-ci` modify, owner read) are set once when Edison is
-provisioned; the workflow never changes them. Pull-request builds are keyed by
-their merge commit, so for a desktop run dispatch `windows-build.yml` on the
-branch first.
+provisioned; the workflow never changes them. For a desktop run, dispatch
+`windows-build.yml` on the branch first.
 
 **Before anything runs**, the desktop job (`scripts/windows/desktop/handoff.py`)
 requires the `sha` input to equal the commit it was dispatched on, copies the
@@ -276,8 +275,12 @@ every check and again when the run ends (also after an abort): the clipboard
 values, the per-user microphone consent value, and the Notepad, Terminal, VS
 Code and test windows it opened. P2 runs the installer silently into a temp
 folder and uninstalls it again; it is skipped when Murmur is installed for the
-account. WebView2 keeps its data under the real `%LOCALAPPDATA%` (it ignores
-the profile override).
+account (a second per-user install would take over its Start menu and uninstall
+entries), so on a machine where you use Murmur, P2 is covered only by a run on a
+clean account. WebView2 keeps its data under the real `%LOCALAPPDATA%` (it
+ignores the profile override), and speech fixtures and the downloaded test model
+are cached in `%LOCALAPPDATA%\murmur-desktop-cache` between runs (delete it to
+reclaim the space).
 
 ### Stopping the desktop runner
 

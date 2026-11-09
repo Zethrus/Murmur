@@ -1,6 +1,5 @@
 """T1-T3, A1, A2: notification-area icon, tray menu, single instance, Start with Windows."""
 import subprocess
-import winreg
 
 import uia
 import win32
@@ -131,18 +130,17 @@ def t3_single_instance(ctx):
 def _watch_run_keys(ctx):
     """Restore the owner's Run / StartupApproved values whatever the app writes (same value name)."""
     registry = win32.Registry()
-    snapshots = {path: registry.values(path) for path in (RUN, APPROVED)}
+    snapshots = {path: registry.typed_values(path) for path in (RUN, APPROVED)}
 
     def undo():
         for path, before in snapshots.items():
-            after = registry.values(path)
+            after = registry.typed_values(path)
             for name in after:
                 if name not in before:
                     registry.delete(path, name)
-            for name, value in before.items():
-                if after.get(name) != value:
-                    kind = winreg.REG_BINARY if isinstance(value, bytes) else winreg.REG_SZ
-                    registry.write(path, name, value, kind)
+            for name, (value, kind) in before.items():
+                if after.get(name) != (value, kind):
+                    registry.write(path, name, value, kind)  # same type (REG_EXPAND_SZ stays expandable)
 
     ctx.restorer.push("restore HKCU Run entries", undo)
     return registry

@@ -3,7 +3,10 @@
 S1 ports scripts/parity/capture-windows.ps1: theme through config.toml (the app reloads it), each
 page button invoked through UI Automation, the Settings window saved at the current scaling.
 """
-import winreg
+try:
+    import winreg
+except ImportError:  # not Windows: the module still imports for the unit tests
+    winreg = None
 
 import capture
 import uia

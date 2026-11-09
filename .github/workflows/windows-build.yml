@@ -375,8 +375,10 @@ jobs:
       # build is handed over through a local folder on Edison. The desktop job re-checks every
       # file against SHA256SUMS and against the MURMUR-HANDOFF-SHA256 lines printed below in
       # this job's log, so a modified folder is refused before anything runs.
-      - name: Hand the build to the desktop runner (self-hosted; pull requests and manual runs)
-        if: runner.environment == 'self-hosted' && !startsWith(github.ref, 'refs/tags/')
+      # Manual runs only: a pull-request run (possibly from a fork, after approval) must not be
+      # able to write into or prune the hand-off folder.
+      - name: Hand the build to the desktop runner (self-hosted; manual runs)
+        if: runner.environment == 'self-hosted' && github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'

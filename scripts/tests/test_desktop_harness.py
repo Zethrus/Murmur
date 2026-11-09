@@ -498,3 +498,54 @@ class ManualTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuardMouseTests(unittest.TestCase):
+    """guard.Guard.mouse_event: the pure decision behind the low-level mouse hook."""
+
+    def test_injected_input_never_trips(self):
+        g = guard.Guard()
+        self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, True, (0, 0)))
+        self.assertIsNone(g.mouse_event(0x0201, True, (0, 0)))  # WM_LBUTTONDOWN, injected
+
+    def test_real_button_trips(self):
+        self.assertEqual(guard.Guard().mouse_event(0x0201, False, (5, 5)), "real mouse button or wheel input")
+
+    def test_real_drift_within_tolerance_is_ignored_and_beyond_trips(self):
+        g = guard.Guard()
+        self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (100, 100)))
+        self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (102, 99)))
+        self.assertEqual(g.mouse_event(guard.WM_MOUSEMOVE, False, (110, 100)), "real mouse movement")
+
+    def test_injected_move_reanchors_the_origin(self):
+        # Real jitter at the old place, the harness moves the cursor far away, then a pixel of real
+        # jitter where the cursor now is: not a person.
+        g = guard.Guard()
+        self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (100, 100)))
+        self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, True, (900, 700)))
+        self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (901, 700)))
+        self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (902, 701)))
+        self.assertEqual(g.mouse_event(guard.WM_MOUSEMOVE, False, (920, 701)), "real mouse movement")
+
+    def test_probe_is_an_unassigned_key_with_a_tag(self):
+        self.assertEqual(guard.PROBE_VK, 0x88)  # reserved/unassigned virtual-key code
+        self.assertLess(guard.PROBE_TIMEOUT, guard.PROBE_INTERVAL)
+
+
+class GoldenDuplicateTests(unittest.TestCase):
+    def test_delivered_twice_with_separator(self):
+        message = golden.compare("Hello there.", "Hello there. Hello there.")
+        self.assertIn("more than once", message)
+
+    def test_prefix_extension_is_not_called_a_duplicate(self):
+        message = golden.compare("Hello there.", "Hello there. And")
+        self.assertNotIn("more than once", message)
+        self.assertIn("differs at character 12", message)
+
+
+class ChecksImportTests(unittest.TestCase):
+    def test_every_check_module_imports_off_windows(self):
+        import importlib
+        for name in ("common", "components", "focus", "hotkeys", "insertion", "keyboard", "microphone",
+                     "overlay", "settings", "setup", "tray"):
+            importlib.import_module(f"checks.{name}")
