@@ -48,6 +48,12 @@ def aggregate(attempts):
         reason = failed.reason
         if PASS in statuses:
             reason = f"flaky: failed {statuses.count(FAIL)} of {len(counted)} attempts; first failure: {reason}"
+    elif ABORTED in statuses:
+        # An aborted attempt means the run did not finish: never hide it behind an earlier pass.
+        aborted = next(a for a in attempts if a.status == ABORTED)
+        status, reason = ABORTED, aborted.reason
+        if PASS in statuses:
+            reason = f"{reason} (passed {statuses.count(PASS)} earlier attempt(s))"
     elif PASS in statuses:
         status, reason = PASS, ""
         if len(statuses) > statuses.count(PASS):

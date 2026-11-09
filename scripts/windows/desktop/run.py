@@ -184,6 +184,9 @@ def main(argv=None):
         speech = fixtures.build(cache / "fixtures")
         session = MurmurSession(build, work, guard, base_config(args.hotkey)).prepare()
         restorer.push("stop Murmur", session.stop)
+        # Run-wide safety net (checks that touch the clipboard also snapshot it themselves).
+        clipboard_before = win32.clipboard_text()
+        restorer.push("restore the clipboard text", lambda: win32.set_clipboard_text(clipboard_before))
         session.install_engine()
         session.install(fetch_model(build, cache / "models"))
         if not args.no_banner:
@@ -218,7 +221,7 @@ def main(argv=None):
         path = report.write(out, meta, results)
         print(path.read_text(encoding="utf-8"))
     counts = report.summary(report.rows(results))
-    return 0 if not counts[report.FAIL] and not counts[report.ABORTED] else 1
+    return 0 if not aborted and not counts[report.FAIL] and not counts[report.ABORTED] else 1
 
 
 if __name__ == "__main__":

@@ -106,6 +106,7 @@ def _type_lands(ctx, pad, letter, expected):
 
 def o3_buttons_keep_focus(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path)
+    ctx.clipboard_guard()  # Copy replaces the owner's clipboard
     pad = _notepad_with_word(ctx)
     origin = ctx.target("origin")
     expected = "start"

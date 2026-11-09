@@ -200,7 +200,8 @@ def _hold_modifiers_through_delivery(ctx, app, expected):
     while time.monotonic() < deadline:
         state = ctx.murmur.overlay_state()
         restarted = restarted or (state == "listening" and bool(app.text()))
-        if app.text() and time.monotonic() - (app.keys()[-1]["t"] if app.keys() else 0) > 1.5:
+        typed = app.delivered()
+        if typed and time.monotonic() - typed[-1]["t"] > 1.5:
             break
         ctx.sleep(0.05)
     typed_while_held = bool(app.text())
@@ -225,6 +226,7 @@ def f13_no_retrigger(ctx):
     if "d" not in expected.lower():
         raise Fail(f"The fixture transcript has no 'd': {expected!r}")
     ctx.murmur.ensure(ctx.fixtures["D"].path, {"general": {"hotkey": D_HOTKEY}})
+    ctx.clipboard_guard()  # the Prefer paste pass goes through the clipboard
     _hold_modifiers_through_delivery(ctx, ctx.target("direct"), expected)
     for prefer_paste in (False, True):
         config = {"general": {"hotkey": D_HOTKEY}, "injection": {"prefer_paste": prefer_paste}}

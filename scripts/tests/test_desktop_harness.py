@@ -549,3 +549,30 @@ class ChecksImportTests(unittest.TestCase):
         for name in ("common", "components", "focus", "hotkeys", "insertion", "keyboard", "microphone",
                      "overlay", "settings", "setup", "tray"):
             importlib.import_module(f"checks.{name}")
+
+
+class AbortedAggregationTests(unittest.TestCase):
+    def test_an_aborted_repeat_is_not_hidden_by_an_earlier_pass(self):
+        attempts = [report.Result("H1", report.PASS, "", "t", "g", attempt=1),
+                    report.Result("H1", report.ABORTED, "aborted: user input (x)", "t", "g", attempt=2)]
+        row = report.aggregate(attempts)
+        self.assertEqual(row.status, report.ABORTED)
+        self.assertIn("passed 1 earlier", row.reason)
+
+    def test_a_failure_still_wins_over_an_abort(self):
+        attempts = [report.Result("H1", report.FAIL, "boom", "t", "g", attempt=1),
+                    report.Result("H1", report.ABORTED, "aborted: user input (x)", "t", "g", attempt=2)]
+        self.assertEqual(report.aggregate(attempts).status, report.FAIL)
+
+
+class DeliveredKeysTests(unittest.TestCase):
+    def test_hotkey_modifier_presses_are_not_delivery(self):
+        import targets
+        keys = [{"char": "", "keysym": "Control_L", "state": 0, "t": 1.0},
+                {"char": "", "keysym": "Shift_L", "state": 4, "t": 1.1},
+                {"char": "\x04", "keysym": "d", "state": 12, "t": 1.2},
+                {"char": "T", "keysym": "T", "state": 0, "t": 5.0},
+                {"char": "h", "keysym": "h", "state": 0, "t": 5.1}]
+        delivered = targets.delivered_keys(keys)
+        self.assertEqual([k["char"] for k in delivered], ["T", "h"])
+        self.assertEqual(delivered[0]["t"], 5.0)

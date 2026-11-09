@@ -129,6 +129,11 @@ def show_banner(seconds):
     subprocess.run([pythonw(), str(HERE / "targets.py"), "banner", str(seconds)], timeout=seconds + 30)
 
 
+def delivered_keys(keys):
+    """Character-producing events of a TargetApp key log (pure; unit-tested)."""
+    return [k for k in keys if k.get("char") and k["char"].isprintable()]
+
+
 class TargetApp:
     """Handle on one TargetApp window. Use clear() between deliveries."""
 
@@ -203,12 +208,17 @@ class TargetApp:
             sleep(0.1)
         return last or ""
 
+    def delivered(self):
+        """Key events that produced a character. keys() also holds the hotkey's own Ctrl/Alt/
+        Shift presses made while this window had focus; delivery timing must ignore those."""
+        return delivered_keys(self.keys())
+
     def first_key_time(self):
-        keys = self.keys()
+        keys = self.delivered()
         return keys[0]["t"] if keys else None
 
     def first_key(self):
-        keys = self.keys()
+        keys = self.delivered()
         return keys[0] if keys else None
 
     def close(self):
