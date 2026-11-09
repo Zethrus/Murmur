@@ -5,8 +5,11 @@ name: Windows build
 # yet: the workflow was written without a Windows machine (see docs/ci-windows.md).
 #
 # Pull requests and manual runs build, test and upload throwaway-signed artifacts (never a
-# release). Release tags arrive through release.yml (workflow_call): the Windows assets go to the
-# draft release only, and the component inputs are handed to the Linux signing job.
+# release); their murmur.exe embeds the throwaway-signed manifest (trusted only with
+# MURMUR_DEV_TRUST_ROOT + ACK), and on Edison the build is handed to the desktop runner through
+# C:\murmur-ci-out (windows-desktop.yml). Release tags arrive through release.yml
+# (workflow_call): nothing is embedded, a guard re-checks that before upload, the Windows assets
+# go to the draft release only, and the component inputs are handed to the Linux signing job.
 on:
   pull_request:
   workflow_dispatch:
@@ -139,12 +142,12 @@ jobs:
       - run: npm run build
       - run: npm run test:ui
 
-      - name: Script tests (release checks, PE gate, Windows components, inference core)
+      - name: Script tests (release checks, PE gate, Windows components, inference core, desktop harness)
         shell: pwsh
         run: |
           # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
           Push-Location scripts/tests
-          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_cpu_audit
+          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_cpu_audit test_embedded_manifest test_desktop_harness
           $Code = $LASTEXITCODE
           Pop-Location
           if ($Code -ne 0) { throw 'Script tests failed' }
@@ -164,6 +167,35 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests without Enhance backend failed' }
 
+      - name: Build the component zips (engine, cuBLAS add-on) before the app
+        shell: pwsh
+        run: |
+          ./scripts/windows/package.ps1 -ComponentsOnly |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Throwaway-signed Windows manifest (pull requests and manual runs; never released)
+        # Before `tauri build`, so pull-request and manual builds can embed it (setup and
+        # download checks on the desktop runner). The throwaway certificate stays next to it as
+        # murmur-release.asc; the app trusts it only with MURMUR_DEV_TRUST_ROOT + ACK.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          components=.cache/artifacts/components-windows
+          # Git Bash's gpg is an MSYS program: it reads S:/... as a relative path, so hand it
+          # the POSIX form (/s/...) of the runner's temp directory.
+          key="$(cygpath -u "$RUNNER_TEMP")/murmur-throwaway-key"
+          rm -rf "$key"
+          scripts/components/dev-key.sh "$key" >/dev/null
+          sleep 1
+          python scripts/components/make-manifest.py --components "$components" --version "$version" --os windows \
+            --windows-inputs "$components/components-windows-inputs.json" \
+            --output "$components/components-manifest.json"
+          GNUPGHOME="$key" scripts/components/sign-manifest.sh "$components/components-manifest.json" "$components/murmur-release.asc"
+          gpgconf --homedir "$key" --kill all || true
+          rm -rf "$key"
+
       # Release tags only: pull-request and manual builds never receive the certificate secrets,
       # never hold the key in the runner's certificate store and never produce signed artifacts.
       - name: Import the Authenticode certificate (tags only; dormant until the secrets exist)
@@ -177,6 +209,10 @@ jobs:
       - name: Build murmur.exe and the per-user NSIS installer
         shell: pwsh
         env:
+          # Pull requests and manual runs embed the throwaway-signed manifest (as Linux does) so the
+          # first-run setup has a catalog on the desktop runner. Never on tags: a release binary
+          # embeds nothing signed by a throwaway key (the release guard below re-checks this).
+          EMBED_TEST_MANIFEST: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && !startsWith(github.ref, 'refs/tags/') }}
           RUSTFLAGS: -C target-cpu=x86-64
           GGML_NATIVE: 'OFF'
           GGML_AVX512: 'OFF'
@@ -188,6 +224,16 @@ jobs:
           GGML_SSE42: 'ON'
           GGML_CPU_ALL_VARIANTS: 'OFF'
         run: |
+          if ($env:EMBED_TEST_MANIFEST -eq 'true') {
+            # build.rs embeds <manifest> and <manifest>.sig; a full path (no 8.3 short names).
+            $Manifest = (Get-Item -LiteralPath '.cache/artifacts/components-windows/components-manifest.json').FullName
+            if (-not (Test-Path -LiteralPath "$Manifest.sig")) { throw "Missing $Manifest.sig" }
+            $env:MURMUR_EMBED_MANIFEST = $Manifest
+            Write-Host "Embedding the throwaway-signed test manifest: $Manifest"
+          } else {
+            Remove-Item Env:MURMUR_EMBED_MANIFEST -ErrorAction SilentlyContinue
+            Write-Host 'No embedded manifest (release tag or workflow_call).'
+          }
           $TauriArgs = @('tauri', 'build', '--target', 'x86_64-pc-windows-msvc')
           if ($env:MURMUR_SIGN_THUMBPRINT -and $env:GITHUB_REF -like 'refs/tags/*') {
             $Config = Join-Path $env:RUNNER_TEMP 'tauri.sign.conf.json'
@@ -213,10 +259,10 @@ jobs:
           python scripts/audit-llama-cpu.py src-tauri/target/x86_64-pc-windows-msvc/release
           if ($LASTEXITCODE -ne 0) { throw 'Unsupported native CPU baseline' }
 
-      - name: Package installer, portable zip and component zips; enforce size budgets
+      - name: Package installer and portable zip; enforce size budgets
         shell: pwsh
         run: |
-          ./scripts/windows/package.ps1 -Release src-tauri/target/x86_64-pc-windows-msvc/release |
+          ./scripts/windows/package.ps1 -SkipComponents -Release src-tauri/target/x86_64-pc-windows-msvc/release |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Startup smoke test (--version, --help)
@@ -263,26 +309,6 @@ jobs:
           }
           Write-Host 'murmur.exe started without an engine and did not crash within 10 s.'
 
-      - name: Throwaway-signed Windows manifest (pull requests and manual runs; never released)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          components=.cache/artifacts/components-windows
-          # Git Bash's gpg is an MSYS program: it reads S:/... as a relative path, so hand it
-          # the POSIX form (/s/...) of the runner's temp directory.
-          key="$(cygpath -u "$RUNNER_TEMP")/murmur-throwaway-key"
-          rm -rf "$key"
-          scripts/components/dev-key.sh "$key" >/dev/null
-          sleep 1
-          python scripts/components/make-manifest.py --components "$components" --version "$version" --os windows \
-            --windows-inputs "$components/components-windows-inputs.json" \
-            --output "$components/components-manifest.json"
-          GNUPGHOME="$key" scripts/components/sign-manifest.sh "$components/components-manifest.json" "$components/murmur-release.asc"
-          gpgconf --homedir "$key" --kill all || true
-          rm -rf "$key"
-
       - name: GPU validation on the NVIDIA runner (manual runs with gpu=true)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu }}
         shell: pwsh
@@ -302,6 +328,17 @@ jobs:
         run: |
           $Json = Get-Content -Raw .cache/artifacts/components-windows/components-windows-inputs.json | ConvertFrom-Json | ConvertTo-Json -Depth 8 -Compress
           "json=$Json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Release guard - no throwaway-signed manifest in the shipped binaries (tags only)
+        # Fails if murmur.exe (target folder and portable zip) embeds a manifest signed by any key
+        # other than the committed release certificate; with no certificate, nothing may be
+        # embedded. The NSIS installer is compressed and wraps the same murmur.exe.
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          python scripts/check-embedded-manifest.py --trusted-cert src-tauri/trust/murmur-release.asc `
+            src-tauri/target/x86_64-pc-windows-msvc/release/murmur.exe .cache/artifacts/windows/murmur-windows-x86_64.zip
+          if ($LASTEXITCODE -ne 0) { throw 'A release binary embeds a throwaway-signed manifest' }
 
       - name: Attach Windows assets to the draft release (tags only)
         if: startsWith(github.ref, 'refs/tags/')
@@ -333,3 +370,55 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
+
+      # The desktop runner (docs/ci-windows.md) cannot receive artifacts (billing lock), so the
+      # build is handed over through a local folder on Edison. The desktop job re-checks every
+      # file against SHA256SUMS and against the MURMUR-HANDOFF-SHA256 lines printed below in
+      # this job's log, so a modified folder is refused before anything runs.
+      - name: Hand the build to the desktop runner (self-hosted; pull requests and manual runs)
+        if: runner.environment == 'self-hosted' && !startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Root = 'C:\murmur-ci-out'
+          if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+            Write-Host "::notice::$Root does not exist on this runner; desktop hand-off skipped (docs/ci-windows.md)."
+            exit 0
+          }
+          # Defender may still hold freshly written files open: retry deletes.
+          function Remove-Retrying([string]$Path) {
+            for ($Try = 1; $Try -le 10; $Try++) {
+              try { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop; return }
+              catch { if ($Try -eq 10) { throw }; Start-Sleep -Seconds 2 }
+            }
+          }
+          $Commit = $env:GITHUB_SHA
+          $Version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $Files = @(
+            ".cache/artifacts/windows/Murmur_${Version}_x64-setup.exe",
+            '.cache/artifacts/windows/murmur-windows-x86_64.zip',
+            ".cache/artifacts/components-windows/murmur-engine-windows-x86_64-$Version.zip",
+            ".cache/artifacts/components-windows/murmur-cuda-windows-x86_64-$Version.zip",
+            '.cache/artifacts/components-windows/components-manifest.json',
+            '.cache/artifacts/components-windows/components-manifest.json.sig',
+            '.cache/artifacts/components-windows/murmur-release.asc',
+            '.cache/artifacts/components-windows/components-windows-inputs.json'
+          )
+          foreach ($File in $Files) { if (-not (Test-Path -LiteralPath $File)) { throw "Missing hand-off file $File" } }
+          # Folder ACLs are inherited from C:\murmur-ci-out (set when Edison was provisioned).
+          $Dest = Join-Path $Root $Commit
+          if (Test-Path -LiteralPath $Dest) { Remove-Retrying $Dest }
+          New-Item -ItemType Directory -Path $Dest | Out-Null
+          foreach ($File in $Files) { Copy-Item -LiteralPath $File -Destination $Dest }
+          $Sums = foreach ($File in (Get-ChildItem -LiteralPath $Dest -File | Sort-Object Name)) {
+            $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $File.FullName).Hash.ToLowerInvariant()
+            # The desktop job compares the folder against these log lines (gh run view --log).
+            Write-Host "MURMUR-HANDOFF-SHA256 $Commit $Hash $($File.Name)"
+            "$Hash  $($File.Name)"
+          }
+          [IO.File]::WriteAllText((Join-Path $Dest 'SHA256SUMS'), (($Sums -join "`n") + "`n"))
+          # Keep the newest three commits.
+          Get-ChildItem -LiteralPath $Root -Directory | Where-Object { $_.Name -match '^[0-9a-f]{40}$' } |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -Skip 3 |
+            ForEach-Object { Write-Host "Pruning $($_.Name)"; Remove-Retrying $_.FullName }
+          "Desktop hand-off: ``$Dest`` ($($Files.Count) files + SHA256SUMS)." | Out-File $env:GITHUB_STEP_SUMMARY -Append

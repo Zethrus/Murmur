@@ -1,0 +1,150 @@
+name: Windows desktop
+
+# Automated desktop checks (docs/parity/windows-checklist.md, items tagged auto) on Edison's
+# logged-in desktop through the `desktop` runner (docs/ci-windows.md, "Desktop runner").
+#
+# WARNING: jobs on the desktop runner run as the owner's Windows account, in the owner's
+# interactive session, with access to that account's desktop, files and credentials. This
+# workflow is therefore dispatch-only and owner-only; nothing else may target that runner.
+#
+# Dispatch it on the commit to test, after windows-build.yml has run on that same commit on
+# Edison (pull-request builds are keyed by their merge commit and cannot be used). The build is
+# taken from C:\murmur-ci-out\<sha> and verified against SHA256SUMS and the hashes printed in
+# that build's own job log before anything from it runs. Reports go to
+# C:\murmur-desktop-reports\<sha>\<run id>-<attempt>\ (artifact storage is blocked by the
+# account's billing lock; the upload below is best effort for when it is lifted).
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA to test; must be the commit this run is dispatched on
+        required: true
+        type: string
+      only:
+        description: Checklist ids to run, e.g. H1,F2 (empty runs every automated check)
+        required: false
+        type: string
+        default: ''
+      repeat:
+        description: Run each selected check N times (1-10, flake hunting)
+        required: false
+        type: string
+        default: '1'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-desktop
+  cancel-in-progress: false
+
+jobs:
+  desktop:
+    if: github.actor == github.repository_owner
+    runs-on: [self-hosted, Windows, X64, desktop]
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - name: Only the dispatched commit can be tested
+        shell: pwsh
+        env:
+          SHA: ${{ inputs.sha }}
+          ONLY: ${{ inputs.only }}
+          REPEAT: ${{ inputs.repeat }}
+        run: |
+          $Sha = $env:SHA.Trim().ToLowerInvariant()
+          if ($Sha -notmatch '^[0-9a-f]{40}$') { throw 'sha must be a full 40-character commit hash' }
+          if ($Sha -ne $env:GITHUB_SHA) {
+            throw "sha $Sha is not the commit this run was dispatched on ($env:GITHUB_SHA); dispatch on that commit"
+          }
+          if ($env:ONLY -notmatch '^[A-Za-z0-9, ]*$') { throw 'only accepts checklist ids separated by commas' }
+          if ($env:REPEAT -notmatch '^([1-9]|10)$') { throw 'repeat must be 1-10' }
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Harness virtual environment (hash-locked dependencies)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Machine-wide Python 3.12 (setup-python would need administrator rights here).
+          $Venv = Join-Path $env:RUNNER_TEMP 'murmur-desktop-venv'
+          if (Test-Path $Venv) { Remove-Item $Venv -Recurse -Force }
+          & py -3.12 -m venv $Venv
+          if ($LASTEXITCODE -ne 0) { throw 'Python 3.12 (py -3.12) is required on the desktop runner' }
+          $Python = Join-Path $Venv 'Scripts\python.exe'
+          & $Python -m pip install --disable-pip-version-check --no-input --require-hashes --only-binary=:all: `
+            -r scripts/windows/desktop/requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Installing the hash-locked harness dependencies failed' }
+          "MURMUR_DESKTOP_PYTHON=$Python" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Verify the handed-over build (SHA256SUMS and the build's own job log)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw 'GitHub CLI (gh) is required on the desktop runner' }
+          # The owner's temp folder: the hand-off folder itself is never executed from.
+          $Dest = Join-Path ([IO.Path]::GetTempPath()) "murmur-desktop-build\$env:GITHUB_SHA"
+          & $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/handoff.py --sha $env:GITHUB_SHA `
+            --dispatched $env:GITHUB_SHA --source "C:\murmur-ci-out\$env:GITHUB_SHA" --dest $Dest `
+            --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'The handed-over build failed verification; nothing was run' }
+          "MURMUR_DESKTOP_BUILD=$Dest" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $Out = "C:\murmur-desktop-reports\$env:GITHUB_SHA\$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "MURMUR_DESKTOP_OUT=$Out" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Preflight (unlocked session, idle 60 s, no other Murmur or Notepad)
+        shell: pwsh
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          $RunArgs = @('--build', $env:MURMUR_DESKTOP_BUILD, '--out', $env:MURMUR_DESKTOP_OUT, '--preflight-only')
+          if ($env:ONLY.Trim()) { $RunArgs += @('--only', $env:ONLY) }
+          & $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/run.py @RunArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Preflight refused to start (see above); nothing was run' }
+
+      - name: Run the desktop checks (takes the keyboard and mouse; real input aborts)
+        shell: pwsh
+        env:
+          ONLY: ${{ inputs.only }}
+          REPEAT: ${{ inputs.repeat }}
+        run: |
+          $RunArgs = @('--build', $env:MURMUR_DESKTOP_BUILD, '--out', $env:MURMUR_DESKTOP_OUT, '--repeat', $env:REPEAT)
+          if ($env:ONLY.Trim()) { $RunArgs += @('--only', $env:ONLY) }
+          & $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/run.py @RunArgs
+          if ($LASTEXITCODE -ne 0) { throw "Desktop checks failed or were aborted; report in $env:MURMUR_DESKTOP_OUT" }
+
+      - name: Report to the job summary
+        if: always()
+        shell: pwsh
+        run: |
+          $Report = Join-Path "$env:MURMUR_DESKTOP_OUT" 'desktop-report.md'
+          if ($env:MURMUR_DESKTOP_OUT -and (Test-Path -LiteralPath $Report)) {
+            Get-Content -LiteralPath $Report -Raw | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            "Evidence: ``$env:MURMUR_DESKTOP_OUT`` on Edison." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          } else {
+            'No desktop report was written (verification or preflight stopped the run).' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+      - name: Upload the report (best effort; artifact storage is billing-locked)
+        if: always() && env.MURMUR_DESKTOP_OUT != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop-report
+          path: ${{ env.MURMUR_DESKTOP_OUT }}
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Remove the verified build copy
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:MURMUR_DESKTOP_BUILD -and (Test-Path -LiteralPath $env:MURMUR_DESKTOP_BUILD)) {
+            Remove-Item -LiteralPath $env:MURMUR_DESKTOP_BUILD -Recurse -Force -ErrorAction SilentlyContinue
+          }

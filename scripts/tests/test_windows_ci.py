@@ -130,5 +130,107 @@ class ProvisioningSecretTests(unittest.TestCase):
         self.assertIn("[version]$Driver -lt [version]$MinimumDriver", self.script)
 
 
+class EmbeddedManifestTests(unittest.TestCase):
+    def test_components_and_manifest_are_built_before_the_app(self):
+        names = [re.search(r"- name: (.+)", b).group(1) for b in steps("windows-build.yml") if "- name: " in b]
+        order = [next(i for i, n in enumerate(names) if n.startswith(prefix)) for prefix in (
+            "Build the component zips", "Throwaway-signed Windows manifest", "Build murmur.exe")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("-ComponentsOnly", step("windows-build.yml", "Build the component zips"))
+        self.assertIn("-SkipComponents", step("windows-build.yml", "Package installer and portable zip"))
+
+    def test_manifest_is_embedded_only_for_pull_requests_and_manual_runs(self):
+        build = step("windows-build.yml", "Build murmur.exe")
+        self.assertIn("EMBED_TEST_MANIFEST: ${{ (github.event_name == 'pull_request' || "
+                      "github.event_name == 'workflow_dispatch') && !startsWith(github.ref, 'refs/tags/') }}", build)
+        self.assertIn("if ($env:EMBED_TEST_MANIFEST -eq 'true')", build)
+        self.assertIn("Remove-Item Env:MURMUR_EMBED_MANIFEST", build)
+        throwaway = step("windows-build.yml", "Throwaway-signed Windows manifest")
+        self.assertEqual(condition(throwaway), "${{ !startsWith(github.ref, 'refs/tags/') }}")
+
+    def test_release_guard_runs_before_any_upload_on_tags(self):
+        for workflow, upload in (("windows-build.yml", "Attach Windows assets"),
+                                 ("linux-build.yml", "Attach Linux assets")):
+            with self.subTest(workflow=workflow):
+                blocks = steps(workflow)
+                guard = next(i for i, b in enumerate(blocks) if "Release guard - no throwaway-signed manifest" in b)
+                attach = next(i for i, b in enumerate(blocks) if f"- name: {upload}" in b)
+                self.assertLess(guard, attach)
+                self.assertEqual(condition(blocks[guard]), "startsWith(github.ref, 'refs/tags/')")
+                self.assertIn("scripts/check-embedded-manifest.py --trusted-cert src-tauri/trust/murmur-release.asc",
+                              blocks[guard])
+
+
+class DesktopHandoffTests(unittest.TestCase):
+    def test_handoff_is_the_last_step_and_self_hosted_only(self):
+        blocks = steps("windows-build.yml")
+        self.assertIn("Hand the build to the desktop runner", blocks[-1])
+        self.assertEqual(condition(blocks[-1]),
+                         "runner.environment == 'self-hosted' && !startsWith(github.ref, 'refs/tags/')")
+
+    def test_handoff_prints_hashes_writes_sums_and_keeps_three(self):
+        block = step("windows-build.yml", "Hand the build to the desktop runner")
+        self.assertIn('Write-Host "MURMUR-HANDOFF-SHA256 $Commit $Hash $($File.Name)"', block)
+        self.assertIn("'SHA256SUMS'", block)
+        self.assertIn("Select-Object -Skip 3", block)
+        self.assertIn("::notice::", block)
+        self.assertNotRegex(block, r"(?i)Set-Acl|icacls")
+        for name in ("components-manifest.json.sig", "murmur-release.asc", "components-windows-inputs.json",
+                     "murmur-windows-x86_64.zip", "_x64-setup.exe", "murmur-engine-windows", "murmur-cuda-windows"):
+            self.assertIn(name, block)
+
+    def test_handoff_marker_matches_the_desktop_verifier(self):
+        text = (ROOT / "scripts" / "windows" / "desktop" / "handoff.py").read_text(encoding="utf-8")
+        self.assertIn('MARKER = re.compile(r"MURMUR-HANDOFF-SHA256 ', text)
+
+    def test_desktop_harness_tests_run_on_windows_ci(self):
+        block = step("windows-build.yml", "Script tests")
+        self.assertIn("test_desktop_harness", block)
+        self.assertIn("test_embedded_manifest", block)
+
+
+class DesktopWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.text = (WORKFLOWS / "windows-desktop.yml").read_text(encoding="utf-8")
+
+    def test_dispatch_only_owner_only_desktop_runner(self):
+        trigger = self.text.split("\npermissions:")[0].split("\non:\n", 1)[1]
+        self.assertRegex(trigger, r"^  workflow_dispatch:\n")
+        self.assertNotRegex(trigger, r"(?m)^  (pull_request|push|schedule|workflow_call|pull_request_target):")
+        self.assertIn("    if: github.actor == github.repository_owner\n", self.text)
+        self.assertIn("    runs-on: [self-hosted, Windows, X64, desktop]\n", self.text)
+        self.assertIn("    timeout-minutes: 60\n", self.text)
+        self.assertRegex(self.text, r"concurrency:\n  group: windows-desktop\n")
+
+    def test_minimal_permissions_and_no_persisted_credentials(self):
+        self.assertRegex(self.text, r"\npermissions:\n  contents: read\n  actions: read\n\n")
+        self.assertIn("persist-credentials: false", self.text)
+        self.assertNotIn("secrets.", self.text)
+
+    def test_build_workflows_never_target_the_desktop_runner(self):
+        for workflow in WORKFLOWS.glob("*.yml"):
+            if workflow.name != "windows-desktop.yml":
+                with self.subTest(workflow=workflow.name):
+                    self.assertNotIn("desktop]", workflow.read_text(encoding="utf-8"))
+
+    def test_inputs_reach_scripts_only_through_the_environment(self):
+        for block in steps("windows-desktop.yml"):
+            run = block.split("run: |", 1)[1] if "run: |" in block else ""
+            self.assertNotIn("${{", run)
+
+    def test_sha_is_checked_and_build_verified_before_running(self):
+        blocks = steps("windows-desktop.yml")
+        names = [re.search(r"- name: (.+)", b).group(1) if "- name: " in b else b.strip() for b in blocks]
+        self.assertTrue(names[0].startswith("Only the dispatched commit"))
+        self.assertIn("$Sha -ne $env:GITHUB_SHA", blocks[0])
+        verify = next(i for i, n in enumerate(names) if n.startswith("Verify the handed-over build"))
+        preflight = next(i for i, n in enumerate(names) if n.startswith("Preflight"))
+        run = next(i for i, n in enumerate(names) if n.startswith("Run the desktop checks"))
+        self.assertLess(verify, preflight)
+        self.assertLess(preflight, run)
+        self.assertIn("handoff.py", blocks[verify])
+        self.assertIn("--require-hashes", step("windows-desktop.yml", "Harness virtual environment"))
+
+
 if __name__ == "__main__":
     unittest.main()
