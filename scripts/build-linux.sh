@@ -65,9 +65,12 @@ export MURMUR_EMBED_MANIFEST="$COMPONENTS/components-manifest.json"
 npx tauri build --bundles deb
 python3 scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release" --artifact "$CARGO_TARGET_DIR/release/murmur"
 npx tauri bundle --bundles appimage
+. "$ROOT/scripts/select-linux-bundles.sh"
+select_linux_bundles "$CARGO_TARGET_DIR/release" "$VERSION"
+rm -rf "$ROOT/.cache/artifacts/linux"
 engine/.release-venv/bin/python scripts/bundle-linux-runtime.py package \
-  --appimage "$CARGO_TARGET_DIR"/release/bundle/appimage/*.AppImage \
-  --deb "$CARGO_TARGET_DIR"/release/bundle/deb/*.deb \
+  --appimage "$LINUX_APPIMAGE" \
+  --deb "$LINUX_DEB" \
   --output "$ROOT/.cache/artifacts/linux"
 python3 scripts/test-linux-bundle.py "$ROOT/.cache/artifacts/linux" "$COMPONENTS"
 python3 scripts/test-linux-startup.py "$ROOT"/.cache/artifacts/linux/*.AppImage --components "$COMPONENTS"
