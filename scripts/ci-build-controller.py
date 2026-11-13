@@ -322,7 +322,8 @@ def control_one(api, run, platform, hosts, default_branch, delay, now, dry_run=F
     # A user-dispatched lookalike is not eligible until this controller has
     # atomically recorded the delay decision.
     for host in hosts.get(key, []) if attempts else []:
-        if datetime.fromisoformat(host["created_at"].replace("Z", "+00:00")) < datetime.fromisoformat(attempts[0]["created_at"]):
+        # GitHub reports whole seconds; compare the reservation at that precision.
+        if datetime.fromisoformat(host["created_at"].replace("Z", "+00:00")) < datetime.fromisoformat(attempts[0]["created_at"]).replace(microsecond=0):
             continue
         if host["status"] == "in_progress":
             host_job = build_job(api, host["id"], host["run_attempt"])

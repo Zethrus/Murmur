@@ -236,6 +236,23 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(self.api.statuses[-1]["state"], "success")
         self.assertEqual(self.api.statuses[-1]["context"], ci.CONTEXT["linux"])
 
+    def test_same_second_dispatch_is_eligible_but_earlier_run_is_not(self):
+        for seconds_before in (0, 1):
+            with self.subTest(seconds_before=seconds_before):
+                self.api = FakeGitHub()
+                self.control()
+                reservation = ci.read_marker(self.api, "dispatch", "linux", 101, 1)
+                recorded = datetime.fromisoformat(reservation["created_at"])
+                host = self.api.add_host()
+                host["created_at"] = (recorded.replace(microsecond=0) -
+                                      timedelta(seconds=seconds_before)).isoformat()
+                self.control()
+                claim = ci.read_marker(self.api, "claims", "linux", 101, 1)
+                if seconds_before:
+                    self.assertIsNone(claim)
+                else:
+                    self.assertEqual(claim["winner_run"], 202)
+
     def test_hosted_win_loser_gate_and_aggregate_failure(self):
         self.api.job["created_at"] = stamp(12)
         self.control()
@@ -466,6 +483,30 @@ class DecisionTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_linux_release_requires_successful_windows_or_explicit_disable(self):
+        release = (ROOT / '.github/workflows/release.yml').read_text()
+        for job in ('linux-build', 'linux'):
+            block = release.split('  ' + job + ':\n', 1)[1].split('    permissions:', 1)[0].split('    uses:', 1)[0]
+            condition = block.split('    if: >-\n', 1)[1].strip()
+            expression = condition.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
+            for enabled in ('true', 'false'):
+                for built in ('success', 'failure', 'cancelled', 'skipped'):
+                    for uploaded in ('success', 'failure', 'cancelled', 'skipped'):
+                        evaluated = expression
+                        for name, value in {
+                            "needs.prepare.result": 'success',
+                            "needs['linux-build'].result": 'success',
+                            "needs['windows-build'].result": built,
+                            'needs.windows.result': uploaded,
+                            'vars.ENABLE_WINDOWS': enabled,
+                            'vars.MURMUR_RELEASE_TRUST_FINGERPRINT': 'configured',
+                        }.items():
+                            evaluated = evaluated.replace(name, repr(value))
+                        expected = ((built == uploaded == 'success') or
+                                    (enabled != 'true' and built == uploaded == 'skipped'))
+                        self.assertEqual(eval(' '.join(evaluated.split()), {'__builtins__': {} }), expected,
+                                         (job, enabled, built, uploaded))
+
     def test_reusable_builds_are_read_only_and_tag_writes_are_separate(self):
         workflows = ROOT / ".github" / "workflows"
         release = (workflows / "release.yml").read_text()

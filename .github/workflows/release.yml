@@ -75,16 +75,18 @@ jobs:
             (Join-Path $Stage "murmur-cuda-windows-x86_64-${Version}.zip") --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
   linux-build:
-    needs: [prepare, windows]
+    needs: [prepare, windows-build, windows]
     if: >-
       always() && needs.prepare.result == 'success' &&
-      (needs.windows.result == 'success' || needs.windows.result == 'skipped')
+      ((needs['windows-build'].result == 'success' && needs.windows.result == 'success') ||
+       (vars.ENABLE_WINDOWS != 'true' && needs['windows-build'].result == 'skipped' && needs.windows.result == 'skipped'))
     uses: ./.github/workflows/linux-build.yml
   linux:
-    needs: [linux-build, windows]
+    needs: [linux-build, windows-build, windows]
     if: >-
       always() && needs['linux-build'].result == 'success' &&
-      (needs.windows.result == 'success' || needs.windows.result == 'skipped') &&
+      ((needs['windows-build'].result == 'success' && needs.windows.result == 'success') ||
+       (vars.ENABLE_WINDOWS != 'true' && needs['windows-build'].result == 'skipped' && needs.windows.result == 'skipped')) &&
       vars.MURMUR_RELEASE_TRUST_FINGERPRINT != ''
     permissions:
       contents: write
@@ -258,7 +260,8 @@ jobs:
     needs: [linux, flipper, windows, windows-gpu]
     if: >-
       always() && needs.linux.result == 'success' && needs.flipper.result == 'success' &&
-      (needs.windows.result == 'success' || needs.windows.result == 'skipped') &&
+      ((needs['windows-build'].result == 'success' && needs.windows.result == 'success') ||
+       (vars.ENABLE_WINDOWS != 'true' && needs['windows-build'].result == 'skipped' && needs.windows.result == 'skipped')) &&
       (needs.windows-gpu.result == 'success' || needs.windows-gpu.result == 'skipped')
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     steps:
