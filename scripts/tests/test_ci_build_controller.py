@@ -483,6 +483,12 @@ class DecisionTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_release_validation_depends_on_windows_build(self):
+        release = (ROOT / '.github/workflows/release.yml').read_text()
+        validation = release.split('  validate:\n', 1)[1]
+        dependencies = validation.split('    needs: [', 1)[1].split(']', 1)[0]
+        self.assertIn('windows-build', [name.strip() for name in dependencies.split(',')])
+
     def test_linux_release_requires_successful_windows_or_explicit_disable(self):
         release = (ROOT / '.github/workflows/release.yml').read_text()
         for job in ('linux-build', 'linux'):

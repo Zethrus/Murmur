@@ -257,7 +257,7 @@ jobs:
           gh release upload $env:GITHUB_REF_NAME (Join-Path $Assets 'GPU-VALIDATION-windows.json') --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Evidence upload failed' }
   validate:
-    needs: [linux, flipper, windows, windows-gpu]
+    needs: [linux, flipper, windows-build, windows, windows-gpu]
     if: >-
       always() && needs.linux.result == 'success' && needs.flipper.result == 'success' &&
       ((needs['windows-build'].result == 'success' && needs.windows.result == 'success') ||
