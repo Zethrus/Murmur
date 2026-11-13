@@ -40,10 +40,10 @@ first workflow run prove the toolchain.
 
 **The service session cannot run interactive tests.** Jobs run in session 0:
 no visible desktop, no global hotkeys, no foreground window, no microphone
-prompt. Overlay, hotkeys, injection, tray, autostart and DPI checks are done by
-a person in the logged-in session with
-[parity/windows-checklist.md](parity/windows-checklist.md) and
-`scripts/parity/capture-windows.ps1`.
+prompt. Overlay, hotkeys, injection, tray, autostart and DPI checks run in the
+logged-in session instead: automatically on the second, desktop runner (below,
+"Desktop runner"), and the rest by a person with
+[parity/windows-checklist.md](parity/windows-checklist.md).
 
 ## Repository settings (owner)
 
@@ -73,17 +73,26 @@ Pull requests and manual runs (`workflow_dispatch`, input `gpu`):
    and on the unfrozen site-packages.
 3. UI build and DOM tests, the Windows-relevant script tests, engine pytest,
    `cargo test` with and without the Enhance backend.
-4. Authenticode certificate import (**release tags only**, dormant until the
+4. Component zips first (`scripts/windows/package.ps1 -ComponentsOnly`: engine
+   zip, cuBLAS-only CUDA zip from the pinned wheel, the manifest input
+   `components-windows-inputs.json`, size budgets), then a Windows-only manifest
+   signed with a throwaway key (never a release asset; its certificate is kept
+   next to it as `murmur-release.asc`).
+5. Authenticode certificate import (**release tags only**, dormant until the
    secrets exist), `tauri build` for the MSVC target (signing through
    `bundle.windows.signCommand` only on tags with an imported certificate),
    certificate removal (always), llama.cpp CPU-flag audit. Pull-request and
    manual builds never receive the certificate secrets, never hold the key in
    `Cert:\CurrentUser\My` and never produce Authenticode-signed artifacts;
    `scripts/tests/test_windows_ci.py` checks this in the workflow text.
-5. `scripts/windows/package.ps1`: NSIS installer and portable zip (app only),
-   engine zip, cuBLAS-only CUDA zip from the pinned wheel, the manifest input
-   `components-windows-inputs.json`, size budgets.
-6. Startup smoke test: `murmur.exe --version` and `--help` on every runner.
+   Pull-request and manual builds set `MURMUR_EMBED_MANIFEST` to the throwaway
+   manifest, as Linux does, so the first-run setup has a catalog; the app trusts
+   it only when started with `MURMUR_DEV_TRUST_ROOT` + `MURMUR_DEV_TRUST_ROOT_ACK`
+   (a normal launch still reports "Release trust root missing"). Tags embed
+   nothing.
+6. `scripts/windows/package.ps1 -SkipComponents`: NSIS installer and portable
+   zip (app only), size budgets.
+7. Startup smoke test: `murmur.exe --version` and `--help` on every runner.
    On **hosted** runners only (`vars.WINDOWS_RUNNER` unset), also a launch with
    `--background` in a throwaway profile for 10 seconds; it must not exit with an
    error, must write its config, and must not install an engine by itself. The
@@ -91,15 +100,19 @@ Pull requests and manual runs (`workflow_dispatch`, input `gpu`):
    (`Shell_NotifyIcon` needs a shell) and WebView2 are unavailable, so the launch
    would fail for reasons unrelated to Murmur; on Edison the interactive
    checklist in the logged-in session covers launch, tray and Settings.
-7. A Windows-only manifest signed with a throwaway key (never a release asset).
 8. With `gpu=true`: `scripts/test-windows-inference.py` (see below).
 9. Upload the artifacts (best effort, 3 days, marked untrusted-dev-signed).
+10. On Edison only: hand the build to the desktop runner (below).
 
-Release tags (called from `release.yml`): steps 1–6 (on Edison, so without the
-launch smoke), then the installer, portable
-zip and both component zips are attached to the **draft** release with `gh`
-(no third-party publish action), and the component inputs are passed to the
-Linux job as a workflow output.
+Release tags (called from `release.yml`): steps 1–7 without the throwaway
+manifest (on Edison, so without the launch smoke), then the **release guard**
+`scripts/check-embedded-manifest.py` checks `murmur.exe` and the portable zip:
+any embedded manifest must be signed by a key of the committed
+`src-tauri/trust/murmur-release.asc`, and without that certificate nothing may
+be embedded. Only then are the installer, portable zip and both component zips
+attached to the **draft** release with `gh` (no third-party publish action), and
+the component inputs are passed to the Linux job as a workflow output. The
+Linux release job runs the same guard on its rebuilt binary before its upload.
 
 ## Release flow with Windows enabled
 
@@ -165,3 +178,122 @@ imports the PFX into the runner user's certificate store (the temporary file is
 deleted at once), Tauri signs `murmur.exe` and the installer with `signtool`
 (SHA-256, RFC 3161 timestamp) and verifies them, and the certificate and its key
 are removed from the store in an `always()` step.
+
+## Desktop runner (`edison-desktop`) and `windows-desktop.yml`
+
+The automatable part of [parity/windows-checklist.md](parity/windows-checklist.md)
+(items tagged **auto**) runs on a second runner in the owner's logged-in
+desktop session. Not run yet: until a real run on Edison is recorded in
+[parity/test-ledger.md](parity/test-ledger.md), nothing it covers counts as
+verified.
+
+> **Security warning: jobs on the desktop runner run as the owner's Windows
+> account.** They run in the owner's interactive session with access to that
+> account's desktop, files, browser sessions and stored credentials. This is
+> acceptable only because the only workflow that targets the runner is
+> dispatch-only and owner-only. Never add the `desktop` label to another
+> workflow, and keep "Require approval for all outside collaborators" enabled
+> (Settings → Actions → General): a fork pull request runs its own copy of the
+> workflow files and could otherwise name any runner label.
+
+The runner:
+
+- lives in `C:\actions-runner-desktop`, labels
+  `self-hosted, Windows, X64, desktop` (deliberately no `gpu`, so the build
+  workflows never land on it);
+- is not a service: the scheduled task **"Murmur desktop runner"** starts
+  `run.cmd` hidden at the owner's logon, so jobs run in the interactive session,
+  non-elevated;
+- is used only by `windows-desktop.yml`: `workflow_dispatch` only,
+  `if: github.actor == github.repository_owner`, concurrency group
+  `windows-desktop` (one run at a time), 60-minute timeout, token permissions
+  `contents: read` and `actions: read`, checkout without persisted credentials.
+
+**Build hand-off.** Artifact storage is billing-locked, so `windows-build.yml`
+(manual runs on Edison only, so a pull-request run cannot write into the folder) ends by copying the installer,
+portable zip, component zips, manifest and signature, the throwaway certificate
+and `components-windows-inputs.json` to `C:\murmur-ci-out\<commit>\`, writes
+`SHA256SUMS` and prints every hash to its job log as
+`MURMUR-HANDOFF-SHA256 <commit> <sha256> <file>`. The newest three commits are
+kept. When `C:\murmur-ci-out` does not exist the step only prints a notice.
+Folder ACLs (`murmur-ci` modify, owner read) are set once when Edison is
+provisioned; the workflow never changes them. For a desktop run, dispatch
+`windows-build.yml` on the branch first.
+
+**Before anything runs**, the desktop job (`scripts/windows/desktop/handoff.py`)
+requires the `sha` input to equal the commit it was dispatched on, copies the
+files into the owner's temp folder, hashes the copies and requires them to
+equal both `SHA256SUMS` and the hashes in the matching successful
+`windows-build.yml` run's own log (found by `head_sha` with `gh api`, read with
+`gh run view --log`). A modified hand-off folder therefore fails before any
+binary from it runs. The harness dependencies (`comtypes`, `Pillow`) install
+into a fresh venv with `pip --require-hashes`.
+
+### Dispatching a run
+
+1. Quit your own Murmur on Edison (tray → Quit) and close Notepad; leave the
+   machine unlocked and untouched. The run takes the keyboard and mouse for
+   20–30 minutes; any real key press or mouse click aborts it safely.
+2. Make sure `windows-build.yml` has run on Edison for the commit:
+   `gh workflow run windows-build.yml --ref <branch>`.
+3. Dispatch the desktop run on the same commit:
+
+   ```bash
+   gh workflow run windows-desktop.yml --ref <branch> \
+     -f sha=$(git rev-parse <branch>) -f only= -f repeat=1
+   ```
+
+   `only` takes checklist ids (`H1,F2`); `repeat` (1–10) runs each selected
+   check that many times to find flaky checks.
+
+The job then checks the sha, verifies the build, runs the preflight (session
+unlocked, 60 s without input, no other `murmur.exe`, Notepad closed), shows a
+10-second countdown banner and runs `scripts/windows/desktop/run.py`. By hand
+(same folder layout): `python scripts\windows\desktop\run.py --build <verified
+copy> --out <dir> [--only H1,F2] [--group focus] [--repeat 3]`.
+
+### Reading the report
+
+The job summary shows `desktop-report.md`: one row per checklist id with
+**pass**, **FAIL** (with the reason), **skipped** (with the reason) or
+**aborted** (user input or setup failure), the evidence file names, and
+"best effort" on T1, T2, I3 and K1 (Windows UI details: these report skipped,
+never pass, when they cannot run). With `repeat` > 1 a row that failed in some
+attempts says "flaky". `desktop-report.json`, the PNG/TXT evidence and the
+golden texts (the first delivery into the harness's TargetApp under the same
+settings) are in `C:\murmur-desktop-reports\<commit>\<run id>-<attempt>\` on
+Edison. Treat a failure first as "harness or app?": the report reason, the
+screenshot and `murmur.log` excerpts decide; app bugs are reported separately.
+
+The manual items run once per release with
+`python scripts\windows\desktop\manual.py --report <that folder>`, which merges
+its results into the same report.
+
+What the harness changes outside its throwaway profile, and restores after
+every check and again when the run ends (also after an abort): the clipboard
+(text only), `AppsUseLightTheme`, the `HKCU\...\Run` and `StartupApproved\Run`
+values, the per-user microphone consent value, and the Notepad, Terminal, VS
+Code and test windows it opened. P2 runs the installer silently into a temp
+folder and uninstalls it again; it is skipped when Murmur is installed for the
+account (a second per-user install would take over its Start menu and uninstall
+entries), so on a machine where you use Murmur, P2 is covered only by a run on a
+clean account. WebView2 keeps its data under the real `%LOCALAPPDATA%` (it
+ignores the profile override), and speech fixtures and the downloaded test model
+are cached in `%LOCALAPPDATA%\murmur-desktop-cache` between runs (delete it to
+reclaim the space).
+
+### Stopping the desktop runner
+
+Disable it (it stays registered and comes back on the next enable + logon):
+
+```powershell
+Disable-ScheduledTask -TaskName 'Murmur desktop runner'
+# Stop the running instance now (only the desktop runner's, not the murmur-ci service):
+Get-CimInstance Win32_Process -Filter "Name='Runner.Listener.exe'" |
+  Where-Object { $_.ExecutablePath -like 'C:\actions-runner-desktop\*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId }
+```
+
+`Enable-ScheduledTask -TaskName 'Murmur desktop runner'` turns it back on. To
+remove it for good, also delete the runner under Settings → Actions → Runners
+and the folder `C:\actions-runner-desktop`.

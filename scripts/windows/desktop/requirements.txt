@@ -1,0 +1,6 @@
+# Desktop harness dependencies (Windows x64, CPython 3.12), installed with
+#   python -m pip install --require-hashes --only-binary=:all: -r scripts/windows/desktop/requirements.txt
+# Hashes from `pip download --only-binary=:all: --platform win_amd64 --python-version 3.12 --no-deps`
+# followed by `pip hash`. Neither package has runtime dependencies on Python 3.12.
+comtypes==1.4.17 --hash=sha256:4e0a221dde2c589b82977bed802efd71cd5eb67a380347b732e02735e597f586
+pillow==13.0.0 --hash=sha256:ff3fe9eb621fbb9db4c4be33ab946f6bac5f98ab50ca8d3260503653656c961b

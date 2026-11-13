@@ -288,6 +288,13 @@ jobs:
           command -v nvidia-smi >/dev/null || { echo 'Trusted NVIDIA GPU runner required for release.' >&2; exit 1; }
           python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux \
             --components .cache/artifacts/components --models-dir "$MURMUR_GPU_TEST_MODELS"
+      - name: Release guard - no throwaway-signed manifest in the shipped binary
+        # build-linux.sh embeds the manifest it just signed. The binary must carry the release
+        # subkey's signature (the committed certificate checked above), never a throwaway one.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python3 scripts/check-embedded-manifest.py --trusted-cert src-tauri/trust/murmur-release.asc \
+            "$CARGO_TARGET_DIR/release/murmur"
       - name: Attach Linux assets and components to the draft
         env:
           GH_TOKEN: ${{ github.token }}
