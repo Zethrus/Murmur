@@ -1,8 +1,7 @@
 name: Windows build
 
 # Runs on vars.WINDOWS_RUNNER (the self-hosted "Edison" machine: self-hosted, Windows, X64, gpu,
-# nvidia), falling back to windows-latest once hosted billing is unlocked. Nothing here has run
-# yet: the workflow was written without a Windows machine (see docs/ci-windows.md).
+# nvidia), or windows-latest when the variable is unset (see docs/ci-windows.md).
 #
 # Pull requests and manual runs build, test and upload throwaway-signed artifacts (never a
 # release); their murmur.exe embeds the throwaway-signed manifest (trusted only with
@@ -34,7 +33,7 @@ concurrency:
 jobs:
   build:
     # Fork pull requests never reach a self-hosted runner: they run only when WINDOWS_RUNNER is
-    # unset (hosted). Tags need the real runner; they never fall back to a billing-locked host.
+    # unset (hosted). Tags need the real runner and never route to hosted compute.
     if: >-
       vars.ENABLE_WINDOWS == 'true' &&
       (github.event_name != 'pull_request' ||
@@ -42,6 +41,9 @@ jobs:
        vars.WINDOWS_RUNNER == '') &&
       (vars.WINDOWS_RUNNER != '' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
+    concurrency:
+      group: ${{ vars.WINDOWS_RUNNER != '' && 'murmur-windows-local-cache' || format('murmur-windows-hosted-{0}', github.run_id) }}
+      cancel-in-progress: false
     timeout-minutes: 150
     outputs:
       windows_inputs: ${{ steps.inputs.outputs.json }}
@@ -49,8 +51,6 @@ jobs:
       HF_HUB_OFFLINE: '1'
       HF_HUB_DISABLE_TELEMETRY: '1'
       DO_NOT_TRACK: '1'
-      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
-      PYINSTALLER_CONFIG_DIR: ${{ github.workspace }}/.cache/pyinstaller
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       # Ninja (bundled with Visual Studio) instead of the default Visual Studio generator: the
       # CPU audit reads llama.cpp's compiler flags from build.ninja; .vcxproj files are not audited.
@@ -109,24 +109,31 @@ jobs:
           "pythonLocation=$Dir" | Out-File -FilePath $env:GITHUB_ENV -Append
           & $Python --version
 
+      - name: Prepare isolated build caches
+        shell: pwsh
+        run: python scripts/ci-cache.py prepare
+
+      - name: Record starting resources and cache sizes
+        shell: pwsh
+        run: python scripts/ci-cache.py start
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
+          cache: ${{ runner.environment != 'self-hosted' && 'npm' || '' }}
 
-      - name: Isolate the CI Rust toolchain
-        shell: pwsh
-        run: |
-          $Root = Join-Path $env:RUNNER_TOOL_CACHE 'murmur-ci'
-          New-Item -ItemType Directory -Force "$Root/rustup", "$Root/cargo" | Out-Null
-          "RUSTUP_HOME=$Root/rustup" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "CARGO_HOME=$Root/cargo" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "$Root/cargo/bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Verify pinned Rust version
+        shell: pwsh
+        run: |
+          $Version = (& rustc --version).Split(' ')[1]
+          if ($LASTEXITCODE -ne 0 -or $Version -ne '1.100.0') { throw "Expected rustc 1.100.0, got $Version" }
+
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted'
         with:
           workspaces: src-tauri -> target
 
@@ -147,7 +154,7 @@ jobs:
         run: |
           # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
           Push-Location scripts/tests
-          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_cpu_audit test_embedded_manifest test_desktop_harness
+          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_ci_cache test_cpu_audit test_embedded_manifest test_desktop_harness
           $Code = $LASTEXITCODE
           Pop-Location
           if ($Code -ne 0) { throw 'Script tests failed' }
@@ -256,13 +263,15 @@ jobs:
       - name: Audit linked native CPU baseline
         shell: pwsh
         run: |
-          python scripts/audit-llama-cpu.py src-tauri/target/x86_64-pc-windows-msvc/release
+          $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
+          python scripts/audit-llama-cpu.py $Release --artifact (Join-Path $Release 'murmur.exe')
           if ($LASTEXITCODE -ne 0) { throw 'Unsupported native CPU baseline' }
 
       - name: Package installer and portable zip; enforce size budgets
         shell: pwsh
         run: |
-          ./scripts/windows/package.ps1 -SkipComponents -Release src-tauri/target/x86_64-pc-windows-msvc/release |
+          $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
+          ./scripts/windows/package.ps1 -SkipComponents -Release $Release |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Startup smoke test (--version, --help)
@@ -286,7 +295,7 @@ jobs:
       # would fail for reasons unrelated to Murmur. On Edison the launch is covered by the
       # interactive checklist in the logged-in session (docs/ci-windows.md).
       - name: Startup smoke test (launch without an engine; hosted runners only)
-        if: vars.WINDOWS_RUNNER == ''
+        if: runner.environment != 'self-hosted'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -336,8 +345,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
+          $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
           python scripts/check-embedded-manifest.py --trusted-cert src-tauri/trust/murmur-release.asc `
-            src-tauri/target/x86_64-pc-windows-msvc/release/murmur.exe .cache/artifacts/windows/murmur-windows-x86_64.zip
+            (Join-Path $Release 'murmur.exe') .cache/artifacts/windows/murmur-windows-x86_64.zip
           if ($LASTEXITCODE -ne 0) { throw 'A release binary embeds a throwaway-signed manifest' }
 
       - name: Attach Windows assets to the draft release (tags only)
@@ -370,6 +380,11 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
+
+      - name: Record final resources and cache sizes
+        if: always()
+        shell: pwsh
+        run: python scripts/ci-cache.py finish
 
       # The desktop runner (docs/ci-windows.md) cannot receive artifacts (billing lock), so the
       # build is handed over through a local folder on Edison. The desktop job re-checks every

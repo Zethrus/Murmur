@@ -1,9 +1,10 @@
 # Windows CI and the Edison runner
 
-Status, November 2026: written and reviewed, **never run**. Hosted GitHub runners
-are billing-locked for this account, and the owner's Windows PC "Edison" is not
-registered as a runner yet. Until both workflows below have passed once, treat
-every Windows statement in the docs as "verified in source, not run on hardware".
+Status, November 13, 2026: the self-hosted Windows manual/GPU build passed in
+[run 43472148187](https://github.com/Zethrus/Murmur/actions/runs/43472148187)
+at `f3c153b`. A hosted Windows build and the release workflow still need live
+validation. The ordinary build cache and cold/warm measurement protocol are in
+[CI build performance](ci-build-performance.md).
 
 ## The runner
 
@@ -93,7 +94,7 @@ Pull requests and manual runs (`workflow_dispatch`, input `gpu`):
 6. `scripts/windows/package.ps1 -SkipComponents`: NSIS installer and portable
    zip (app only), size budgets.
 7. Startup smoke test: `murmur.exe --version` and `--help` on every runner.
-   On **hosted** runners only (`vars.WINDOWS_RUNNER` unset), also a launch with
+   On **hosted** runners only (`runner.environment != 'self-hosted'`), also a launch with
    `--background` in a throwaway profile for 10 seconds; it must not exit with an
    error, must write its config, and must not install an engine by itself. The
    self-hosted runner is a Windows service in session 0, where the tray

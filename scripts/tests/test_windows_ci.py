@@ -74,7 +74,7 @@ class WindowsSmokeTests(unittest.TestCase):
         self.assertIsNone(condition(cli))
         self.assertIn("--version", cli)
         launch = step("windows-build.yml", "Startup smoke test (launch")
-        self.assertEqual(condition(launch), "vars.WINDOWS_RUNNER == ''")
+        self.assertEqual(condition(launch), "runner.environment != 'self-hosted'")
         self.assertIn("'--background'", launch)
 
 

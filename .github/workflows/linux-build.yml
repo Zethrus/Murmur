@@ -29,11 +29,13 @@ jobs:
     # Fork PRs must never execute on a self-hosted runner; keep them on hosted or skip.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || vars.LINUX_RUNNER == ''
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # One writer for the persistent runner-local target, including tag rebuilds. Hosted
+    # jobs get distinct groups so they never wait behind a busy self-hosted runner.
+    concurrency:
+      group: ${{ vars.LINUX_RUNNER != '' && 'murmur-linux-local-cache' || format('murmur-linux-hosted-{0}', github.run_id) }}
+      cancel-in-progress: false
     timeout-minutes: 90
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
-      TMPDIR: ${{ github.workspace }}/.cache/tmp
-      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       CARGO_BUILD_JOBS: '2'
       RUSTFLAGS: '-C target-cpu=x86-64'
@@ -50,8 +52,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Prepare temporary directory
-        run: mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare isolated build caches
+        run: python3 scripts/ci-cache.py prepare
+      - name: Record starting resources and cache sizes
+        run: python3 scripts/ci-cache.py start
       - name: Provision runner dependencies
         run: |
           set -euo pipefail
@@ -81,23 +88,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Isolate the CI Rust toolchain
-        run: |
-          set -euo pipefail
-          # Self-hosted machines already have rustup in $HOME; a CI install over it fails with
-          # "could not rename component ... Directory not empty" and mutates the desktop toolchain.
-          root="${RUNNER_TOOL_CACHE:-$HOME/.cache}/murmur-ci"
-          mkdir -p "$root/rustup" "$root/cargo"
-          printf 'RUSTUP_HOME=%s\n' "$root/rustup" >> "$GITHUB_ENV"
-          printf 'CARGO_HOME=%s\n' "$root/cargo" >> "$GITHUB_ENV"
-          printf '%s\n' "$root/cargo/bin" >> "$GITHUB_PATH"
-          rustup target list --installed 2>/dev/null || true
-      - uses: dtolnay/rust-toolchain@stable
+          cache: ${{ runner.environment != 'self-hosted' && 'npm' || '' }}
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - name: Verify pinned Rust version
+        run: test "$(rustc --version | cut -d' ' -f2)" = 1.100.0
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted'
         with:
           workspaces: src-tauri -> target
       - name: Build frozen engine
@@ -215,6 +211,9 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
+      - name: Record final resources and cache sizes
+        if: always()
+        run: python3 scripts/ci-cache.py finish
 
   # Tags only, and only once the owner has created the release key (docs/signing.md): rebuild
   # with the real signing subkey from the protected environment, validate on the GPU runner
@@ -224,29 +223,30 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') && vars.MURMUR_RELEASE_TRUST_FINGERPRINT != ''
     environment: release-signing
     runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    concurrency:
+      group: ${{ vars.LINUX_RUNNER != '' && 'murmur-linux-local-cache' || format('murmur-linux-hosted-{0}', github.run_id) }}
+      cancel-in-progress: false
     timeout-minutes: 120
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
-      TMPDIR: ${{ github.workspace }}/.cache/tmp
-      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
       APPIMAGE_EXTRACT_AND_RUN: '1'
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Isolate the CI Rust toolchain
-        run: |
-          root="${RUNNER_TOOL_CACHE:-$HOME/.cache}/murmur-ci"
-          printf 'RUSTUP_HOME=%s\nCARGO_HOME=%s\n' "$root/rustup" "$root/cargo" >> "$GITHUB_ENV"
-          printf '%s\n' "$root/cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare isolated build caches
+        run: python3 scripts/ci-cache.py prepare
+      - name: Record starting resources and cache sizes
+        run: python3 scripts/ci-cache.py start
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: ${{ runner.environment != 'self-hosted' && 'npm' || '' }}
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - name: Verify pinned Rust version
+        run: test "$(rustc --version | cut -d' ' -f2)" = 1.100.0
       - name: The committed trust root must be the configured release key
         env:
           EXPECTED: ${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}
@@ -308,3 +308,6 @@ jobs:
             .cache/artifacts/components/components-manifest.json \
             .cache/artifacts/components/components-manifest.json.sig \
             .cache/artifacts/components/murmur-release.asc --clobber
+      - name: Record final resources and cache sizes
+        if: always()
+        run: python3 scripts/ci-cache.py finish
