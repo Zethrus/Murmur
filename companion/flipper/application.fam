@@ -8,7 +8,7 @@ App(
     requires=["gui", "storage", "notification", "bt"],
     fap_category="Tools",
     fap_icon="icon.png",
-    fap_version="0.4.7",
+    fap_version="0.5.0",
     fap_description="One-button remote for Murmur dictation over USB or Bluetooth",
     fap_author="Zethrus",
     fap_weburl="https://github.com/Zethrus/Murmur",

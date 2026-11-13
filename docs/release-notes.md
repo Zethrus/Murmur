@@ -61,18 +61,30 @@ a signed list, and installs it into your data folder. Measured sizes are in
   AppImage and `.deb` 125 MiB, tar.gz 130 MiB, engine zip 130 MiB, GPU add-on
   520 MiB.
 - The engine's `models.install` RPC now fails: installs are the app's job.
+- **CI build changes.** Self-hosted Linux and Windows builds now keep separate,
+  runner-scoped compiler and download caches. An opt-in controller can send
+  queued ordinary PR and branch builds to hosted runners; GPU, desktop and
+  release-tag jobs are excluded. The fallback has not been activated or
+  validated live, and no build speedup has been measured. See
+  [CI build performance](ci-build-performance.md).
 
 ## Known limitations
 
-- **Blocked on the release key.** Until the owner creates Murmur's offline
-  release key ([signing](signing.md)), builds refuse to install components
-  ("Release trust root missing") and tag builds upload nothing.
-- **Windows is a preview.** The build, every automated test, packaging and GPU
-  inference run in CI on real Windows hardware (an RTX 3060); the interactive
-  behaviour below (overlay, hotkeys, typing, tray) has not yet been checked on a
-  Windows desktop. Windows builds are **unsigned** (SmartScreen warns).
+- **Final release validation remains.** The production OpenPGP certificate is
+  committed and its fingerprint pinned in the app; release manifest signing is
+  required by the tag workflow ([signing](signing.md)). Final 0.5.0 Linux and
+  Windows release builds, asset checks and GPU evidence have not yet passed.
+- **Windows desktop checks remain.** Earlier Windows CI builds, packaging,
+  automated tests and GPU inference passed on Edison with an RTX 3060
+  ([test ledger](parity/test-ledger.md)). The overlay, hotkeys, typing and tray
+  have not yet been checked in a logged-in Windows desktop session. Desktop
+  parity remains unverified.
+- **No Windows publisher signature.** The Windows installer and executable are
+  intentionally unsigned with Authenticode, so Windows may show an unknown
+  publisher or SmartScreen warning. The required OpenPGP signature protects the
+  component manifest; it does not provide an Authenticode publisher identity.
 
-## Windows (preview)
+## Windows
 
 - **Small per-user installer and portable zip** with the app only; the engine
   downloads on first run like on Linux. The installer needs no administrator
@@ -80,11 +92,12 @@ a signed list, and installs it into your data folder. Measured sizes are in
   connection). Requires Windows 10 1809+ x64.
 - **Windows engine and GPU components** in the signed manifest: the engine
   frozen from hash-locked win_amd64 wheels, and a cuBLAS-only GPU add-on
-  (`cublas64_12.dll`, `cublasLt64_12.dll`). GPU inference passes in CI on an RTX
-  3060, but the GPU option stays hidden on Windows until the desktop checks pass.
-- **Text is never typed where it cannot arrive.** Windows running as
-  administrator (when Murmur is not), the UAC prompt and the lock screen are
-  detected; the text is held with Copy/Discard and the overlay says why.
+  (`cublas64_12.dll`, `cublasLt64_12.dll`). Earlier CI inference passed on an RTX
+  3060; final release GPU evidence is still required. The GPU option stays
+  hidden on Windows until the desktop checks pass.
+- **Delivery guards.** Murmur is designed to hold text with Copy/Discard when
+  the target is elevated, at a UAC prompt or at the lock screen; the overlay
+  explains why.
 - **Window identity** is the window handle plus its process and the process's
   start time, so a reused handle never counts as the original window.
 - **Modifiers are released before typing**, and clicking the overlay's buttons
