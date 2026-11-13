@@ -496,25 +496,27 @@ jobs:
 
   release-upload:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && vars.WINDOWS_RUNNER != ''
     permissions:
       contents: write
       actions: read
-    runs-on: ubuntu-22.04
+    runs-on: ${{ fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: murmur-windows-release-assets-${{ github.run_attempt }}
           path: release-assets
       - name: Attach Windows assets to the draft
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
-          version="${GITHUB_REF_NAME#v}"
-          gh release upload "$GITHUB_REF_NAME" \
-            "release-assets/windows/Murmur_${version}_x64-setup.exe" \
-            release-assets/windows/murmur-windows-x86_64.zip \
-            "release-assets/components-windows/murmur-engine-windows-x86_64-${version}.zip" \
-            "release-assets/components-windows/murmur-cuda-windows-x86_64-${version}.zip" --clobber
+          $Draft = gh release view $env:GITHUB_REF_NAME --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $Draft.isDraft) { throw 'Draft release is unavailable or already published' }
+          $Version = $env:GITHUB_REF_NAME.TrimStart('v')
+          gh release upload $env:GITHUB_REF_NAME `
+            "release-assets/windows/Murmur_${Version}_x64-setup.exe" `
+            release-assets/windows/murmur-windows-x86_64.zip `
+            "release-assets/components-windows/murmur-engine-windows-x86_64-${Version}.zip" `
+            "release-assets/components-windows/murmur-cuda-windows-x86_64-${Version}.zip" --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }

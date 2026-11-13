@@ -99,11 +99,11 @@ after the relevant runs, attempts, and desired rerun window have expired.
 The controller and status publisher execute default-branch code with
 `actions:write`, `contents:write`, and `statuses:write`. Build jobs have only
 `actions:read` and `contents:read`; they never receive a branch-write token.
-The Windows tag release upload is a separate job with `contents:write`, after
-its build, so ordinary PR code does not receive that permission. It stages four
-assets in a three-day Actions artifact; available artifact storage for a live
-release remains unverified. The controller
-checks same-repository PR ownership, open/current PR head, current test-merge
+The Windows tag release upload is a separate job on the same self-hosted runner,
+after its build, with `contents:write`. Ordinary PR code does not receive that
+permission. It stages four assets in a three-day Actions artifact; available
+artifact storage for a live release remains unverified. The controller checks
+same-repository PR ownership, open/current PR head, current test-merge
 commit, byte-identical source workflow file against the default branch,
 source workflow path/name, latest run/attempt, and job state. Hosted
 fallback checks out the immutable original test-merge SHA rather than the
