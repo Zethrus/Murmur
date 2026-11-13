@@ -1,14 +1,22 @@
 # Release signing key
 
-Murmur verifies its component manifest with one OpenPGP key: an **offline
-primary key** that only certifies, and a **signing subkey** that CI uses. Until
-the owner completes the steps below, every build refuses component installs with
-"Release trust root missing" (fail closed) and tag builds upload nothing.
+Murmur verifies its component manifest with one OpenPGP key: a **primary key** that only certifies, and a **signing subkey** that CI uses.
+The production primary fingerprint is
+`F9616DB91C05AB407EBF608DAB733B91896418DF`, independently verified by the owner.
+The primary is passphrase-protected on Hinton, a network-connected host; it is
+not an offline key. An AES-256-encrypted backup including the revocation
+certificate is retained on the owner's external drive. CI receives only the
+signing subkey, which expires on 2027-11-13. Keep the backup passphrase in the
+owner's password manager. Offline primary-key custody remains the recommended
+long-term arrangement.
 
-No key material is ever committed. CI pull-request builds use throwaway keys
+No private key material is ever committed; the public certificate is committed. CI pull-request builds use throwaway keys
 (`scripts/components/dev-key.sh`); unit tests generate keys at runtime.
 
-## 1. Create the key (once, offline)
+## 1. Create the key (reference for future provisioning)
+
+The production key is already provisioned; do not generate a replacement for
+each release. The following describes the preferred offline procedure.
 
 On an offline machine (live USB, no network), with GnuPG 2.2 or newer:
 
@@ -126,7 +134,7 @@ its `--help`), then export the certificate.
   component installs permanently and tell the user to update Murmur. A new
   primary key requires a new app release with a new pinned fingerprint.
 
-## Blocked until the key exists
+## Failure behavior when signing configuration is missing
 
 - Release builds cannot install components (by design: "Release trust root
   missing").

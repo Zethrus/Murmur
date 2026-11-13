@@ -16,10 +16,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_trust.rs"));
 
-/// Full fingerprint of Murmur's offline primary release key. Empty until the owner creates it
-/// (docs/signing.md); until then release builds refuse every install ("release trust root
-/// missing") while the app itself keeps working.
-pub const RELEASE_PRIMARY_FINGERPRINT: &str = "";
+/// Full fingerprint of Murmur's primary release key, independently verified by the owner.
+/// The primary stays on Hinton; CI receives only its signing subkey (docs/signing.md).
+pub const RELEASE_PRIMARY_FINGERPRINT: &str = "F9616DB91C05AB407EBF608DAB733B91896418DF";
 
 /// Debug builds: path to an armored certificate used as the trust root instead of the pinned
 /// one. Release builds honour it only together with `DEV_TRUST_ROOT_ACK_ENV` = `DEV_TRUST_ACK`.
