@@ -5,6 +5,7 @@ import os
 import pathlib
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -26,12 +27,18 @@ FLAGS = '-m64 -march=x86-64 -mavx -mavx2 -mfma -mf16c -mbmi2 -msse4.2'
 
 class AuditTests(unittest.TestCase):
     def test_cargo_110_package_build_layout_links_actual_binary(self):
+        for platform, executable in (('linux', 'murmur'), ('win32', 'murmur.exe')):
+            with self.subTest(platform=platform):
+                with mock.patch.object(audit, 'sys', types.SimpleNamespace(platform=platform)):
+                    self._assert_cargo_110_package_build_layout_links_actual_binary(executable)
+
+    def _assert_cargo_110_package_build_layout_links_actual_binary(self, executable):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp).resolve()
-            binary = root / 'build/murmur/0123456789abcdef/out/murmur'
+            binary = root / 'build/murmur/0123456789abcdef/out' / executable
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_UNK end' + b'a' * 100)
-            bundled = root / 'murmur'
+            bundled = root / executable
             bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_APP end' + b'a' * 100)
 
             def fingerprint(path, number):
@@ -52,7 +59,8 @@ class AuditTests(unittest.TestCase):
             cache = linked / 'out/build/CMakeCache.txt'
             cache.parent.mkdir(parents=True)
             cache.write_text(CONTRACT)
-            (cache.parent / 'flags.make').write_text('CXX_FLAGS = ' + FLAGS)
+            (cache.parent / 'flags.make').write_text(
+                'CXX_FLAGS = ' + ('/arch:AVX2' if executable.endswith('.exe') else FLAGS))
 
             # A newer cache with different CPU flags must not replace the linked one.
             stale = root / 'build/llama-cpp-sys-2/cccccccccccccccc/out/build/CMakeCache.txt'
@@ -60,13 +68,14 @@ class AuditTests(unittest.TestCase):
             stale.write_text('GGML_AVX2:BOOL=OFF')
             os.utime(stale, None)
             self.assertEqual(audit.linked_cache(root, bundled), cache)
-            self.assertEqual(audit.audit_cache(audit.linked_cache(root, bundled)), 1)
+            self.assertEqual(audit.audit_cache(audit.linked_cache(root, bundled),
+                                               windows=executable.endswith('.exe')), 1)
 
             bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_APP end' + b'b' * 100)
             with self.assertRaisesRegex(ValueError, 'Cannot uniquely match'):
                 audit.linked_cache(root, bundled)
             bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_APP end' + b'a' * 100)
-            duplicate = root / 'build/murmur/ffffffffffffffff/out/murmur'
+            duplicate = root / 'build/murmur/ffffffffffffffff/out' / executable
             duplicate.parent.mkdir(parents=True)
             duplicate.write_bytes(binary.read_bytes())
             with self.assertRaisesRegex(ValueError, 'Cannot uniquely match'):
