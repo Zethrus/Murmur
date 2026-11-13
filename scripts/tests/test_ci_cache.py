@@ -1,7 +1,7 @@
 """Cache path and workflow guards for CI builds."""
 import importlib.util
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import tempfile
 import time
 import unittest
@@ -38,9 +38,12 @@ class CacheTests(unittest.TestCase):
         paths = cache.cache_paths(self.env)
         self.assertNotIn(self.workspace, paths["target"].parents)
         self.assertIn("rust-1.100.0", str(paths["target"]))
+        self.assertEqual(paths, cache.cache_paths(dict(self.env)))
         for key in ("GITHUB_REPOSITORY", "RUNNER_NAME", "RUNNER_OS", "RUNNER_ARCH"):
             altered = dict(self.env, **{key: self.env[key] + "-other"})
             self.assertNotEqual(paths["target"], cache.cache_paths(altered)["target"])
+        with mock.patch.object(cache, "RUST_VERSION", "1.101.0"):
+            self.assertNotEqual(paths["target"], cache.cache_paths(self.env)["target"])
         cache.prepare(self.env)
         output = Path(self.env["GITHUB_ENV"]).read_text()
         for key in ("CARGO_TARGET_DIR", "PIP_CACHE_DIR", "NPM_CONFIG_CACHE", "CARGO_HOME", "RUSTUP_HOME"):
@@ -48,6 +51,24 @@ class CacheTests(unittest.TestCase):
         self.assertIn("TMP=", output)
         self.assertIn("TEMP=", output)
         self.assertTrue(paths["target"].is_dir())
+
+    def test_windows_linker_and_native_paths_have_headroom(self):
+        # Edison path from run 43495926551. The old sysroot rlib path was exactly
+        # 260 characters, including no terminating NUL, and link.exe returned LNK1104.
+        relative_root = cache.cache_paths(self.env)["root"].relative_to(self.tool_cache)
+        self.assertEqual(len(relative_root.parts[1]), 20)
+        verbose = dict(self.env, RUNNER_NAME="edison-" + "long-" * 40)
+        verbose_root = cache.cache_paths(verbose)["root"].relative_to(self.tool_cache)
+        self.assertEqual(len(str(verbose_root)), len(str(relative_root)))
+        root = PureWindowsPath(r"S:\actions-runner\_work\_tool", *relative_root.parts)
+        sysroot_rlib = (root / "rustup" / "toolchains" / "1.100.0-x86_64-pc-windows-msvc" /
+                        "lib" / "rustlib" / "x86_64-pc-windows-msvc" / "lib" /
+                        "libpanic_unwind-5c1156e4c72b00ea.rlib")
+        native_object = (root / "target" / "x86_64-pc-windows-msvc" / "release" / "build" /
+                         "llama-cpp-sys-2-1234567890abcdef" / "out" / "build" / "ggml" /
+                         "src" / "ggml-cpu" / "CMakeFiles" / "ggml-cpu.dir" / "ggml-cpu.cpp.obj")
+        self.assertLess(len(str(sysroot_rlib)), 260)
+        self.assertLessEqual(len(str(native_object)), 240)
 
     def test_hosted_uses_checkout_and_no_runner_local_cache(self):
         hosted = dict(self.env, RUNNER_ENVIRONMENT="github-hosted")
@@ -66,6 +87,11 @@ class CacheTests(unittest.TestCase):
         old.touch()
         past = time.time() - 20 * 86400
         os.utime(old, (past, past))
+        other_scope = cache.cache_paths(dict(self.env, GITHUB_REPOSITORY="Else/Repo"))["root"]
+        other_scope.mkdir(parents=True)
+        other_marker = other_scope / ".last-used"
+        other_marker.touch()
+        os.utime(other_marker, (past, past))
         unrelated = self.tool_cache / "other-repo"
         unrelated.mkdir()
         (unrelated / "keep").touch()
@@ -73,7 +99,27 @@ class CacheTests(unittest.TestCase):
             cache.prepare(self.env)
         self.assertFalse((paths["target"] / "oversized").exists())
         self.assertFalse(sibling.exists())
+        self.assertTrue(other_marker.exists())
         self.assertTrue((unrelated / "keep").exists())
+
+    def test_legacy_cache_is_not_migrated_or_pruned(self):
+        legacy = (self.tool_cache / "murmur-build-cache" / "old-repo" /
+                  "old-runner" / "old-platform" / "rust-1.100.0")
+        legacy.mkdir(parents=True)
+        keep = legacy / "keep"
+        keep.write_bytes(b"old cache")
+        cache.prepare(self.env)
+        self.assertEqual(keep.read_bytes(), b"old cache")
+
+    def test_reject_scope_junction_before_pruning(self):
+        paths = cache.cache_paths(self.env)
+        original = cache.is_redirect
+        scope = paths["root"].parent.parent
+        with mock.patch.object(cache, "is_redirect",
+                               side_effect=lambda path: path == scope or original(path)):
+            with self.assertRaisesRegex(ValueError, "junction"):
+                cache.prepare(self.env)
+        self.assertFalse(paths["root"].exists())
 
     def test_reject_cache_inside_checkout_and_symlink_target(self):
         bad = dict(self.env, RUNNER_TOOL_CACHE=str(self.workspace / ".cache"))

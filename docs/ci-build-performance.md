@@ -9,8 +9,11 @@ after toolchain setup. Do not advance it without a passing build on both hosts.
 
 On self-hosted runners, `scripts/ci-cache.py prepare` stores the Cargo target,
 Cargo registry/git downloads, pip wheels, npm downloads, and PyInstaller cache
-under `RUNNER_TOOL_CACHE/murmur-build-cache`. The path is scoped by repository,
-runner name, OS, architecture and Rust version, and is outside `GITHUB_WORKSPACE`.
+under `RUNNER_TOOL_CACHE/murmur-ci/<identity-hash>/rust-1.100.0`. The 20-hex-digit
+identity hash is stable for the repository, runner name, OS and architecture;
+the Rust version remains a separate directory. This short path leaves room for
+rustup's sysroot and nested native target files under Windows' 260-character
+path limit. The cache is outside `GITHUB_WORKSPACE`.
 The checked-out `.cache/artifacts` folders and fresh engine venv remain in the
 checkout; normal source cleanup cannot erase the compiler cache. Each cache namespace is tied to one registered runner name. A GitHub runner
 agent runs one job at a time, so writes to a namespace are serialized by that
@@ -32,6 +35,17 @@ against the actual release target, packaging checks, size budgets and signing
 guards.
 The junction regression is mocked in the Linux script suite; a native Windows
 junction run on Edison remains to be validated live.
+
+The shorter path starts a **cold cache** on each self-hosted runner. The script
+does not copy, link, or delete the former `RUNNER_TOOL_CACHE/murmur-build-cache`
+tree. On first use, `dtolnay/rust-toolchain@1.100.0` installs the pinned toolchain
+into the new `RUSTUP_HOME`; the following CI step verifies `rustc 1.100.0`.
+After a successful build on the new path, old cache data may be removed
+in runner maintenance only while the runner is idle. Inspect the exact old
+repository/runner/platform/Rust directory first, confirm it is a real directory
+rather than a symlink or junction, and remove only that verified namespace.
+The normal 14-day pruning applies only to old Rust versions in the new scope;
+it never traverses the former tree.
 
 ## Cold and two warm builds per platform
 

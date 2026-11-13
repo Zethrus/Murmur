@@ -27,10 +27,12 @@ def is_redirect(path):
     return path.is_symlink() or path.is_junction()
 
 
-def namespace(value):
-    label = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")[:32] or "unnamed"
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-    return f"{label}-{digest}"
+def namespace(env):
+    # Keep the toolchain and native build trees short enough for Windows tools
+    # that still use MAX_PATH. JSON preserves boundaries between identity fields.
+    identity = [env[key] for key in (
+        "GITHUB_REPOSITORY", "RUNNER_NAME", "RUNNER_OS", "RUNNER_ARCH")]
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode("utf-8")).hexdigest()[:20]
 
 
 def size(path):
@@ -71,10 +73,7 @@ def cache_paths(env):
                 "rustup": workspace / ".cache" / "rustup",
                 "root": workspace / ".cache"}
     tool_cache = Path(env["RUNNER_TOOL_CACHE"]).resolve()
-    scope = (tool_cache / "murmur-build-cache" /
-             namespace(env["GITHUB_REPOSITORY"]) /
-             namespace(env["RUNNER_NAME"]) /
-             namespace(f'{env["RUNNER_OS"]}-{env["RUNNER_ARCH"]}'))
+    scope = tool_cache / "murmur-ci" / namespace(env)
     root = scope / f"rust-{RUST_VERSION}"
     if workspace == root or workspace in root.parents:
         raise ValueError("Runner-local cache must be outside GITHUB_WORKSPACE")
@@ -85,8 +84,7 @@ def prepare(env):
     paths = cache_paths(env)
     root = paths["root"]
     if env.get("RUNNER_ENVIRONMENT") == "self-hosted":
-        for ancestor in (root, root.parent, root.parent.parent,
-                         root.parent.parent.parent, root.parent.parent.parent.parent):
+        for ancestor in (root, root.parent, root.parent.parent):
             if is_redirect(ancestor):
                 raise ValueError(f"Refusing symlink/junction cache: {ancestor}")
         # cargo/registry and cargo/git are pruned below. A junction or symlink at
