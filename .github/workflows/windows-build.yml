@@ -1,4 +1,5 @@
 name: Windows build
+run-name: Windows build ${{ github.sha }}
 
 # Runs on vars.WINDOWS_RUNNER (the self-hosted "Edison" machine: self-hosted, Windows, X64, gpu,
 # nvidia), or windows-latest when the variable is unset (see docs/ci-windows.md).
@@ -18,20 +19,34 @@ on:
         type: boolean
         default: false
   workflow_call:
+    inputs:
+      fallback_sha:
+        type: string
+        default: ''
+      fallback_run:
+        type: string
+        default: ''
+      fallback_attempt:
+        type: string
+        default: ''
     outputs:
       windows_inputs:
         description: components-windows-inputs.json (sizes and SHA-256 of the Windows component zips)
         value: ${{ jobs.build.outputs.windows_inputs }}
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 concurrency:
-  group: windows-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: ${{ inputs.fallback_run != '' && format('windows-fallback-{0}-{1}', inputs.fallback_run, inputs.fallback_attempt) || format('windows-{0}', github.ref) }}
+  cancel-in-progress: ${{ inputs.fallback_run == '' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
+    permissions:
+      contents: read
+      actions: read
     # Fork pull requests never reach a self-hosted runner: they run only when WINDOWS_RUNNER is
     # unset (hosted). Tags need the real runner and never route to hosted compute.
     if: >-
@@ -40,9 +55,9 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository ||
        vars.WINDOWS_RUNNER == '') &&
       (vars.WINDOWS_RUNNER != '' || !startsWith(github.ref, 'refs/tags/'))
-    runs-on: ${{ fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ inputs.fallback_sha != '' && 'windows-latest' || fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
     concurrency:
-      group: ${{ vars.WINDOWS_RUNNER != '' && 'murmur-windows-local-cache' || format('murmur-windows-hosted-{0}', github.run_id) }}
+      group: ${{ inputs.fallback_sha == '' && vars.WINDOWS_RUNNER != '' && 'murmur-windows-local-cache' || format('murmur-windows-hosted-{0}', github.run_id) }}
       cancel-in-progress: false
     timeout-minutes: 150
     outputs:
@@ -58,10 +73,6 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       PYTHONUTF8: '1'
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
       - name: Allow Windows PowerShell scripts for the runner user
         # actions/setup-python and setup-node run their setup.ps1 through Windows PowerShell 5.1,
         # whose default policy on client Windows is Restricted ("running scripts is disabled on
@@ -109,47 +120,86 @@ jobs:
           "pythonLocation=$Dir" | Out-File -FilePath $env:GITHUB_ENV -Append
           & $Python --version
 
+      - name: Check out trusted controller
+        if: ${{ inputs.fallback_sha != '' || (github.event_name == 'pull_request' && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.WINDOWS_RUNNER != '') }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: .trusted-ci
+          persist-credentials: false
+      - name: Wait for trusted build claim
+        id: claim
+        if: ${{ inputs.fallback_sha != '' || (github.event_name == 'pull_request' && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.WINDOWS_RUNNER != '') }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN: ${{ inputs.fallback_run || github.run_id }}
+          ORIGINAL_ATTEMPT: ${{ inputs.fallback_attempt || github.run_attempt }}
+          TESTED_SHA: ${{ inputs.fallback_sha || github.sha }}
+        run: |
+          python .trusted-ci/scripts/ci-build-controller.py gate `
+            --platform windows --original-run $env:ORIGINAL_RUN --original-attempt $env:ORIGINAL_ATTEMPT `
+            --candidate-run $env:GITHUB_RUN_ID --candidate-attempt $env:GITHUB_RUN_ATTEMPT `
+            --sha $env:TESTED_SHA --output $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { throw 'Trusted build claim unavailable' }
+      - uses: actions/checkout@v4
+        if: ${{ steps.claim.outputs.build != 'false' }}
+        with:
+          ref: ${{ inputs.fallback_sha || github.sha }}
+          persist-credentials: false
+
       - name: Prepare isolated build caches
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: python scripts/ci-cache.py prepare
 
       - name: Record starting resources and cache sizes
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: python scripts/ci-cache.py start
 
       - uses: actions/setup-node@v4
+        if: ${{ steps.claim.outputs.build != 'false' }}
         with:
           node-version: '22'
           cache: ${{ runner.environment != 'self-hosted' && 'npm' || '' }}
 
       - uses: dtolnay/rust-toolchain@1.100.0
+        if: ${{ steps.claim.outputs.build != 'false' }}
         with:
           targets: x86_64-pc-windows-msvc
 
       - name: Verify pinned Rust version
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: |
           $Version = (& rustc --version).Split(' ')[1]
           if ($LASTEXITCODE -ne 0 -or $Version -ne '1.100.0') { throw "Expected rustc 1.100.0, got $Version" }
 
       - uses: Swatinem/rust-cache@v2
-        if: runner.environment != 'self-hosted'
+        if: runner.environment != 'self-hosted' && steps.claim.outputs.build != 'false'
         with:
           workspaces: src-tauri -> target
 
       - name: Provision and initialize the Windows native toolchain
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: . ./scripts/prepare-windows-native.ps1
 
       - name: Freeze the engine (hash-locked wheels) and run the cuDNN/NVRTC gate (pefile + site-packages)
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: ./scripts/windows/freeze-engine.ps1
 
       - run: npm ci
+        if: ${{ steps.claim.outputs.build != 'false' }}
       - run: npm run build
+        if: ${{ steps.claim.outputs.build != 'false' }}
       - run: npm run test:ui
+        if: ${{ steps.claim.outputs.build != 'false' }}
 
       - name: Script tests (release checks, PE gate, Windows components, inference core, desktop harness)
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: |
           # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
@@ -160,6 +210,7 @@ jobs:
           if ($Code -ne 0) { throw 'Script tests failed' }
 
       - name: Engine tests
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: |
           engine/.release-venv/Scripts/python.exe -m pip install pytest
@@ -167,6 +218,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Engine tests failed' }
 
       - name: Rust tests (with and without the Enhance backend)
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml
@@ -175,6 +227,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Rust tests without Enhance backend failed' }
 
       - name: Build the component zips (engine, cuBLAS add-on) before the app
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: |
           ./scripts/windows/package.ps1 -ComponentsOnly |
@@ -184,7 +237,7 @@ jobs:
         # Before `tauri build`, so pull-request and manual builds can embed it (setup and
         # download checks on the desktop runner). The throwaway certificate stays next to it as
         # murmur-release.asc; the app trusts it only with MURMUR_DEV_TRUST_ROOT + ACK.
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -206,7 +259,7 @@ jobs:
       # Release tags only: pull-request and manual builds never receive the certificate secrets,
       # never hold the key in the runner's certificate store and never produce signed artifacts.
       - name: Import the Authenticode certificate (tags only; dormant until the secrets exist)
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false'
         shell: pwsh
         env:
           WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
@@ -214,6 +267,7 @@ jobs:
         run: ./scripts/windows/authenticode.ps1 -Import
 
       - name: Build murmur.exe and the per-user NSIS installer
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         env:
           # Pull requests and manual runs embed the throwaway-signed manifest (as Linux does) so the
@@ -256,11 +310,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'tauri build failed' }
 
       - name: Remove the Authenticode certificate
-        if: always()
+        if: always() && (steps.claim.outcome == 'skipped' || steps.claim.outputs.build == 'true')
         shell: pwsh
         run: ./scripts/windows/authenticode.ps1 -Remove
 
       - name: Audit linked native CPU baseline
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: |
           $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
@@ -268,6 +323,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Unsupported native CPU baseline' }
 
       - name: Package installer and portable zip; enforce size budgets
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: |
           $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
@@ -275,6 +331,7 @@ jobs:
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Startup smoke test (--version, --help)
+        if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -295,7 +352,7 @@ jobs:
       # would fail for reasons unrelated to Murmur. On Edison the launch is covered by the
       # interactive checklist in the logged-in session (docs/ci-windows.md).
       - name: Startup smoke test (launch without an engine; hosted runners only)
-        if: runner.environment != 'self-hosted'
+        if: runner.environment != 'self-hosted' && steps.claim.outputs.build != 'false'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -319,7 +376,7 @@ jobs:
           Write-Host 'murmur.exe started without an engine and did not crash within 10 s.'
 
       - name: GPU validation on the NVIDIA runner (manual runs with gpu=true)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.gpu  && steps.claim.outputs.build != 'false' }}
         shell: pwsh
         env:
           WINDOWS_GPU_TEST_MODELS: ${{ vars.WINDOWS_GPU_TEST_MODELS }}
@@ -332,6 +389,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows GPU validation failed' }
 
       - name: Hand the component inputs to the release
+        if: ${{ steps.claim.outputs.build != 'false' }}
         id: inputs
         shell: pwsh
         run: |
@@ -342,7 +400,7 @@ jobs:
         # Fails if murmur.exe (target folder and portable zip) embeds a manifest signed by any key
         # other than the committed release certificate; with no certificate, nothing may be
         # embedded. The NSIS installer is compressed and wraps the same murmur.exe.
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false'
         shell: pwsh
         run: |
           $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
@@ -350,24 +408,20 @@ jobs:
             (Join-Path $Release 'murmur.exe') .cache/artifacts/windows/murmur-windows-x86_64.zip
           if ($LASTEXITCODE -ne 0) { throw 'A release binary embeds a throwaway-signed manifest' }
 
-      - name: Attach Windows assets to the draft release (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $Draft = gh release view $env:GITHUB_REF_NAME --json isDraft | ConvertFrom-Json
-          if (-not $Draft.isDraft) { throw 'Published releases are immutable; never upload to them' }
-          $Version = (Get-Content -Raw package.json | ConvertFrom-Json).version
-          gh release upload $env:GITHUB_REF_NAME `
-            ".cache/artifacts/windows/Murmur_${Version}_x64-setup.exe" `
-            .cache/artifacts/windows/murmur-windows-x86_64.zip `
-            ".cache/artifacts/components-windows/murmur-engine-windows-x86_64-$Version.zip" `
-            ".cache/artifacts/components-windows/murmur-cuda-windows-x86_64-$Version.zip" --clobber
-          if ($LASTEXITCODE -ne 0) { throw 'Upload to the draft release failed' }
+      - name: Stage Windows assets for draft release (tags only)
+        if: startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: murmur-windows-release-assets-${{ github.run_attempt }}
+          path: |
+            .cache/artifacts/windows/*
+            .cache/artifacts/components-windows/*.zip
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
 
       - name: Upload throwaway-signed build artifacts (best effort, never released)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/')  && steps.claim.outputs.build != 'false' }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -382,7 +436,7 @@ jobs:
           compression-level: 0
 
       - name: Record final resources and cache sizes
-        if: always()
+        if: always() && (steps.claim.outcome == 'skipped' || steps.claim.outputs.build == 'true')
         shell: pwsh
         run: python scripts/ci-cache.py finish
 
@@ -393,7 +447,7 @@ jobs:
       # Manual runs only: a pull-request run (possibly from a fork, after approval) must not be
       # able to write into or prune the hand-off folder.
       - name: Hand the build to the desktop runner (self-hosted; manual runs)
-        if: runner.environment == 'self-hosted' && github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+        if: runner.environment == 'self-hosted' && github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -439,3 +493,28 @@ jobs:
             Sort-Object LastWriteTimeUtc -Descending | Select-Object -Skip 3 |
             ForEach-Object { Write-Host "Pruning $($_.Name)"; Remove-Retrying $_.FullName }
           "Desktop hand-off: ``$Dest`` ($($Files.Count) files + SHA256SUMS)." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+  release-upload:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: murmur-windows-release-assets-${{ github.run_attempt }}
+          path: release-assets
+      - name: Attach Windows assets to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+          version="${GITHUB_REF_NAME#v}"
+          gh release upload "$GITHUB_REF_NAME" \
+            "release-assets/windows/Murmur_${version}_x64-setup.exe" \
+            release-assets/windows/murmur-windows-x86_64.zip \
+            "release-assets/components-windows/murmur-engine-windows-x86_64-${version}.zip" \
+            "release-assets/components-windows/murmur-cuda-windows-x86_64-${version}.zip" --clobber

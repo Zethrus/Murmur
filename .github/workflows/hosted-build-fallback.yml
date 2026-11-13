@@ -1,0 +1,39 @@
+name: Hosted build fallback
+run-name: Hosted fallback ${{ inputs.platform }} ${{ inputs.original_run }} ${{ inputs.original_attempt }} ${{ inputs.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        type: choice
+        required: true
+        options: [linux, windows]
+      original_run:
+        type: string
+        required: true
+      original_attempt:
+        type: string
+        required: true
+      sha:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  linux:
+    if: inputs.platform == 'linux' && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.LINUX_RUNNER != ''
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      fallback_sha: ${{ inputs.sha }}
+      fallback_run: ${{ inputs.original_run }}
+      fallback_attempt: ${{ inputs.original_attempt }}
+  windows:
+    if: inputs.platform == 'windows' && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.WINDOWS_RUNNER != '' && vars.ENABLE_WINDOWS == 'true'
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      fallback_sha: ${{ inputs.sha }}
+      fallback_run: ${{ inputs.original_run }}
+      fallback_attempt: ${{ inputs.original_attempt }}

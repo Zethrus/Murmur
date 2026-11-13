@@ -5,6 +5,11 @@ Status, November 13, 2026: the self-hosted Windows manual/GPU build passed in
 at `f3c153b`. A hosted Windows build and the release workflow still need live
 validation. The ordinary build cache and cold/warm measurement protocol are in
 [CI build performance](ci-build-performance.md).
+After default-branch activation, same-repository ordinary PR builds queued on
+Edison can use the hosted fallback described there. Manual `gpu=true` runs,
+release tags/signing, and the interactive desktop runner never fall back.
+Hosted Windows allocation and billing on this account are still unverified;
+the fallback uses `windows-latest`, not a paid larger-runner label.
 
 ## The runner
 

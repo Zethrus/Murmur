@@ -1,0 +1,50 @@
+name: Trusted build fallback controller
+
+on:
+  schedule:
+    # Five-minute scans; GitHub may delay or drop scheduled events.
+    - cron: '2/5 * * * *'
+  workflow_run:
+    workflows: [Linux build, Windows build, Hosted build fallback]
+    types: [requested, in_progress, completed]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate controller/API eligibility without writes
+        type: boolean
+        default: true
+
+permissions:
+  actions: write
+  contents: write
+  statuses: write
+
+concurrency:
+  group: murmur-trusted-build-controller
+  cancel-in-progress: false
+
+jobs:
+  control:
+    if: vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Inspect queue, claim running build, dispatch eligible fallback and publish result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FALLBACK_DELAY_MINUTES: ${{ vars.MURMUR_BUILD_FALLBACK_DELAY_MINUTES || '10' }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+          LINUX_RUNNER_CONFIGURED: ${{ vars.LINUX_RUNNER != '' }}
+          WINDOWS_RUNNER_CONFIGURED: ${{ vars.WINDOWS_RUNNER != '' && vars.ENABLE_WINDOWS == 'true' }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          python3 scripts/ci-build-controller.py control --delay-minutes "$FALLBACK_DELAY_MINUTES" "${args[@]}"

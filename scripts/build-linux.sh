@@ -5,7 +5,7 @@ cd "$ROOT"
 # Keep Cargo and the audit bound to the same absolute target directory.
 CARGO_TARGET_DIR="$(realpath -m -- "${CARGO_TARGET_DIR:-$ROOT/src-tauri/target}")"
 export CARGO_TARGET_DIR
-export TMPDIR="$ROOT/.cache/tmp" PIP_CACHE_DIR="$ROOT/.cache/pip"
+export TMPDIR="${TMPDIR:-$ROOT/.cache/tmp}" PIP_CACHE_DIR="${PIP_CACHE_DIR:-$ROOT/.cache/pip}"
 mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"

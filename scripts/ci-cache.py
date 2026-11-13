@@ -22,6 +22,11 @@ MAX_NAMESPACE_BYTES = 40 * 1024**3
 OLD_TOOLCHAIN_DAYS = 14
 
 
+def is_redirect(path):
+    # pathlib identifies Windows junctions separately from symbolic links.
+    return path.is_symlink() or path.is_junction()
+
+
 def namespace(value):
     label = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")[:32] or "unnamed"
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
@@ -29,16 +34,16 @@ def namespace(value):
 
 
 def size(path):
-    if not path.exists() or path.is_symlink():
+    if not path.exists() or is_redirect(path):
         return 0
     if path.is_file():
         return path.stat().st_size
     total = 0
     for folder, dirs, files in os.walk(path, followlinks=False):
-        dirs[:] = [name for name in dirs if not (Path(folder) / name).is_symlink()]
+        dirs[:] = [name for name in dirs if not is_redirect(Path(folder) / name)]
         for name in files:
             entry = Path(folder) / name
-            if not entry.is_symlink():
+            if not is_redirect(entry):
                 try:
                     total += entry.stat().st_size
                 except FileNotFoundError:
@@ -47,8 +52,8 @@ def size(path):
 
 
 def prune(path, limit, reason):
-    if path.is_symlink():
-        raise ValueError(f"Refusing symlink cache: {path}")
+    if is_redirect(path):
+        raise ValueError(f"Refusing symlink/junction cache: {path}")
     if path.exists() and size(path) > limit:
         print(f"Pruning {reason}: {path} exceeds {limit / 1024**3:.0f} GiB")
         shutil.rmtree(path)
@@ -82,16 +87,21 @@ def prepare(env):
     if env.get("RUNNER_ENVIRONMENT") == "self-hosted":
         for ancestor in (root, root.parent, root.parent.parent,
                          root.parent.parent.parent, root.parent.parent.parent.parent):
-            if ancestor.is_symlink():
-                raise ValueError(f"Refusing symlink cache: {ancestor}")
+            if is_redirect(ancestor):
+                raise ValueError(f"Refusing symlink/junction cache: {ancestor}")
+        # cargo/registry and cargo/git are pruned below. A junction or symlink at
+        # cargo itself redirects both deletions outside this namespace.
+        for path in paths.values():
+            if is_redirect(path):
+                raise ValueError(f"Refusing symlink/junction cache: {path}")
         root.parent.mkdir(parents=True, exist_ok=True)
         cutoff = time.time() - OLD_TOOLCHAIN_DAYS * 86400
         for old in root.parent.iterdir():
             if old == root or not re.fullmatch(r"rust-\d+\.\d+\.\d+", old.name):
                 continue
             marker = old / ".last-used"
-            if old.is_symlink():
-                raise ValueError(f"Refusing symlink cache: {old}")
+            if is_redirect(old):
+                raise ValueError(f"Refusing symlink/junction cache: {old}")
             if old.is_dir() and (marker.stat().st_mtime if marker.exists() else old.stat().st_mtime) < cutoff:
                 print(f"Pruning toolchain cache unused for {OLD_TOOLCHAIN_DAYS} days: {old}")
                 shutil.rmtree(old)

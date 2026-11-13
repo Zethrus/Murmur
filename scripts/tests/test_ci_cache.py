@@ -106,6 +106,30 @@ class CacheTests(unittest.TestCase):
         self.assertEqual((bin_dir / "rustup").read_bytes(), b"shim")
         self.assertFalse((registry / "old-crate").exists())
 
+    def test_reject_cargo_parent_symlink_before_pruning(self):
+        paths = cache.cache_paths(self.env)
+        paths["root"].mkdir(parents=True)
+        outside = self.tool_cache / "outside-cargo"
+        (outside / "registry").mkdir(parents=True)
+        keep = outside / "registry" / "keep"
+        keep.write_bytes(b"123456")
+        try:
+            paths["cargo"].symlink_to(outside, target_is_directory=True)
+        except OSError:
+            return
+        with mock.patch.object(cache, "MAX_DOWNLOAD_BYTES", 1):
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                cache.prepare(self.env)
+        self.assertEqual(keep.read_bytes(), b"123456")
+
+    def test_reject_cargo_parent_junction_before_pruning(self):
+        paths = cache.cache_paths(self.env)
+        paths["root"].mkdir(parents=True)
+        original = cache.is_redirect
+        with mock.patch.object(cache, "is_redirect", side_effect=lambda path: path == paths["cargo"] or original(path)):
+            with self.assertRaisesRegex(ValueError, "junction"):
+                cache.prepare(self.env)
+
     def test_total_namespace_limit_prunes_downloads_before_target(self):
         paths = cache.cache_paths(self.env)
         paths["target"].mkdir(parents=True)
@@ -137,7 +161,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("dtolnay/rust-toolchain@1.100.0", text)
             self.assertNotIn("dtolnay/rust-toolchain@stable", text)
             self.assertIn("scripts/ci-cache.py prepare", text)
-            self.assertIn("if: runner.environment != 'self-hosted'\n        with:\n          workspaces: src-tauri -> target", text)
+            self.assertIn("runner.environment != 'self-hosted' && steps.claim.outputs.build != 'false'\n        with:\n          workspaces: src-tauri -> target", text)
             self.assertIn("runner.environment != 'self-hosted' && 'npm'", text)
             self.assertIn("cancel-in-progress: false", text)
             self.assertIn("scripts/ci-cache.py start", text)
