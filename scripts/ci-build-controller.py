@@ -154,7 +154,15 @@ def source_current(api, run, platform, default_branch, latest_id=None):
     # The fallback must test the immutable merge commit that the original PR
     # workflow checked out, with this PR head as its second parent.
     commit = api.get("/git/commits/" + merged)
-    return len(commit.get("parents", [])) == 2 and commit["parents"][1]["sha"] == head
+    if len(commit.get("parents", [])) != 2 or commit["parents"][1]["sha"] != head:
+        return False
+    # A pull_request workflow file comes from the PR merge commit. Reject a PR
+    # that changed the gate/workflow or uses an older default-branch revision.
+    # The privileged controller must never trust a run-name from altered YAML.
+    workflow_path = ".github/workflows/" + SOURCE[platform]
+    tested_file = api.get("/contents/" + workflow_path + "?ref=" + merged)
+    trusted_file = api.get("/contents/" + workflow_path + "?ref=" + default_branch)
+    return tested_file.get("sha") == trusted_file.get("sha")
 
 
 def latest_source_id(api, run, platform):

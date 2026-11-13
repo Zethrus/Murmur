@@ -41,6 +41,7 @@ class FakeGitHub:
         self.dispatches = []
         self.pull_open = True
         self.current_merge = MERGE
+        self.workflow_trusted = True
         self.fail_path = None
 
     def get(self, path, missing=False):
@@ -55,6 +56,8 @@ class FakeGitHub:
             return {"state": "open", "merge_commit_sha": self.current_merge}
         if path == "/git/commits/" + MERGE:
             return {"parents": [{"sha": "c" * 40}, {"sha": HEAD}]}
+        if path.startswith("/contents/.github/workflows/"):
+            return {"sha": "d" * 40 if self.workflow_trusted or path.endswith("ref=master") else "e" * 40}
         if path.startswith("/git/ref/tags/"):
             return self.refs.get(path.removeprefix("/git/ref/tags/"))
         if path.startswith("/git/tags/"):
@@ -158,6 +161,12 @@ class DecisionTests(unittest.TestCase):
         host["head_branch"] = "untrusted-feature"
         self.control()
         self.assertIsNone(ci.read_marker(self.api, "claims", "linux", 101, 1))
+
+    def test_changed_pr_workflow_cannot_claim_or_dispatch(self):
+        self.api.workflow_trusted = False
+        self.control()
+        self.assertEqual(self.api.dispatches, [])
+        self.assertEqual(self.api.refs, {})
 
     def test_running_self_hosted_claim_prevents_fallback_and_wins_race(self):
         self.api.job.update(status="in_progress", started_at=stamp(2))

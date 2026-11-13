@@ -102,9 +102,12 @@ The controller and status publisher execute default-branch code with
 The Windows tag release upload is a separate job with `contents:write`, after
 its build, so ordinary PR code does not receive that permission. The controller
 checks same-repository PR ownership, open/current PR head, current test-merge
-commit, source workflow path/name, latest run/attempt, and job state. Hosted
+commit, byte-identical source workflow file against the default branch,
+source workflow path/name, latest run/attempt, and job state. Hosted
 fallback checks out the immutable original test-merge SHA rather than the
 fallback workflow's default-branch SHA. No PR checkout is run by the controller.
+PRs that edit these build workflow files will fail this trust check and need a
+separate trusted review/validation path before the fallback can be used.
 Forks, manual/GPU-requested runs, tags, signing, and desktop jobs are outside
 this fallback path. The existing release workflow remains self-hosted.
 With a self-hosted runner configured, fork PR build jobs are skipped and do not
