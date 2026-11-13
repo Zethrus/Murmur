@@ -1,6 +1,7 @@
 """Negative fixtures for the linked llama CPU baseline gate."""
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import tempfile
@@ -24,6 +25,53 @@ CONTRACT = (''.join(f'{name}:BOOL=ON\n' for name in REQUIRED_ON)
 FLAGS = '-m64 -march=x86-64 -mavx -mavx2 -mfma -mf16c -mbmi2 -msse4.2'
 
 class AuditTests(unittest.TestCase):
+    def test_cargo_110_package_build_layout_links_actual_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp).resolve()
+            binary = root / 'build/murmur/0123456789abcdef/out/murmur'
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_UNK end' + b'a' * 100)
+            bundled = root / 'murmur'
+            bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_APP end' + b'a' * 100)
+
+            def fingerprint(path, number):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(number.to_bytes(8, 'little').hex())
+
+            (binary.parent.parent / 'fingerprint/bin-murmur.json').parent.mkdir()
+            (binary.parent.parent / 'fingerprint/bin-murmur.json').write_text(
+                json.dumps({'deps': [[0, 'llama_cpp_sys_2', False, 11]]}))
+            sys = root / 'build/llama-cpp-sys-2/aaaaaaaaaaaaaaaa/fingerprint/lib-llama_cpp_sys_2'
+            fingerprint(sys, 11)
+            sys.with_suffix('.json').write_text(json.dumps({'deps': [[0, 'build_script_build', False, 22]]}))
+            run = root / 'build/llama-cpp-sys-2/bbbbbbbbbbbbbbbb/fingerprint/run-build-script-build-script-build'
+            fingerprint(run, 22)
+            linked = run.parent.parent
+            (linked / 'run').mkdir()
+            (linked / 'run/stdout').write_text('cargo:rustc-link-lib=static=ggml-cpu')
+            cache = linked / 'out/build/CMakeCache.txt'
+            cache.parent.mkdir(parents=True)
+            cache.write_text(CONTRACT)
+            (cache.parent / 'flags.make').write_text('CXX_FLAGS = ' + FLAGS)
+
+            # A newer cache with different CPU flags must not replace the linked one.
+            stale = root / 'build/llama-cpp-sys-2/cccccccccccccccc/out/build/CMakeCache.txt'
+            stale.parent.mkdir(parents=True)
+            stale.write_text('GGML_AVX2:BOOL=OFF')
+            os.utime(stale, None)
+            self.assertEqual(audit.linked_cache(root, bundled), cache)
+            self.assertEqual(audit.audit_cache(audit.linked_cache(root, bundled)), 1)
+
+            bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_APP end' + b'b' * 100)
+            with self.assertRaisesRegex(ValueError, 'Cannot uniquely match'):
+                audit.linked_cache(root, bundled)
+            bundled.write_bytes(b'fake executable __TAURI_BUNDLE_TYPE_VAR_APP end' + b'a' * 100)
+            duplicate = root / 'build/murmur/ffffffffffffffff/out/murmur'
+            duplicate.parent.mkdir(parents=True)
+            duplicate.write_bytes(binary.read_bytes())
+            with self.assertRaisesRegex(ValueError, 'Cannot uniquely match'):
+                audit.linked_cache(root, bundled)
+
     def test_effective_compiler_arguments(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = pathlib.Path(tmp).resolve() / 'CMakeCache.txt'

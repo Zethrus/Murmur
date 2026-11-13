@@ -4,7 +4,7 @@
 Cargo fingerprint dependency hashes identify the precise sys crate and build-script output.
 Timestamps are used in one place only: windows-msvc binaries carry no metadata hash, so their
 fingerprint record is the one Cargo wrote between linking and the artifact's last write.
-Run before stripping or packaging the binary.
+Supports both Cargo's legacy deps/.fingerprint layout and its 1.100+ package build layout.
 """
 import argparse
 import hashlib
@@ -102,14 +102,21 @@ def linked_cache(target, artifact):
     target = target.resolve()
     artifact = artifact.resolve()
     deps = target / "deps"
+    # Cargo 1.100 moved intermediate artifacts into build/<package>/<unit>/ and
+    # removed the filename hash from binaries. The unit directory still provides
+    # the hash; compare its binary to the actual (possibly Tauri-patched) artifact.
+    new_binaries = [p for p in (target / "build" / "murmur").glob(f"*/out/{artifact.name}")
+                    if re.fullmatch(r"[0-9a-f]{16}", p.parent.parent.name) and p.is_file()]
     if artifact == target / ("murmur.exe" if sys.platform == "win32" else "murmur"):
         digest = _unpatched_digest(artifact)
-        candidates = [p for p in deps.glob("murmur-*") if p.is_file() and p.suffix not in (".d", ".pdb")]
+        legacy = [p for p in deps.glob("murmur-*")
+                  if p.is_file() and p.suffix not in (".d", ".pdb")]
         # windows-msvc: Cargo omits the metadata hash from executable names (so the .pdb
         # name stays stable), leaving deps/murmur.exe; its fingerprint is found by time.
         unhashed = deps / artifact.name
-        if not candidates and unhashed.is_file():
-            candidates = [unhashed]
+        if not legacy and unhashed.is_file():
+            legacy = [unhashed]
+        candidates = legacy + new_binaries
         same_size = [p for p in candidates if p.stat().st_size == artifact.stat().st_size]
         binaries = [p for p in same_size if _unpatched_digest(p) == digest]
         if not binaries:
@@ -124,22 +131,38 @@ def linked_cache(target, artifact):
                              f"binary (stripped or stale artifact?); candidates: {details}")
         artifact = binaries[0]
     fp = target / ".fingerprint"
-    if artifact.parent == deps and artifact.stem == "murmur":
+    new_layout = artifact in new_binaries
+    if new_layout:
+        unit = artifact.parent.parent
+        binary = unit / "fingerprint" / "bin-murmur.json"
+        sys_root = target / "build" / "llama-cpp-sys-2"
+        sys_glob = "*/fingerprint/lib-llama_cpp_sys_2"
+        run_glob = "*/fingerprint/run-build-script-build-script-build"
+    elif artifact.parent == deps and artifact.stem == "murmur":
         binary_hash = _newest_bin_fingerprint(fp, artifact)
-    elif artifact.parent != deps or not re.fullmatch(r"murmur-[0-9a-f]{16}(?:\.exe)?", artifact.name):
-        raise ValueError("Artifact must be a current unstripped Cargo binary or target/<profile>/murmur")
-    else:
+    elif artifact.parent == deps and re.fullmatch(r"murmur-[0-9a-f]{16}(?:\.exe)?", artifact.name):
         binary_hash = artifact.stem.split("-", 1)[1]
-    binary = fp / f"murmur-{binary_hash}" / "bin-murmur.json"
+    else:
+        raise ValueError("Artifact must be a current Cargo binary or target/<profile>/murmur")
+    if not new_layout:
+        binary = fp / f"murmur-{binary_hash}" / "bin-murmur.json"
+        sys_root = fp
+        sys_glob = "llama-cpp-sys-2-*/lib-llama_cpp_sys_2"
+        run_glob = "llama-cpp-sys-2-*/run-build-script-build-script-build"
     sys_hash = dependency(binary, "llama_cpp_sys_2")
-    sys_fp = by_fingerprint(fp, "llama-cpp-sys-2-*/lib-llama_cpp_sys_2", "lib-llama_cpp_sys_2", sys_hash)
+    sys_fp = by_fingerprint(sys_root, sys_glob, "lib-llama_cpp_sys_2", sys_hash)
     run_hash = dependency(sys_fp.with_suffix(".json"), "build_script_build")
-    run_fp = by_fingerprint(fp, "llama-cpp-sys-2-*/run-build-script-build-script-build",
+    run_fp = by_fingerprint(sys_root, run_glob,
                             "run-build-script-build-script-build", run_hash)
-    output = target / "build" / run_fp.parent.name / "output"
+    if new_layout:
+        run_unit = run_fp.parent.parent
+        output = run_unit / "run" / "stdout"
+        cache = run_unit / "out" / "build" / "CMakeCache.txt"
+    else:
+        output = target / "build" / run_fp.parent.name / "output"
+        cache = target / "build" / run_fp.parent.name / "out" / "build" / "CMakeCache.txt"
     if not output.is_file():
         raise ValueError(f"Missing linked build-script output: {output}")
-    cache = target / "build" / run_fp.parent.name / "out" / "build" / "CMakeCache.txt"
     if not cache.is_file():
         raise ValueError(f"Missing linked native cache: {cache}")
     return cache
