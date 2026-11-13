@@ -20,9 +20,11 @@ Do not reuse a published version or move its tag. Fixes need a new version.
 
 ## What CI does
 
-`release.yml` validates versions and creates a draft. Linux and Flipper builds
-upload directly to that draft, so publication does not depend on Actions artifact
-storage. Both builds must succeed. The Linux job freezes the onedir engine, fails if it
+`release.yml` validates versions and creates a draft. Linux and Flipper tag-only
+jobs upload directly to it. The Windows build stages four assets on Edison;
+a separate trusted tag-only job verifies their hashes and uploads them from the
+same runner. Publication does not depend on Actions artifact storage. All
+enabled builds must succeed. The Linux job freezes the onedir engine, fails if it
 references cuDNN or NVRTC, and builds two **component zips**: the engine
 (`murmur-engine-linux-x86_64-<ver>.zip`) and the cuBLAS-only GPU add-on
 (`murmur-cuda-linux-x86_64-<ver>.zip`). `scripts/components/make-manifest.py`

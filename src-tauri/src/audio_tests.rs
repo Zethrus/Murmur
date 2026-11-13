@@ -44,7 +44,7 @@ fn resample_chunk_boundaries() {
 }
 #[test]
 fn qa_wav_capture_without_hardware() -> Result<()> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/qa-capture-test.wav");
+    let path = std::env::temp_dir().join(format!("murmur-qa-capture-{}.wav", std::process::id()));
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: 48000,

@@ -2,7 +2,7 @@
 # engine/requirements-windows-release.txt, then prune CTranslate2's unused cuDNN shim and run
 # the cuDNN/NVRTC gate (pefile + unfrozen site-packages). Output: engine\dist\murmur-engine.
 # Used by scripts/build-windows.ps1 and .github/workflows/windows-build.yml.
-# Not yet run on Windows (verified in source only); Edison CI is the first run.
+# Exercised in the Edison manual/GPU build (run 43472148187).
 [CmdletBinding()]
 param([string]$Python = 'python')
 Set-StrictMode -Version Latest

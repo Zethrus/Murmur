@@ -115,7 +115,9 @@ sends decoded PCM and downloads over plain HTTPS). `scripts/check-engine-imports
 then fails the build if any file in that folder references cuDNN or NVRTC.
 
 The default build directory is `src-tauri/target`; manual build-linux.sh honors
-Cargo target overrides. The installer and CI deliberately pin that directory.
+Cargo target overrides. CI uses a runner-local target outside the checkout on
+self-hosted runners and the default target on hosted runners. Its cache scope and
+measurement protocol are in [CI build performance](ci-build-performance.md).
 The app downloads are in `.cache/artifacts/linux`, the components in
 `.cache/artifacts/components`. AppImage creation is required.
 

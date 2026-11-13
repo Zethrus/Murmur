@@ -41,7 +41,7 @@ def condition(block):
 class WindowsBuildSigningTests(unittest.TestCase):
     def test_certificate_import_runs_only_for_release_tags(self):
         block = step("windows-build.yml", "Import the Authenticode certificate")
-        self.assertEqual(condition(block), "startsWith(github.ref, 'refs/tags/')")
+        self.assertEqual(condition(block), "startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false'")
         self.assertIn("secrets.WINDOWS_CERT_PFX_BASE64", block)
 
     def test_only_the_tag_only_import_step_sees_certificate_secrets(self):
@@ -52,14 +52,26 @@ class WindowsBuildSigningTests(unittest.TestCase):
     def test_build_signs_only_on_tags_and_removal_always_runs(self):
         build = step("windows-build.yml", "Build murmur.exe")
         self.assertIn("$env:MURMUR_SIGN_THUMBPRINT -and $env:GITHUB_REF -like 'refs/tags/*'", build)
-        self.assertEqual(condition(step("windows-build.yml", "Remove the Authenticode certificate")), "always()")
+        self.assertEqual(condition(step("windows-build.yml", "Remove the Authenticode certificate")),
+                         "always() && (steps.claim.outcome == 'skipped' || steps.claim.outputs.build == 'true')")
+
+    def test_pr_build_token_is_read_only_and_tag_upload_is_separate(self):
+        text = (WORKFLOWS / "windows-build.yml").read_text(encoding="utf-8")
+        build = text.split("\n  build:\n", 1)[1]
+        upload = (WORKFLOWS / "release.yml").read_text(encoding="utf-8").split("\n  windows:\n", 1)[1].split("\n  linux-build:\n", 1)[0]
+        self.assertIn("    permissions:\n      contents: read\n      actions: read", build)
+        self.assertNotIn("gh release upload", build)
+        self.assertIn("    permissions:\n      contents: write", upload)
+        self.assertIn("needs: windows-build", upload)
+        self.assertNotIn("download-artifact", upload)
+        self.assertNotIn("upload-artifact", build.split("Stage Windows assets on the trusted release runner", 1)[1].split("Upload throwaway-signed", 1)[0])
 
     def test_release_inherits_secrets_only_from_tag_pushes(self):
         text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
         trigger = text.split("\npermissions:")[0]
         self.assertRegex(trigger, r"on:\n  push:\n    tags: \['v\*'\]\n*$")
         self.assertEqual(text.count("secrets: inherit"), 1)
-        windows_job = text.split("\n  windows:\n", 1)[1].split("\n  linux:\n", 1)[0]
+        windows_job = text.split("\n  windows-build:\n", 1)[1].split("\n  windows:\n", 1)[0]
         self.assertIn("secrets: inherit", windows_job)
 
     def test_powershell_never_assigns_the_automatic_args_variable(self):
@@ -71,10 +83,10 @@ class WindowsBuildSigningTests(unittest.TestCase):
 class WindowsSmokeTests(unittest.TestCase):
     def test_cli_smoke_runs_everywhere_and_launch_only_on_hosted_runners(self):
         cli = step("windows-build.yml", "Startup smoke test (--version, --help)")
-        self.assertIsNone(condition(cli))
+        self.assertEqual(condition(cli), "${{ steps.claim.outputs.build != 'false' }}")
         self.assertIn("--version", cli)
         launch = step("windows-build.yml", "Startup smoke test (launch")
-        self.assertEqual(condition(launch), "vars.WINDOWS_RUNNER == ''")
+        self.assertEqual(condition(launch), "runner.environment != 'self-hosted' && steps.claim.outputs.build != 'false'")
         self.assertIn("'--background'", launch)
 
 
@@ -146,28 +158,31 @@ class EmbeddedManifestTests(unittest.TestCase):
         self.assertIn("if ($env:EMBED_TEST_MANIFEST -eq 'true')", build)
         self.assertIn("Remove-Item Env:MURMUR_EMBED_MANIFEST", build)
         throwaway = step("windows-build.yml", "Throwaway-signed Windows manifest")
-        self.assertEqual(condition(throwaway), "${{ !startsWith(github.ref, 'refs/tags/') }}")
+        self.assertEqual(condition(throwaway), "${{ !startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false' }}")
 
     def test_release_guard_runs_before_any_upload_on_tags(self):
-        for workflow, upload in (("windows-build.yml", "Attach Windows assets"),
-                                 ("linux-build.yml", "Attach Linux assets")):
+        for workflow, upload in (("windows-build.yml", "Stage Windows assets"),
+                                 ("release.yml", "Attach Linux assets")):
             with self.subTest(workflow=workflow):
                 blocks = steps(workflow)
                 guard = next(i for i, b in enumerate(blocks) if "Release guard - no throwaway-signed manifest" in b)
                 attach = next(i for i, b in enumerate(blocks) if f"- name: {upload}" in b)
                 self.assertLess(guard, attach)
-                self.assertEqual(condition(blocks[guard]), "startsWith(github.ref, 'refs/tags/')")
+                if workflow == "windows-build.yml":
+                    self.assertTrue(condition(blocks[guard]).startswith("startsWith(github.ref, 'refs/tags/')"))
                 self.assertIn("scripts/check-embedded-manifest.py --trusted-cert src-tauri/trust/murmur-release.asc",
                               blocks[guard])
 
 
 class DesktopHandoffTests(unittest.TestCase):
     def test_handoff_is_the_last_step_self_hosted_and_manual_only(self):
-        blocks = steps("windows-build.yml")
-        self.assertIn("Hand the build to the desktop runner", blocks[-1])
-        self.assertEqual(condition(blocks[-1]),
+        text = (WORKFLOWS / "windows-build.yml").read_text(encoding="utf-8")
+        build_section = text.split("\n  release-upload:\n", 1)[0]
+        self.assertIn("Hand the build to the desktop runner", build_section.split("      - name:")[-1])
+        handoff = step("windows-build.yml", "Hand the build to the desktop runner")
+        self.assertEqual(condition(handoff),
                          "runner.environment == 'self-hosted' && github.event_name == 'workflow_dispatch' "
-                         "&& !startsWith(github.ref, 'refs/tags/')")
+                         "&& !startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false'")
 
     def test_handoff_prints_hashes_writes_sums_and_keeps_three(self):
         block = step("windows-build.yml", "Hand the build to the desktop runner")

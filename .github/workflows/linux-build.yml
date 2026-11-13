@@ -1,4 +1,5 @@
 name: Linux build
+run-name: Linux build ${{ github.sha }}${{ github.event_name == 'workflow_dispatch' && format(' {0}', github.ref_type) || '' }}
 
 on:
   # Releases build on v* tags through release.yml. Branch pushes do not trigger a full build:
@@ -8,32 +9,32 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
-      windows_inputs:
-        description: components-windows-inputs.json from windows-build.yml; the signed manifest then lists the Windows components
+      fallback_sha:
+        type: string
+        default: ''
+      fallback_run:
+        type: string
+        default: ''
+      fallback_attempt:
         type: string
         default: ''
 
 permissions:
-  # Write is needed to attach assets when a v* tag is pushed; fork PRs never run on the
-  # self-hosted runner (see the job-level `if:`), so untrusted code never holds this token.
-  contents: write
-
-concurrency:
-  group: linux-${{ github.ref }}
-  cancel-in-progress: true
+  contents: read
+  actions: read
 
 jobs:
-  # Builds and tests everything with a THROWAWAY signing key. On tags this job only validates;
-  # the `release` job below rebuilds with the real key and uploads.
+  # Builds and tests everything with a THROWAWAY signing key. The trusted tag
+  # release job in release.yml rebuilds with the real key and uploads.
   build:
+    permissions:
+      contents: read
+      actions: read
     # Fork PRs must never execute on a self-hosted runner; keep them on hosted or skip.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || vars.LINUX_RUNNER == ''
-    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ inputs.fallback_sha != '' && 'ubuntu-22.04' || fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
-      TMPDIR: ${{ github.workspace }}/.cache/tmp
-      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       CARGO_BUILD_JOBS: '2'
       RUSTFLAGS: '-C target-cpu=x86-64'
@@ -47,12 +48,42 @@ jobs:
       GGML_SSE42: 'ON'
       GGML_CPU_ALL_VARIANTS: 'OFF'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
+          python-version: '3.12'
+      - name: Check out trusted controller
+        if: ${{ inputs.fallback_sha != '' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch')) && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.LINUX_RUNNER != '') }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: .trusted-ci
           persist-credentials: false
-      - name: Prepare temporary directory
-        run: mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
+      - name: Wait for trusted build claim
+        id: claim
+        if: ${{ inputs.fallback_sha != '' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch')) && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.LINUX_RUNNER != '') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN: ${{ inputs.fallback_run || github.run_id }}
+          ORIGINAL_ATTEMPT: ${{ inputs.fallback_attempt || github.run_attempt }}
+          TESTED_SHA: ${{ inputs.fallback_sha || github.sha }}
+        run: |
+          python3 .trusted-ci/scripts/ci-build-controller.py gate \
+            --platform linux --original-run "$ORIGINAL_RUN" --original-attempt "$ORIGINAL_ATTEMPT" \
+            --candidate-run "$GITHUB_RUN_ID" --candidate-attempt "$GITHUB_RUN_ATTEMPT" \
+            --sha "$TESTED_SHA" --output "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: ${{ steps.claim.outputs.build != 'false' }}
+        with:
+          ref: ${{ inputs.fallback_sha || github.sha }}
+          persist-credentials: false
+      - name: Prepare isolated build caches
+        if: ${{ steps.claim.outputs.build != 'false' }}
+        run: python3 scripts/ci-cache.py prepare
+      - name: Record starting resources and cache sizes
+        if: ${{ steps.claim.outputs.build != 'false' }}
+        run: python3 scripts/ci-cache.py start
       - name: Provision runner dependencies
+        if: ${{ steps.claim.outputs.build != 'false' }}
         run: |
           set -euo pipefail
           # Hosted runners start bare; a self-hosted machine usually already has the stack and
@@ -79,42 +110,41 @@ jobs:
             libxkbcommon-dev libx11-dev libgtk-3-dev librsvg2-bin file \
             xdotool x11-utils squashfs-tools fonts-dejavu-core xvfb xauth dbus
       - uses: actions/setup-node@v4
+        if: ${{ steps.claim.outputs.build != 'false' }}
         with:
           node-version: '22'
-          cache: npm
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Isolate the CI Rust toolchain
-        run: |
-          set -euo pipefail
-          # Self-hosted machines already have rustup in $HOME; a CI install over it fails with
-          # "could not rename component ... Directory not empty" and mutates the desktop toolchain.
-          root="${RUNNER_TOOL_CACHE:-$HOME/.cache}/murmur-ci"
-          mkdir -p "$root/rustup" "$root/cargo"
-          printf 'RUSTUP_HOME=%s\n' "$root/rustup" >> "$GITHUB_ENV"
-          printf 'CARGO_HOME=%s\n' "$root/cargo" >> "$GITHUB_ENV"
-          printf '%s\n' "$root/cargo/bin" >> "$GITHUB_PATH"
-          rustup target list --installed 2>/dev/null || true
-      - uses: dtolnay/rust-toolchain@stable
+          cache: ${{ runner.environment != 'self-hosted' && 'npm' || '' }}
+      - uses: dtolnay/rust-toolchain@1.100.0
+        if: ${{ steps.claim.outputs.build != 'false' }}
+      - name: Verify pinned Rust version
+        if: ${{ steps.claim.outputs.build != 'false' }}
+        run: test "$(rustc --version | cut -d' ' -f2)" = 1.100.0
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted' && steps.claim.outputs.build != 'false'
         with:
           workspaces: src-tauri -> target
       - name: Build frozen engine
+        if: ${{ steps.claim.outputs.build != 'false' }}
         run: |
           scripts/prepare-linux-release.sh python
           scripts/engine-sidecar.sh --build "$PWD/engine/.release-venv/bin/python"
           test -x engine/dist/murmur-engine/murmur-engine
       - name: cuDNN/NVRTC gate (Murmur ships cuBLAS only)
+        if: ${{ steps.claim.outputs.build != 'false' }}
         run: |
           python3 scripts/check-engine-imports.py engine/dist/murmur-engine \
             --site-packages "$(engine/.release-venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
       - run: npm ci
+        if: ${{ steps.claim.outputs.build != 'false' }}
       - run: npm run build
+        if: ${{ steps.claim.outputs.build != 'false' }}
       - run: npm run test:ui
+        if: ${{ steps.claim.outputs.build != 'false' }}
       - name: Test installers and release validation
+        if: ${{ steps.claim.outputs.build != 'false' }}
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Test Rust including unavailable Enhance backend
+        if: ${{ steps.claim.outputs.build != 'false' }}
         env:
           # Debug symbols from the test build are what fill a self-hosted runner's disk
           # (13 GB against 7.5 GB for the whole release tree); the release build sets its own.
@@ -130,8 +160,10 @@ jobs:
           headless cargo test --manifest-path src-tauri/Cargo.toml
           headless cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
       - name: Test speech sidecar
+        if: ${{ steps.claim.outputs.build != 'false' }}
         run: engine/.release-venv/bin/python -m pip install pytest && engine/.release-venv/bin/python -m pytest engine/tests -q
       - name: Build engine and CUDA add-on components, manifest signed with a throwaway key
+        if: ${{ steps.claim.outputs.build != 'false' }}
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
@@ -150,6 +182,7 @@ jobs:
           gpgconf --homedir "$key" --kill all || true
           rm -rf "$key"
       - name: Build app, deb and AppImage
+        if: ${{ steps.claim.outputs.build != 'false' }}
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: |
@@ -160,8 +193,10 @@ jobs:
           export MURMUR_EMBED_MANIFEST="$PWD/.cache/artifacts/components/components-manifest.json"
           npx tauri build
       - name: Audit generated llama.cpp CPU flags
+        if: ${{ steps.claim.outputs.build != 'false' }}
         run: python scripts/audit-llama-cpu.py "$CARGO_TARGET_DIR/release" --artifact "$CARGO_TARGET_DIR/release/murmur"
       - name: Verify and stage unsigned artifacts
+        if: ${{ steps.claim.outputs.build != 'false' }}
         run: |
           set -euo pipefail
           release="$CARGO_TARGET_DIR/release"
@@ -175,6 +210,7 @@ jobs:
           python3 scripts/test-linux-startup.py .cache/artifacts/linux/*.AppImage --components .cache/artifacts/components
           python3 scripts/check-release.py sizes .cache/artifacts/linux/* .cache/artifacts/components/*.zip engine/dist/murmur-engine >> "$GITHUB_STEP_SUMMARY"
       - name: Clean offline install in Docker (when available)
+        if: ${{ steps.claim.outputs.build != 'false' }}
         env:
           MURMUR_CLEAN_TEST_MODEL: ${{ vars.MURMUR_CLEAN_TEST_MODEL }}
         run: |
@@ -184,6 +220,7 @@ jobs:
             echo 'Docker or MURMUR_CLEAN_TEST_MODEL unavailable; clean offline install not run.' | tee -a "$GITHUB_STEP_SUMMARY"
           fi
       - name: GPU validation of components on trusted hardware (when available)
+        if: ${{ steps.claim.outputs.build != 'false' }}
         env:
           MURMUR_GPU_TEST_MODELS: ${{ vars.MURMUR_GPU_TEST_MODELS }}
         run: |
@@ -194,7 +231,7 @@ jobs:
             echo 'GPU inference skipped: no NVIDIA runner or MURMUR_GPU_TEST_MODELS.' | tee -a "$GITHUB_STEP_SUMMARY"
           fi
       - name: Mark throwaway-signed artifacts
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/')  && steps.claim.outputs.build != 'false' }}
         run: |
           set -euo pipefail
           out=.cache/artifacts/untrusted-dev-signed
@@ -206,7 +243,7 @@ jobs:
           done
           ls -la "$out"
       - name: Upload throwaway-signed build artifacts (best effort, never released)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/')  && steps.claim.outputs.build != 'false' }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -215,96 +252,6 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
-
-  # Tags only, and only once the owner has created the release key (docs/signing.md): rebuild
-  # with the real signing subkey from the protected environment, validate on the GPU runner
-  # and attach everything to the draft release. Without the key, nothing is uploaded.
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/') && vars.MURMUR_RELEASE_TRUST_FINGERPRINT != ''
-    environment: release-signing
-    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 120
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
-      TMPDIR: ${{ github.workspace }}/.cache/tmp
-      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
-      APPIMAGE_EXTRACT_AND_RUN: '1'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Isolate the CI Rust toolchain
-        run: |
-          root="${RUNNER_TOOL_CACHE:-$HOME/.cache}/murmur-ci"
-          printf 'RUSTUP_HOME=%s\nCARGO_HOME=%s\n' "$root/rustup" "$root/cargo" >> "$GITHUB_ENV"
-          printf '%s\n' "$root/cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
-      - name: The committed trust root must be the configured release key
-        env:
-          EXPECTED: ${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}
-        run: |
-          set -euo pipefail
-          grep -q "RELEASE_PRIMARY_FINGERPRINT: &str = \"$EXPECTED\"" src-tauri/src/components/trust.rs
-          actual="$(gpg --batch --with-colons --show-keys src-tauri/trust/murmur-release.asc | awk -F: '/^fpr/ {print $10; exit}')"
-          test "$actual" = "$EXPECTED"
-      - name: Fetch the Windows component zips from the draft (when Windows is enabled)
-        if: inputs.windows_inputs != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WINDOWS_INPUTS: ${{ inputs.windows_inputs }}
-        run: |
-          set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          windows="$RUNNER_TEMP/windows-components"
-          rm -rf "$windows" && mkdir -p "$windows"
-          printf '%s\n' "$WINDOWS_INPUTS" > "$windows/components-windows-inputs.json"
-          gh release download "$GITHUB_REF_NAME" --dir "$windows" \
-            --pattern "murmur-engine-windows-x86_64-$version.zip" --pattern "murmur-cuda-windows-x86_64-$version.zip"
-          # make-manifest.py re-checks both zips against these hashes before signing them.
-          echo "MURMUR_WINDOWS_COMPONENTS=$windows" >> "$GITHUB_ENV"
-      - name: Build, sign with the release subkey and test
-        env:
-          MURMUR_SIGNING_SUBKEY: ${{ secrets.MURMUR_SIGNING_SUBKEY }}
-          MURMUR_SIGNING_PASSPHRASE: ${{ secrets.MURMUR_SIGNING_PASSPHRASE }}
-        run: |
-          set -euo pipefail
-          test -n "$MURMUR_SIGNING_SUBKEY" || { echo 'MURMUR_SIGNING_SUBKEY is not set in the release-signing environment' >&2; exit 1; }
-          scripts/build-linux.sh
-          python3 scripts/check-release.py signature .cache/artifacts/components "${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}"
-      - name: Validate final Linux assets on trusted GPU hardware
-        env:
-          MURMUR_GPU_TEST_MODELS: ${{ vars.MURMUR_GPU_TEST_MODELS }}
-        run: |
-          set -euo pipefail
-          test -n "$MURMUR_GPU_TEST_MODELS" || { echo 'Set MURMUR_GPU_TEST_MODELS to an offline staged model directory on the trusted runner.' >&2; exit 1; }
-          command -v nvidia-smi >/dev/null || { echo 'Trusted NVIDIA GPU runner required for release.' >&2; exit 1; }
-          python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux \
-            --components .cache/artifacts/components --models-dir "$MURMUR_GPU_TEST_MODELS"
-      - name: Release guard - no throwaway-signed manifest in the shipped binary
-        # build-linux.sh embeds the manifest it just signed. The binary must carry the release
-        # subkey's signature (the committed certificate checked above), never a throwaway one.
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          python3 scripts/check-embedded-manifest.py --trusted-cert src-tauri/trust/murmur-release.asc \
-            "$CARGO_TARGET_DIR/release/murmur"
-      - name: Attach Linux assets and components to the draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "$GITHUB_REF_NAME" \
-            .cache/artifacts/linux/*.AppImage \
-            .cache/artifacts/linux/*.deb \
-            .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
-            .cache/artifacts/linux/GPU-VALIDATION.json \
-            .cache/artifacts/components/murmur-*-linux-x86_64-*.zip \
-            .cache/artifacts/components/components-manifest.json \
-            .cache/artifacts/components/components-manifest.json.sig \
-            .cache/artifacts/components/murmur-release.asc --clobber
+      - name: Record final resources and cache sizes
+        if: always() && (steps.claim.outcome == 'skipped' || steps.claim.outputs.build == 'true')
+        run: python3 scripts/ci-cache.py finish

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-export TMPDIR="$ROOT/.cache/tmp" PIP_CACHE_DIR="$ROOT/.cache/pip"
-export PYINSTALLER_CONFIG_DIR="$ROOT/.cache/pyinstaller" XDG_CACHE_HOME="$ROOT/.cache"
+export TMPDIR="${TMPDIR:-$ROOT/.cache/tmp}" PIP_CACHE_DIR="${PIP_CACHE_DIR:-$ROOT/.cache/pip}"
+export PYINSTALLER_CONFIG_DIR="${PYINSTALLER_CONFIG_DIR:-$ROOT/.cache/pyinstaller}" XDG_CACHE_HOME="$ROOT/.cache"
 export HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1
 mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
 PYTHON="$ROOT/engine/.venv/bin/python"
