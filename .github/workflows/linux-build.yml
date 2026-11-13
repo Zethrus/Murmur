@@ -1,5 +1,5 @@
 name: Linux build
-run-name: Linux build ${{ github.sha }}
+run-name: Linux build ${{ github.sha }}${{ github.event_name == 'workflow_dispatch' && format(' {0}', github.ref_type) || '' }}
 
 on:
   # Releases build on v* tags through release.yml. Branch pushes do not trigger a full build:
@@ -18,22 +18,14 @@ on:
       fallback_attempt:
         type: string
         default: ''
-      windows_inputs:
-        description: components-windows-inputs.json from windows-build.yml; the signed manifest then lists the Windows components
-        type: string
-        default: ''
 
 permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: ${{ inputs.fallback_run != '' && format('linux-fallback-{0}-{1}', inputs.fallback_run, inputs.fallback_attempt) || format('linux-{0}', github.ref) }}
-  cancel-in-progress: ${{ inputs.fallback_run == '' }}
-
 jobs:
-  # Builds and tests everything with a THROWAWAY signing key. On tags this job only validates;
-  # the `release` job below rebuilds with the real key and uploads.
+  # Builds and tests everything with a THROWAWAY signing key. The trusted tag
+  # release job in release.yml rebuilds with the real key and uploads.
   build:
     permissions:
       contents: read
@@ -41,11 +33,6 @@ jobs:
     # Fork PRs must never execute on a self-hosted runner; keep them on hosted or skip.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || vars.LINUX_RUNNER == ''
     runs-on: ${{ inputs.fallback_sha != '' && 'ubuntu-22.04' || fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # One writer for the persistent runner-local target, including tag rebuilds. Hosted
-    # jobs get distinct groups so they never wait behind a busy self-hosted runner.
-    concurrency:
-      group: ${{ inputs.fallback_sha == '' && vars.LINUX_RUNNER != '' && 'murmur-linux-local-cache' || format('murmur-linux-hosted-{0}', github.run_id) }}
-      cancel-in-progress: false
     timeout-minutes: 90
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
@@ -65,7 +52,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check out trusted controller
-        if: ${{ inputs.fallback_sha != '' || (github.event_name == 'pull_request' && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.LINUX_RUNNER != '') }}
+        if: ${{ inputs.fallback_sha != '' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch')) && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.LINUX_RUNNER != '') }}
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -73,7 +60,7 @@ jobs:
           persist-credentials: false
       - name: Wait for trusted build claim
         id: claim
-        if: ${{ inputs.fallback_sha != '' || (github.event_name == 'pull_request' && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.LINUX_RUNNER != '') }}
+        if: ${{ inputs.fallback_sha != '' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch')) && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.LINUX_RUNNER != '') }}
         env:
           GH_TOKEN: ${{ github.token }}
           ORIGINAL_RUN: ${{ inputs.fallback_run || github.run_id }}
@@ -267,103 +254,4 @@ jobs:
           compression-level: 0
       - name: Record final resources and cache sizes
         if: always() && (steps.claim.outcome == 'skipped' || steps.claim.outputs.build == 'true')
-        run: python3 scripts/ci-cache.py finish
-
-  # Tags only, and only once the owner has created the release key (docs/signing.md): rebuild
-  # with the real signing subkey from the protected environment, validate on the GPU runner
-  # and attach everything to the draft release. Without the key, nothing is uploaded.
-  release:
-    permissions:
-      contents: write
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/') && vars.MURMUR_RELEASE_TRUST_FINGERPRINT != ''
-    environment: release-signing
-    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    concurrency:
-      group: ${{ vars.LINUX_RUNNER != '' && 'murmur-linux-local-cache' || format('murmur-linux-hosted-{0}', github.run_id) }}
-      cancel-in-progress: false
-    timeout-minutes: 120
-    env:
-      APPIMAGE_EXTRACT_AND_RUN: '1'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Prepare isolated build caches
-        run: python3 scripts/ci-cache.py prepare
-      - name: Record starting resources and cache sizes
-        run: python3 scripts/ci-cache.py start
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: ${{ runner.environment != 'self-hosted' && 'npm' || '' }}
-      - uses: dtolnay/rust-toolchain@1.100.0
-      - name: Verify pinned Rust version
-        run: test "$(rustc --version | cut -d' ' -f2)" = 1.100.0
-      - name: The committed trust root must be the configured release key
-        env:
-          EXPECTED: ${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}
-        run: |
-          set -euo pipefail
-          grep -q "RELEASE_PRIMARY_FINGERPRINT: &str = \"$EXPECTED\"" src-tauri/src/components/trust.rs
-          actual="$(gpg --batch --with-colons --show-keys src-tauri/trust/murmur-release.asc | awk -F: '/^fpr/ {print $10; exit}')"
-          test "$actual" = "$EXPECTED"
-      - name: Fetch the Windows component zips from the draft (when Windows is enabled)
-        if: inputs.windows_inputs != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WINDOWS_INPUTS: ${{ inputs.windows_inputs }}
-        run: |
-          set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          windows="$RUNNER_TEMP/windows-components"
-          rm -rf "$windows" && mkdir -p "$windows"
-          printf '%s\n' "$WINDOWS_INPUTS" > "$windows/components-windows-inputs.json"
-          gh release download "$GITHUB_REF_NAME" --dir "$windows" \
-            --pattern "murmur-engine-windows-x86_64-$version.zip" --pattern "murmur-cuda-windows-x86_64-$version.zip"
-          # make-manifest.py re-checks both zips against these hashes before signing them.
-          echo "MURMUR_WINDOWS_COMPONENTS=$windows" >> "$GITHUB_ENV"
-      - name: Build, sign with the release subkey and test
-        env:
-          MURMUR_SIGNING_SUBKEY: ${{ secrets.MURMUR_SIGNING_SUBKEY }}
-          MURMUR_SIGNING_PASSPHRASE: ${{ secrets.MURMUR_SIGNING_PASSPHRASE }}
-        run: |
-          set -euo pipefail
-          test -n "$MURMUR_SIGNING_SUBKEY" || { echo 'MURMUR_SIGNING_SUBKEY is not set in the release-signing environment' >&2; exit 1; }
-          scripts/build-linux.sh
-          python3 scripts/check-release.py signature .cache/artifacts/components "${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}"
-      - name: Validate final Linux assets on trusted GPU hardware
-        env:
-          MURMUR_GPU_TEST_MODELS: ${{ vars.MURMUR_GPU_TEST_MODELS }}
-        run: |
-          set -euo pipefail
-          test -n "$MURMUR_GPU_TEST_MODELS" || { echo 'Set MURMUR_GPU_TEST_MODELS to an offline staged model directory on the trusted runner.' >&2; exit 1; }
-          command -v nvidia-smi >/dev/null || { echo 'Trusted NVIDIA GPU runner required for release.' >&2; exit 1; }
-          python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux \
-            --components .cache/artifacts/components --models-dir "$MURMUR_GPU_TEST_MODELS"
-      - name: Release guard - no throwaway-signed manifest in the shipped binary
-        # build-linux.sh embeds the manifest it just signed. The binary must carry the release
-        # subkey's signature (the committed certificate checked above), never a throwaway one.
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          python3 scripts/check-embedded-manifest.py --trusted-cert src-tauri/trust/murmur-release.asc \
-            "$CARGO_TARGET_DIR/release/murmur"
-      - name: Attach Linux assets and components to the draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "$GITHUB_REF_NAME" \
-            .cache/artifacts/linux/*.AppImage \
-            .cache/artifacts/linux/*.deb \
-            .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
-            .cache/artifacts/linux/GPU-VALIDATION.json \
-            .cache/artifacts/components/murmur-*-linux-x86_64-*.zip \
-            .cache/artifacts/components/components-manifest.json \
-            .cache/artifacts/components/components-manifest.json.sig \
-            .cache/artifacts/components/murmur-release.asc --clobber
-      - name: Record final resources and cache sizes
-        if: always()
         run: python3 scripts/ci-cache.py finish

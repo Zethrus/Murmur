@@ -1,5 +1,5 @@
 name: Windows build
-run-name: Windows build ${{ github.sha }}
+run-name: Windows build ${{ github.sha }}${{ github.event_name == 'workflow_dispatch' && format(' {0} gpu={1}', github.ref_type, inputs.gpu) || '' }}
 
 # Runs on vars.WINDOWS_RUNNER (the self-hosted "Edison" machine: self-hosted, Windows, X64, gpu,
 # nvidia), or windows-latest when the variable is unset (see docs/ci-windows.md).
@@ -33,14 +33,13 @@ on:
       windows_inputs:
         description: components-windows-inputs.json (sizes and SHA-256 of the Windows component zips)
         value: ${{ jobs.build.outputs.windows_inputs }}
+      stage_attempt:
+        description: Attempt that produced the runner-local release assets
+        value: ${{ jobs.build.outputs.stage_attempt }}
 
 permissions:
   contents: read
   actions: read
-
-concurrency:
-  group: ${{ inputs.fallback_run != '' && format('windows-fallback-{0}-{1}', inputs.fallback_run, inputs.fallback_attempt) || format('windows-{0}', github.ref) }}
-  cancel-in-progress: ${{ inputs.fallback_run == '' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
@@ -56,12 +55,10 @@ jobs:
        vars.WINDOWS_RUNNER == '') &&
       (vars.WINDOWS_RUNNER != '' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ${{ inputs.fallback_sha != '' && 'windows-latest' || fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
-    concurrency:
-      group: ${{ inputs.fallback_sha == '' && vars.WINDOWS_RUNNER != '' && 'murmur-windows-local-cache' || format('murmur-windows-hosted-{0}', github.run_id) }}
-      cancel-in-progress: false
     timeout-minutes: 150
     outputs:
       windows_inputs: ${{ steps.inputs.outputs.json }}
+      stage_attempt: ${{ steps.stage.outputs.attempt }}
     env:
       HF_HUB_OFFLINE: '1'
       HF_HUB_DISABLE_TELEMETRY: '1'
@@ -121,7 +118,7 @@ jobs:
           & $Python --version
 
       - name: Check out trusted controller
-        if: ${{ inputs.fallback_sha != '' || (github.event_name == 'pull_request' && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.WINDOWS_RUNNER != '') }}
+        if: ${{ inputs.fallback_sha != '' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && !inputs.gpu)) && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.WINDOWS_RUNNER != '') }}
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -129,7 +126,7 @@ jobs:
           persist-credentials: false
       - name: Wait for trusted build claim
         id: claim
-        if: ${{ inputs.fallback_sha != '' || (github.event_name == 'pull_request' && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.WINDOWS_RUNNER != '') }}
+        if: ${{ inputs.fallback_sha != '' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && !inputs.gpu)) && vars.MURMUR_BUILD_FALLBACK_ENABLED == 'true' && vars.WINDOWS_RUNNER != '') }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -204,7 +201,7 @@ jobs:
         run: |
           # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
           Push-Location scripts/tests
-          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_ci_cache test_cpu_audit test_embedded_manifest test_desktop_harness
+          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_ci_cache test_ci_release_stage test_cpu_audit test_embedded_manifest test_desktop_harness
           $Code = $LASTEXITCODE
           Pop-Location
           if ($Code -ne 0) { throw 'Script tests failed' }
@@ -408,17 +405,17 @@ jobs:
             (Join-Path $Release 'murmur.exe') .cache/artifacts/windows/murmur-windows-x86_64.zip
           if ($LASTEXITCODE -ne 0) { throw 'A release binary embeds a throwaway-signed manifest' }
 
-      - name: Stage Windows assets for draft release (tags only)
+      - name: Stage Windows assets on the trusted release runner (tags only)
+        id: stage
         if: startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false'
-        uses: actions/upload-artifact@v4
-        with:
-          name: murmur-windows-release-assets-${{ github.run_attempt }}
-          path: |
-            .cache/artifacts/windows/*
-            .cache/artifacts/components-windows/*.zip
-          if-no-files-found: error
-          retention-days: 3
-          compression-level: 0
+        shell: pwsh
+        run: |
+          $Version = $env:GITHUB_REF_NAME.TrimStart('v')
+          python scripts/ci-release-stage.py stage `
+            --tool-cache $env:RUNNER_TOOL_CACHE --run-id $env:GITHUB_RUN_ID `
+            --attempt $env:GITHUB_RUN_ATTEMPT --sha $env:GITHUB_SHA --version $Version
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release staging failed' }
+          "attempt=$env:GITHUB_RUN_ATTEMPT" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Upload throwaway-signed build artifacts (best effort, never released)
         if: ${{ !startsWith(github.ref, 'refs/tags/')  && steps.claim.outputs.build != 'false' }}
@@ -493,30 +490,3 @@ jobs:
             Sort-Object LastWriteTimeUtc -Descending | Select-Object -Skip 3 |
             ForEach-Object { Write-Host "Pruning $($_.Name)"; Remove-Retrying $_.FullName }
           "Desktop hand-off: ``$Dest`` ($($Files.Count) files + SHA256SUMS)." | Out-File $env:GITHUB_STEP_SUMMARY -Append
-
-  release-upload:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/') && vars.WINDOWS_RUNNER != ''
-    permissions:
-      contents: write
-      actions: read
-    runs-on: ${{ fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: murmur-windows-release-assets-${{ github.run_attempt }}
-          path: release-assets
-      - name: Attach Windows assets to the draft
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $Draft = gh release view $env:GITHUB_REF_NAME --json isDraft | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or -not $Draft.isDraft) { throw 'Draft release is unavailable or already published' }
-          $Version = $env:GITHUB_REF_NAME.TrimStart('v')
-          gh release upload $env:GITHUB_REF_NAME `
-            "release-assets/windows/Murmur_${Version}_x64-setup.exe" `
-            release-assets/windows/murmur-windows-x86_64.zip `
-            "release-assets/components-windows/murmur-engine-windows-x86_64-${Version}.zip" `
-            "release-assets/components-windows/murmur-cuda-windows-x86_64-${Version}.zip" --clobber
-          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }

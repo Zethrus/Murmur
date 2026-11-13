@@ -6,7 +6,7 @@ with contents/actions read and never receive the controller token. No code from 
 PR checkout is executed by the controller.
 """
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from http.client import IncompleteRead
 import json
 import os
@@ -20,9 +20,13 @@ from urllib.request import Request, urlopen
 API_VERSION = "2022-11-28"
 SOURCE = {"linux": "linux-build.yml", "windows": "windows-build.yml"}
 CONTEXT = {"linux": "Murmur Linux build result", "windows": "Murmur Windows build result"}
+MANUAL_CONTEXT = {"linux": "Murmur Linux manual build result", "windows": "Murmur Windows manual build result"}
 SHA = re.compile(r"^[0-9a-f]{40}$")
 HOST_TITLE = re.compile(r"^Hosted fallback (linux|windows) (\d+) (\d+) ([0-9a-f]{40})$")
 CLAIM_WAIT_SECONDS = 420  # bounded; a delayed controller fails the build visibly
+DISPATCH_RETRY_MINUTES = 3
+MAX_DISPATCH_ATTEMPTS = 3
+HOST_ALLOCATION_MINUTES = 30
 
 
 class ApiError(RuntimeError):
@@ -123,21 +127,34 @@ def create_marker(api, kind, platform, run_id, attempt, sha, **fields):
 
 def source_sha(run, platform):
     title = run.get("display_title", "")
+    suffix = r" (branch|tag)" + (r" gpu=(true|false)" if platform == "windows" else "")
+    match = re.fullmatch(rf"{platform.capitalize()} build ([0-9a-f]{{40}}){suffix}", title)
+    if match:
+        return match.group(1)
+    if run.get("event") == "workflow_dispatch":
+        return None
     match = re.fullmatch(rf"{platform.capitalize()} build ([0-9a-f]{{40}})", title)
     return match.group(1) if match else None
 
 
 def source_current(api, run, platform, default_branch, latest_id=None):
-    if run.get("event") != "pull_request" or run.get("path", "").split("@")[0] != ".github/workflows/" + SOURCE[platform]:
+    event = run.get("event")
+    if event not in ("pull_request", "workflow_dispatch") or run.get("path", "").split("@")[0] != ".github/workflows/" + SOURCE[platform]:
         return False
     if run.get("repository", {}).get("full_name", "").lower() != api.repo.lower() or run.get("head_repository", {}).get("full_name", "").lower() != api.repo.lower():
         return False
     head = run.get("head_sha", "")
-    merged = source_sha(run, platform)
-    if not SHA.fullmatch(head) or not merged:
-        return False  # only workflows with the opt-in run-name can use fallback
+    if not SHA.fullmatch(head):
+        return None
     if latest_id is not None and run["id"] != latest_id:
         return False
+    if event == "workflow_dispatch":
+        merged = source_sha(run, platform)
+        if not re.fullmatch(rf"{platform.capitalize()} build {merged} branch" +
+                            (r" gpu=false" if platform == "windows" else ""),
+                            run.get("display_title", "")):
+            return None
+        return merged if head == merged and run.get("head_branch") else None
     owner = api.repo.split("/")[0]
     branch = run.get("head_branch", "")
     if not branch:
@@ -149,29 +166,40 @@ def source_current(api, run, platform, default_branch, latest_id=None):
     if len(matches) != 1:
         return False
     current_pr = api.get(f"/pulls/{matches[0]['number']}")
-    if current_pr.get("merge_commit_sha") != merged or current_pr.get("state") != "open":
-        return False
+    merged = current_pr.get("merge_commit_sha", "")
+    if not SHA.fullmatch(merged) or current_pr.get("state") != "open":
+        return None
+    titled_sha = source_sha(run, platform)
+    if titled_sha and titled_sha != merged:
+        return None
     # The fallback must test the immutable merge commit that the original PR
     # workflow checked out, with this PR head as its second parent.
     commit = api.get("/git/commits/" + merged)
     if len(commit.get("parents", [])) != 2 or commit["parents"][1]["sha"] != head:
         return False
-    # A pull_request workflow file comes from the PR merge commit. Reject a PR
-    # that changed the gate/workflow or uses an older default-branch revision.
-    # The privileged controller must never trust a run-name from altered YAML.
+    return merged
+
+
+def fallback_eligible(api, run, platform, default_branch, tested_sha=None):
+    """Only the default-branch workflow contract can be dispatched on hosted."""
+    tested_sha = tested_sha or source_current(api, run, platform, default_branch)
+    if not tested_sha or source_sha(run, platform) != tested_sha:
+        return False
     workflow_path = ".github/workflows/" + SOURCE[platform]
-    tested_file = api.get("/contents/" + workflow_path + "?ref=" + merged)
+    tested_file = api.get("/contents/" + workflow_path + "?ref=" + tested_sha)
     trusted_file = api.get("/contents/" + workflow_path + "?ref=" + default_branch)
     return tested_file.get("sha") == trusted_file.get("sha")
 
 
 def latest_source_id(api, run, platform):
-    query = urlencode({"event": "pull_request", "head_sha": run["head_sha"], "per_page": 100})
+    query = urlencode({"event": run["event"], "head_sha": run["head_sha"], "per_page": 100})
     data = api.get("/actions/workflows/" + SOURCE[platform] + "/runs?" + query)
     if data["total_count"] > 100:
         raise ValueError("Too many matching source runs; refusing incomplete freshness check")
     matches = [item["id"] for item in data["workflow_runs"]
-               if item.get("head_branch") == run.get("head_branch") and source_sha(item, platform)]
+               if (item.get("head_branch") == run.get("head_branch") and
+                   item.get("path", "").split("@")[0] == ".github/workflows/" + SOURCE[platform] and
+                   item.get("repository", {}).get("full_name", "").lower() == api.repo.lower())]
     return max(matches) if matches else None
 
 
@@ -190,24 +218,24 @@ def build_job(api, run_id, attempt):
     return matches[0]
 
 
-def list_runs(api, workflow, event=None):
-    result = []
-    for page in range(1, 51):
-        query = {"per_page": 20, "page": page,
-                 "created": ">=" + (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()}
-        if event:
-            query["event"] = event
-        data = api.get("/actions/workflows/" + workflow + "/runs?" + urlencode(query))
-        result += data["workflow_runs"]
-        if len(result) >= data["total_count"] or len(data["workflow_runs"]) < 20:
-            return result
-    raise ValueError(f"More than 1000 runs for {workflow}; refusing an incomplete scan")
+def list_runs(api, workflow, event=None, status=None):
+    query = {"per_page": 100}
+    if event:
+        query["event"] = event
+    if status:
+        query["status"] = status
+    data = api.get("/actions/workflows/" + workflow + "/runs?" + urlencode(query))
+    if data["total_count"] > 100:
+        raise ValueError(f"More than 100 active runs for {workflow}; refusing incomplete scan")
+    return data["workflow_runs"]
 
 
-def host_runs(api, default_branch, allow_missing=False):
+def host_runs(api, default_branch, allow_missing=False, active_only=False):
     found = {}
     try:
-        runs = list_runs(api, "hosted-build-fallback.yml", "workflow_dispatch")
+        runs = ([run for status in ("queued", "in_progress", "waiting", "pending", "requested")
+                 for run in list_runs(api, "hosted-build-fallback.yml", "workflow_dispatch", status)]
+                if active_only else list_runs(api, "hosted-build-fallback.yml", "workflow_dispatch"))
     except ApiError as error:
         if not (allow_missing and error.status == 404):
             raise
@@ -225,8 +253,7 @@ def host_runs(api, default_branch, allow_missing=False):
     return found
 
 
-def publish(api, sha, platform, state, description, url):
-    context = CONTEXT[platform]
+def publish(api, sha, context, state, description, url):
     statuses = api.get("/commits/" + sha + "/statuses?per_page=100")
     previous = next((s for s in statuses if s["context"] == context), None)
     if previous and (previous["state"], previous["description"], previous["target_url"]) == (state, description, url):
@@ -244,25 +271,58 @@ def outcome(run):
     return "failure" if run["conclusion"] in ("failure", "cancelled", "timed_out") else "error"
 
 
+def dispatch_markers(api, platform, run_id, attempt):
+    kinds = ["dispatch"] + [f"dispatch-{index}" for index in range(2, MAX_DISPATCH_ATTEMPTS + 1)]
+    markers = [read_marker(api, kind, platform, run_id, attempt) for kind in kinds]
+    if any(marker is None for marker in markers[:max((i for i, item in enumerate(markers) if item), default=-1) + 1]):
+        raise ValueError("Dispatch reservation sequence has a gap")
+    return [marker for marker in markers if marker]
+
+
+def fresh_source(api, run_id, attempt, sha, platform, default_branch):
+    run = api.get(f"/actions/runs/{run_id}")
+    return (run["run_attempt"] == attempt and
+            latest_source_id(api, run, platform) == run_id and
+            source_current(api, run, platform, default_branch, run_id) == sha)
+
+
 def control_one(api, run, platform, hosts, default_branch, delay, now, dry_run=False):
     run_id, attempt = run["id"], run["run_attempt"]
-    if not source_current(api, run, platform, default_branch):
+    sha = source_current(api, run, platform, default_branch)
+    if not sha:
         print(f"Ignoring obsolete/untrusted {platform} source {run_id}/{attempt}")
         return
-    sha = source_sha(run, platform)
+    context = MANUAL_CONTEXT[platform] if run["event"] == "workflow_dispatch" else CONTEXT[platform]
     key = (platform, run_id, attempt, sha)
+    eligible = fallback_eligible(api, run, platform, default_branch, tested_sha=sha)
     claim = read_marker(api, "claims", platform, run_id, attempt)
-    guard = read_marker(api, "dispatch", platform, run_id, attempt)
-    if (claim and claim.get("sha") != sha) or (guard and guard.get("sha") != sha):
+    attempts = dispatch_markers(api, platform, run_id, attempt)
+    if (claim and claim.get("sha") != sha) or any(item.get("sha") != sha for item in attempts):
         raise ValueError("Claim/dispatch SHA differs from original tested SHA")
     original_job = build_job(api, run_id, attempt)
+    if not eligible:
+        # The trusted source gate allows ordinary compilation, but the controller
+        # never dispatches PR-edited workflow code or grants it a build claim.
+        if source_sha(run, platform) != sha:
+            print(f"Ordinary build {run_id}/{attempt} has an unverified run title; no stable status")
+            return
+        state = outcome(run) if original_job["status"] == "completed" else "pending"
+        if state == "success" and (original_job["status"] != "completed" or original_job.get("conclusion") != "success"):
+            state = "error"
+        description = f"Ordinary build (fallback ineligible): {original_job['status']} {run.get('conclusion') or ''}"
+        if fresh_source(api, run_id, attempt, sha, platform, default_branch):
+            if dry_run:
+                print(f"DRY RUN: would publish ordinary {state} for {run_id}/{attempt}")
+            else:
+                publish(api, run["head_sha"], context, state, description, run["html_url"])
+        return
     candidates = []
     if original_job["status"] == "in_progress":
         candidates.append((original_job.get("started_at") or "", "self-hosted", run_id, attempt))
     # A user-dispatched lookalike is not eligible until this controller has
     # atomically recorded the delay decision.
-    for host in hosts.get(key, []) if guard else []:
-        if datetime.fromisoformat(host["created_at"].replace("Z", "+00:00")) < datetime.fromisoformat(guard["created_at"]):
+    for host in hosts.get(key, []) if attempts else []:
+        if datetime.fromisoformat(host["created_at"].replace("Z", "+00:00")) < datetime.fromisoformat(attempts[0]["created_at"]):
             continue
         if host["status"] == "in_progress":
             host_job = build_job(api, host["id"], host["run_attempt"])
@@ -272,22 +332,44 @@ def control_one(api, run, platform, hosts, default_branch, delay, now, dry_run=F
         # Both jobs can start before this controller is scheduled. Atomic ref
         # creation picks one; earliest reported start is a deterministic preference.
         _, runner, winner_id, winner_attempt = min(candidates)
+        if not fresh_source(api, run_id, attempt, sha, platform, default_branch):
+            print(f"Skipping stale claim for {platform} {run_id}/{attempt}")
+            return
         if dry_run:
             print(f"DRY RUN: would claim {platform} {run_id}/{attempt} for {runner} {winner_id}/{winner_attempt}")
         else:
             claim, _ = create_marker(api, "claims", platform, run_id, attempt, sha,
                                      runner=runner, winner_run=winner_id, winner_attempt=winner_attempt)
-    if claim is None and guard is None and original_job["status"] == "queued" and run["status"] != "completed" and age_minutes(run["created_at"], now) >= delay:
-        # Guard before dispatch: a lost 204 response cannot cause two paid runs.
+    queue_since = original_job.get("created_at")
+    if original_job["status"] == "queued" and not queue_since:
+        # Some job API variants omit created_at. The attempt endpoint supplies
+        # a fresh run_started_at on rerun; never fall back to run.created_at.
+        queue_since = api.get(f"/actions/runs/{run_id}/attempts/{attempt}").get("run_started_at")
+    observed = hosts.get(key, [])
+    can_retry = (not attempts or age_minutes(attempts[-1]["created_at"], now) >= DISPATCH_RETRY_MINUTES)
+    if (claim is None and not observed and original_job["status"] == "queued" and
+            run["status"] != "completed" and queue_since and age_minutes(queue_since, now) >= delay and
+            len(attempts) < MAX_DISPATCH_ATTEMPTS and can_retry):
+        if not fresh_source(api, run_id, attempt, sha, platform, default_branch):
+            print(f"Skipping stale dispatch for {platform} {run_id}/{attempt}")
+            return
+        index = len(attempts) + 1
+        kind = "dispatch" if index == 1 else f"dispatch-{index}"
         if dry_run:
-            print(f"DRY RUN: would dispatch hosted {platform} for {run_id}/{attempt}")
+            print(f"DRY RUN: would dispatch hosted {platform} attempt {index} for {run_id}/{attempt}")
         else:
-            guard, new = create_marker(api, "dispatch", platform, run_id, attempt, sha)
-        if not dry_run and new:
-            api.post("/actions/workflows/hosted-build-fallback.yml/dispatches",
-                     {"ref": default_branch, "inputs": {"platform": platform,
-                      "original_run": str(run_id), "original_attempt": str(attempt), "sha": sha}}, expected=(204,))
-            print(f"Dispatched hosted {platform} fallback for {run_id}/{attempt}; hosted billing/allocation may apply")
+            marker, new = create_marker(api, kind, platform, run_id, attempt, sha)
+            if new:
+                try:
+                    api.post("/actions/workflows/hosted-build-fallback.yml/dispatches",
+                             {"ref": default_branch, "inputs": {"platform": platform,
+                              "original_run": str(run_id), "original_attempt": str(attempt), "sha": sha}}, expected=(204,))
+                    print(f"Requested hosted {platform} fallback {index}/{MAX_DISPATCH_ATTEMPTS} for {run_id}/{attempt}")
+                except (ApiError, OSError, RuntimeError) as error:
+                    # 5xx/timeouts may be accepted despite a lost response. Reconcile
+                    # observed runs before reserving the next bounded attempt.
+                    print(f"Uncertain dispatch {index}/{MAX_DISPATCH_ATTEMPTS}: {error}")
+            attempts.append(marker)
     if claim:
         winner = api.get(f"/actions/runs/{claim['winner_run']}")
         if claim.get("runner") == "self-hosted":
@@ -315,49 +397,73 @@ def control_one(api, run, platform, hosts, default_branch, delay, now, dry_run=F
         url = run["html_url"]
     else:
         state, description, url = "pending", "Waiting for one claimed build", run["html_url"]
+        if original_job["status"] == "queued" and not queue_since:
+            state, description = "error", "Current attempt has no queue timestamp"
+        elif observed and any(host["status"] == "completed" for host in observed):
+            state, description = "error", "Hosted run ended before acquiring a build claim"
+        elif observed and all(host["status"] in ("queued", "waiting", "pending", "requested") for host in observed) and age_minutes(min(host["created_at"] for host in observed), now) >= HOST_ALLOCATION_MINUTES:
+            state, description = "error", "Hosted run allocated no build job within 30 minutes"
+        elif len(attempts) == MAX_DISPATCH_ATTEMPTS and not observed and age_minutes(attempts[-1]["created_at"], now) >= DISPATCH_RETRY_MINUTES:
+            state, description = "error", "Dispatch retries exhausted; no hosted run observed"
     # Re-read just before publication so a completed old attempt or superseded
     # PR run does not normally overwrite the current status. The status API has
     # no compare-and-set, so a final read/POST race remains documented.
-    fresh = api.get(f"/actions/runs/{run_id}")
-    if (fresh["run_attempt"] != attempt or latest_source_id(api, fresh, platform) != run_id or
-            not source_current(api, fresh, platform, default_branch, run_id)):
+    if not fresh_source(api, run_id, attempt, sha, platform, default_branch):
         print(f"Skipping stale status publication for {platform} {run_id}/{attempt}")
         return
     if dry_run:
-        print(f"DRY RUN: would publish {CONTEXT[platform]} {state} on {run['head_sha']}: {description}")
+        print(f"DRY RUN: would publish {context} {state} on {run['head_sha']}: {description}")
     else:
-        publish(api, run["head_sha"], platform, state, description, url)
-    if guard and not hosts.get(key) and age_minutes(run["created_at"], now) >= delay + 20 and claim is None:
-        raise RuntimeError(f"Dispatch recorded but no hosted run visible for {platform} {run_id}/{attempt}; billing/allocation or API failure")
-    if guard and claim is None and hosts.get(key) and age_minutes(run["created_at"], now) >= delay + 30:
-        if all(host["status"] in ("queued", "waiting", "pending", "requested") for host in hosts[key]):
-            raise RuntimeError(f"Hosted run allocated no runner for {platform} {run_id}/{attempt}; inspect billing/runner capacity")
+        publish(api, run["head_sha"], context, state, description, url)
 
 
-def control(api, delay, now=None, dry_run=False):
+def control(api, delay, now=None, dry_run=False, event=None):
     now = now or datetime.now(timezone.utc)
     repo = api.get("")
     default_branch = repo["default_branch"]
-    hosts = host_runs(api, default_branch, allow_missing=dry_run)
-    errors = []
-    for platform, workflow in SOURCE.items():
-        if os.environ.get(platform.upper() + "_RUNNER_CONFIGURED") != "true":
-            print(f"Skipping {platform}: no configured self-hosted ordinary build")
-            continue
-        runs = list_runs(api, workflow, "pull_request")
-        latest = {}
-        for run in runs:
-            if source_sha(run, platform) and run.get("head_branch"):
-                key = (run["head_branch"], run["head_sha"])
-                if key not in latest or run["id"] > latest[key]["id"]:
-                    latest[key] = run
-        for run in latest.values():
-            if age_minutes(run["created_at"], now) > 7 * 24 * 60:
+    trigger = (event or {}).get("workflow_run")
+    hosts = host_runs(api, default_branch, allow_missing=dry_run, active_only=True)
+    targets = []
+    if trigger:
+        path = trigger.get("path", "").split("@")[0]
+        if path == ".github/workflows/hosted-build-fallback.yml":
+            match = HOST_TITLE.fullmatch(trigger.get("display_title", ""))
+            if match:
+                targets.append((match.group(1), api.get(f"/actions/runs/{int(match.group(2))}")))
+        else:
+            for platform, workflow in SOURCE.items():
+                if path == ".github/workflows/" + workflow:
+                    targets.append((platform, api.get(f"/actions/runs/{trigger['id']}")))
+    else:
+        # Scheduled reconciliation asks only for active jobs. In particular a
+        # rerun of an old run stays visible regardless of its original date.
+        for platform, workflow in SOURCE.items():
+            if os.environ.get(platform.upper() + "_RUNNER_CONFIGURED") != "true":
                 continue
-            try:
-                control_one(api, run, platform, hosts, default_branch, delay, now, dry_run)
-            except (ApiError, ValueError, RuntimeError) as error:
-                errors.append(f"{platform} {run['id']}/{run['run_attempt']}: {error}")
+            for status in ("queued", "in_progress", "waiting", "pending", "requested"):
+                for run in list_runs(api, workflow, status=status):
+                    targets.append((platform, run))
+        for (platform, original, _, _), runs in hosts.items():
+            if runs:
+                targets.append((platform, api.get(f"/actions/runs/{original}")))
+    if trigger and trigger.get("path", "").split("@")[0] == ".github/workflows/hosted-build-fallback.yml":
+        match = HOST_TITLE.fullmatch(trigger.get("display_title", ""))
+        if match:
+            key = (match.group(1), int(match.group(2)), int(match.group(3)), match.group(4))
+            hosts.setdefault(key, []).append(api.get(f"/actions/runs/{trigger['id']}"))
+    errors = []
+    seen = set()
+    for platform, run in targets:
+        if os.environ.get(platform.upper() + "_RUNNER_CONFIGURED") != "true":
+            continue
+        key = (platform, run["id"], run["run_attempt"])
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            control_one(api, run, platform, hosts, default_branch, delay, now, dry_run)
+        except (ApiError, ValueError, RuntimeError) as error:
+            errors.append(f"{platform} {run['id']}/{run['run_attempt']}: {error}")
     if errors:
         raise RuntimeError("Controller errors (fail closed):\n" + "\n".join(errors))
 
@@ -366,10 +472,19 @@ def gate(api, platform, original_run, original_attempt, candidate_run, candidate
     source = api.get(f"/actions/runs/{original_run}")
     default_branch = api.get("")["default_branch"]
     latest = latest_source_id(api, source, platform)
-    if source["run_attempt"] != original_attempt or source_sha(source, platform) != sha or not source_current(api, source, platform, default_branch, latest):
+    revision = source_current(api, source, platform, default_branch, latest)
+    if source["run_attempt"] != original_attempt or revision != sha:
         print("Obsolete or untrusted source; skipping build")
         output.write_text("build=false\n", encoding="utf-8")
         return False
+    if not fallback_eligible(api, source, platform, default_branch, tested_sha=sha):
+        if candidate_run != original_run:
+            raise ValueError("Hosted candidate has an ineligible source workflow")
+        if not fresh_source(api, original_run, original_attempt, sha, platform, default_branch):
+            raise RuntimeError("Ordinary source became obsolete before compilation")
+        print("Fallback ineligible; running ordinary build and tests")
+        output.write_text("build=true\n", encoding="utf-8")
+        return True
     if candidate_run != original_run:
         hosted = api.get(f"/actions/runs/{candidate_run}")
         expected_title = f"Hosted fallback {platform} {original_run} {original_attempt} {sha}"
@@ -382,8 +497,7 @@ def gate(api, platform, original_run, original_attempt, candidate_run, candidate
         claim = read_marker(api, "claims", platform, original_run, original_attempt)
         if claim:
             winner = claim.get("winner_run") == candidate_run and claim.get("winner_attempt") == candidate_attempt and claim.get("sha") == sha
-            if winner and not source_current(api, api.get(f"/actions/runs/{original_run}"), platform,
-                                             default_branch, latest_source_id(api, source, platform)):
+            if winner and not fresh_source(api, original_run, original_attempt, sha, platform, default_branch):
                 raise RuntimeError("Winning source became obsolete before compilation; failing closed")
             print(f"Build claim winner: {claim['winner_run']}/{claim['winner_attempt']}; this job {'builds' if winner else 'exits without compiling'}")
             output.write_text(f"build={'true' if winner else 'false'}\n", encoding="utf-8")
@@ -410,7 +524,8 @@ def main():
         if args.command == "control":
             if not 1 <= args.delay_minutes <= 120:
                 raise ValueError("Fallback delay must be 1..120 minutes")
-            control(api, args.delay_minutes, dry_run=args.dry_run)
+            event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")) if os.environ.get("GITHUB_EVENT_PATH") else None
+            control(api, args.delay_minutes, dry_run=args.dry_run, event=event)
         else:
             if args.platform not in SOURCE or not SHA.fullmatch(args.sha):
                 raise ValueError("Invalid platform or SHA")

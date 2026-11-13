@@ -33,7 +33,7 @@ class FakeGitHub:
                        "repository": {"full_name": self.repo}, "status": "queued",
                        "conclusion": None, "created_at": stamp(queued),
                        "html_url": "https://github.com/Zethrus/Murmur/actions/runs/101"}
-        self.job = {"name": "build", "status": "queued", "started_at": None}
+        self.job = {"name": "build", "status": "queued", "created_at": stamp(queued), "started_at": None, "conclusion": None}
         self.hosts = []
         self.tags = {}
         self.refs = {}
@@ -43,6 +43,9 @@ class FakeGitHub:
         self.current_merge = MERGE
         self.workflow_trusted = True
         self.fail_path = None
+        self.dispatch_failure_after_accept = False
+        self.dispatch_timeout_after_accept = False
+        self.attempt_started_at = stamp(queued)
 
     def get(self, path, missing=False):
         if path == self.fail_path:
@@ -64,6 +67,8 @@ class FakeGitHub:
             return self.tags[path.removeprefix("/git/tags/")]
         if path == "/actions/runs/101":
             return self.source
+        if path.startswith("/actions/runs/101/attempts/") and "/jobs?" not in path:
+            return {"run_started_at": self.attempt_started_at}
         if path.startswith("/actions/runs/101/attempts/"):
             return {"total_count": 1, "jobs": [self.job]}
         if path.startswith("/actions/runs/") and "/attempts/" in path:
@@ -95,20 +100,24 @@ class FakeGitHub:
             return self.refs[name]
         if path == "/actions/workflows/hosted-build-fallback.yml/dispatches":
             self.dispatches.append(data)
+            if self.dispatch_failure_after_accept:
+                raise ci.ApiError(503, path, "response lost after acceptance")
+            if self.dispatch_timeout_after_accept:
+                raise TimeoutError("response timed out after acceptance")
             return None
         if path.startswith("/statuses/"):
             self.statuses.append(dict(data))
             return data
         raise AssertionError(f"unexpected POST {path}")
 
-    def add_host(self, status="in_progress", minutes_ago=1, result=None):
-        host = {"id": 202, "run_attempt": 1, "event": "workflow_dispatch",
+    def add_host(self, status="in_progress", minutes_ago=1, result=None, host_id=202):
+        host = {"id": host_id, "run_attempt": 1, "event": "workflow_dispatch",
                 "path": ".github/workflows/hosted-build-fallback.yml",
                 "head_branch": "master", "repository": {"full_name": self.repo},
                 "display_title": f"Hosted fallback {self.platform} 101 1 {MERGE}",
                 "status": status, "conclusion": result,
                 "created_at": stamp(minutes_ago),
-                "html_url": "https://github.com/Zethrus/Murmur/actions/runs/202",
+                "html_url": f"https://github.com/Zethrus/Murmur/actions/runs/{host_id}",
                 "job": {"name": "linux / build", "status": status,
                         "started_at": stamp(minutes_ago) if status == "in_progress" else None}}
         self.hosts.append(host)
@@ -123,11 +132,18 @@ class DecisionTests(unittest.TestCase):
         return ci.control_one(self.api, self.api.source, "linux", ci.host_runs(self.api, "master"),
                               "master", 10, NOW, dry_run)
 
+    def age_dispatch(self, kind="dispatch", minutes=4):
+        name = ci.ref_name(kind, "linux", 101, self.api.source["run_attempt"])
+        tag = self.api.tags[self.api.refs[name]["object"]["sha"]]
+        message = json.loads(tag["message"])
+        message["created_at"] = stamp(minutes)
+        tag["message"] = json.dumps(message)
+
     def test_queued_threshold_and_duplicate_controller_dispatch(self):
-        self.api.source["created_at"] = stamp(9)
+        self.api.job["created_at"] = stamp(9)
         self.control()
         self.assertEqual(self.api.dispatches, [])
-        self.api.source["created_at"] = stamp(10)
+        self.api.job["created_at"] = stamp(10)
         self.control()
         self.control()
         self.assertEqual(len(self.api.dispatches), 1)
@@ -146,6 +162,7 @@ class DecisionTests(unittest.TestCase):
     def test_retry_has_new_attempt_identity(self):
         self.control()
         self.api.source["run_attempt"] = 2
+        self.api.job["created_at"] = stamp(12)
         self.control()
         self.assertEqual(len(self.api.dispatches), 2)
         self.assertIsNotNone(ci.read_marker(self.api, "dispatch", "linux", 101, 1))
@@ -167,6 +184,32 @@ class DecisionTests(unittest.TestCase):
         self.control()
         self.assertEqual(self.api.dispatches, [])
         self.assertEqual(self.api.refs, {})
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "out"
+            self.assertTrue(ci.gate(self.api, "linux", 101, 1, 101, 1, MERGE, output, 0))
+            self.assertEqual(output.read_text(), "build=true\n")
+        self.api.job.update(status="completed", conclusion="success")
+        self.api.source.update(status="completed", conclusion="success")
+        self.control()
+        self.assertEqual(self.api.statuses[-1]["state"], "success")
+
+    def test_changed_workflow_skipped_job_cannot_publish_green(self):
+        self.api.workflow_trusted = False
+        self.api.job.update(status="completed", conclusion="skipped")
+        self.api.source.update(status="completed", conclusion="success")
+        self.control()
+        self.assertEqual(self.api.statuses[-1]["state"], "error")
+
+    def test_changed_workflow_run_title_still_compiles_ordinarily(self):
+        self.api.workflow_trusted = False
+        self.api.source["display_title"] = "Workflow experiment"
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "out"
+            self.assertTrue(ci.gate(self.api, "linux", 101, 1, 101, 1, MERGE, output, 0))
+            self.assertEqual(output.read_text(), "build=true\n")
+        self.control()
+        self.assertEqual(self.api.dispatches, [])
+        self.assertEqual(self.api.statuses, [])
 
     def test_running_self_hosted_claim_prevents_fallback_and_wins_race(self):
         self.api.job.update(status="in_progress", started_at=stamp(2))
@@ -194,7 +237,7 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(self.api.statuses[-1]["context"], ci.CONTEXT["linux"])
 
     def test_hosted_win_loser_gate_and_aggregate_failure(self):
-        self.api.source["created_at"] = stamp(12)
+        self.api.job["created_at"] = stamp(12)
         self.control()
         host = self.api.add_host(minutes_ago=-1)
         self.control()
@@ -237,10 +280,157 @@ class DecisionTests(unittest.TestCase):
 
     def test_api_error_fails_closed_and_is_visible(self):
         self.api.fail_path = "/actions/workflows/hosted-build-fallback.yml/dispatches"
-        with self.assertRaisesRegex(ci.ApiError, "503"):
-            self.control()
+        self.control()
         self.assertEqual(self.api.dispatches, [])
         self.assertIsNotNone(ci.read_marker(self.api, "dispatch", "linux", 101, 1))
+        self.assertEqual(self.api.statuses[-1]["state"], "pending")
+
+    def test_lost_dispatch_response_reconciles_observed_run_without_retry(self):
+        self.api.dispatch_failure_after_accept = True
+        self.control()
+        self.assertEqual(len(self.api.dispatches), 1)
+        self.api.add_host(status="queued", minutes_ago=-1)
+        self.age_dispatch(minutes=4)
+        self.control()
+        self.assertEqual(len(self.api.dispatches), 1)
+        self.assertIsNone(ci.read_marker(self.api, "dispatch-2", "linux", 101, 1))
+
+    def test_dispatch_timeout_after_acceptance_is_reconciled(self):
+        self.api.dispatch_timeout_after_accept = True
+        self.control()
+        self.assertEqual(len(self.api.dispatches), 1)
+        self.api.add_host(status="queued", minutes_ago=-1)
+        self.age_dispatch(minutes=4)
+        self.control()
+        self.assertEqual(len(self.api.dispatches), 1)
+
+    def test_duplicate_accepted_dispatches_claim_only_one_compiler(self):
+        self.control()
+        self.age_dispatch(minutes=4)
+        self.control()  # no observed run yet: a bounded second dispatch
+        self.api.add_host(status="in_progress", minutes_ago=-1, host_id=202)
+        self.api.add_host(status="in_progress", minutes_ago=-1, host_id=203)
+        self.control()
+        claim = ci.read_marker(self.api, "claims", "linux", 101, 1)
+        self.assertIn(claim["winner_run"], (202, 203))
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "out"
+            results = [ci.gate(self.api, "linux", 101, 1, host_id, 1, MERGE, output, 0)
+                       for host_id in (202, 203)]
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(results.count(False), 1)
+
+    def test_unobserved_dispatch_retries_then_publishes_terminal_error(self):
+        self.api.fail_path = "/actions/workflows/hosted-build-fallback.yml/dispatches"
+        self.control()
+        self.age_dispatch()
+        self.control()
+        self.assertIsNotNone(ci.read_marker(self.api, "dispatch-2", "linux", 101, 1))
+        self.age_dispatch("dispatch-2")
+        self.control()
+        self.assertIsNotNone(ci.read_marker(self.api, "dispatch-3", "linux", 101, 1))
+        self.age_dispatch("dispatch-3")
+        self.control()
+        self.assertEqual(self.api.statuses[-1]["state"], "error")
+        self.assertIn("Dispatch retries exhausted", self.api.statuses[-1]["description"])
+
+    def test_hosted_preclaim_failure_is_terminal(self):
+        self.control()
+        self.api.add_host(status="completed", minutes_ago=-1, result="failure")
+        self.control()
+        self.assertEqual(self.api.statuses[-1]["state"], "error")
+        self.assertIn("before acquiring", self.api.statuses[-1]["description"])
+
+    def test_hosted_allocation_stall_is_terminal(self):
+        self.control()
+        self.age_dispatch(minutes=40)
+        self.api.add_host(status="queued", minutes_ago=31)
+        self.control()
+        self.assertEqual(self.api.statuses[-1]["state"], "error")
+        self.assertIn("allocated no build job", self.api.statuses[-1]["description"])
+
+    def test_rerun_old_run_uses_new_attempt_job_queue_age(self):
+        self.api.source["created_at"] = stamp(10 * 24 * 60)
+        self.api.source["run_attempt"] = 2
+        self.api.job["created_at"] = stamp(2)
+        self.control()
+        self.assertEqual(self.api.dispatches, [])
+        self.api.job["created_at"] = stamp(11)
+        self.control()
+        self.assertEqual(len(self.api.dispatches), 1)
+        self.assertEqual(self.api.dispatches[0]["inputs"]["original_attempt"], "2")
+
+    def test_attempt_start_is_used_when_job_creation_time_missing(self):
+        self.api.source["created_at"] = stamp(10 * 24 * 60)
+        self.api.source["run_attempt"] = 2
+        self.api.job.pop("created_at")
+        self.api.attempt_started_at = stamp(2)
+        self.control()
+        self.assertEqual(self.api.dispatches, [])
+        self.api.attempt_started_at = stamp(11)
+        self.control()
+        self.assertEqual(len(self.api.dispatches), 1)
+
+    def test_no_attempt_timestamp_is_visible_error(self):
+        self.api.job.pop("created_at")
+        self.api.attempt_started_at = None
+        self.control()
+        self.assertEqual(self.api.dispatches, [])
+        self.assertEqual(self.api.statuses[-1]["state"], "error")
+
+    def test_stale_attempt_before_claim_or_status_does_not_publish(self):
+        self.api.job.update(status="in_progress", started_at=stamp(1))
+        with mock.patch.object(ci, "fresh_source", return_value=False):
+            self.control()
+        self.assertIsNone(ci.read_marker(self.api, "claims", "linux", 101, 1))
+        self.assertEqual(self.api.statuses, [])
+
+    def test_status_freshness_recheck_skips_superseded_attempt(self):
+        self.api.job["created_at"] = stamp(2)
+        with mock.patch.object(ci, "fresh_source", return_value=False):
+            self.control()
+        self.assertEqual(self.api.statuses, [])
+
+    def test_gate_rechecks_attempt_after_reading_claim(self):
+        self.api.job.update(status="in_progress", started_at=stamp(1))
+        self.control()
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(ci, "fresh_source", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "obsolete before compilation"):
+                ci.gate(self.api, "linux", 101, 1, 101, 1, MERGE, Path(temp) / "out", 0)
+
+    def test_manual_branch_build_fallback_and_tag_gpu_exclusions(self):
+        self.api.source.update(event="workflow_dispatch", head_sha=MERGE,
+                               display_title=f"Linux build {MERGE} branch")
+        self.control()
+        self.assertEqual(len(self.api.dispatches), 1)
+        self.assertEqual(self.api.statuses[-1]["context"], ci.MANUAL_CONTEXT["linux"])
+        self.api = FakeGitHub()
+        self.api.source.update(event="workflow_dispatch", head_sha=MERGE,
+                               display_title=f"Linux build {MERGE} tag")
+        self.control()
+        self.assertEqual(self.api.dispatches, [])
+        windows = FakeGitHub("windows")
+        windows.source.update(event="workflow_dispatch", head_sha=MERGE,
+                              display_title=f"Windows build {MERGE} branch gpu=true")
+        ci.control_one(windows, windows.source, "windows", {}, "master", 10, NOW)
+        self.assertEqual(windows.dispatches, [])
+
+    def test_claim_retained_after_long_queue_does_not_duplicate(self):
+        self.api.job.update(status="in_progress", started_at=stamp(1))
+        self.control()
+        self.api.job.update(status="queued", created_at=stamp(24 * 60))
+        self.control()
+        self.assertEqual(self.api.dispatches, [])
+        self.assertIsNotNone(ci.read_marker(self.api, "claims", "linux", 101, 1))
+
+    def test_scheduled_scan_includes_old_active_rerun(self):
+        self.api.source.update(run_attempt=2, created_at=stamp(10 * 24 * 60))
+        self.api.job["created_at"] = stamp(11)
+        with mock.patch.dict(ci.os.environ, {"LINUX_RUNNER_CONFIGURED": "true", "WINDOWS_RUNNER_CONFIGURED": "false"}):
+            ci.control(self.api, 10, NOW)
+        self.assertEqual(len(self.api.dispatches), 1)
+        self.assertEqual(self.api.dispatches[0]["inputs"]["original_attempt"], "2")
+
 
     def test_atomic_ref_collision_keeps_first_winner(self):
         first, created = ci.create_marker(self.api, "claims", "linux", 101, 1, MERGE,
@@ -274,6 +464,40 @@ class DecisionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "No trusted build claim"):
                 ci.gate(self.api, "linux", 101, 1, 101, 1, MERGE, Path(temp) / "out", 0)
 
+
+class WorkflowContractTests(unittest.TestCase):
+    def test_reusable_builds_are_read_only_and_tag_writes_are_separate(self):
+        workflows = ROOT / ".github" / "workflows"
+        release = (workflows / "release.yml").read_text()
+        hosted = (workflows / "hosted-build-fallback.yml").read_text()
+        self.assertIn("permissions:\n  contents: read\n  actions: read", hosted)
+        self.assertIn("permissions:\n  contents: write\n  actions: read", release)
+        for platform in ("linux", "windows"):
+            build = (workflows / f"{platform}-build.yml").read_text()
+            self.assertIn("permissions:\n  contents: read\n  actions: read", build)
+            self.assertNotIn("contents: write", build)
+            self.assertNotIn("cancel-in-progress:", build)
+        self.assertIn("gh release upload", release)
+        self.assertNotIn("download-artifact", release)
+        self.assertNotIn("murmur-windows-release-assets", release)
+        self.assertIn("Stage Windows assets on the trusted release runner", (workflows / "windows-build.yml").read_text())
+        self.assertIn("value: ${{ jobs.build.outputs.stage_attempt }}", (workflows / "windows-build.yml").read_text())
+        self.assertIn("BUILD_ATTEMPT: ${{ needs['windows-build'].outputs.stage_attempt }}", release)
+        self.assertIn("--attempt $env:BUILD_ATTEMPT", release)
+        flipper = (workflows / "flipper-build.yml").read_text()
+        self.assertIn("permissions:\n  contents: read", flipper)
+        self.assertNotIn("gh release upload", flipper)
+
+    def test_manual_non_gpu_branch_contract_is_explicit(self):
+        workflows = ROOT / ".github" / "workflows"
+        for platform in ("linux", "windows"):
+            build = (workflows / f"{platform}-build.yml").read_text()
+            self.assertIn("github.ref_type == 'branch'", build)
+            self.assertIn("github.event_name == 'workflow_dispatch'", build)
+            self.assertIn("github.ref_type", build.splitlines()[1])
+        windows = (workflows / "windows-build.yml").read_text()
+        self.assertIn("!inputs.gpu", windows)
+        self.assertIn("gpu={1}", windows.splitlines()[1])
 
 if __name__ == "__main__":
     unittest.main()

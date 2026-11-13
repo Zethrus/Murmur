@@ -6,10 +6,7 @@ on:
 
 permissions:
   contents: write
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  actions: read
 
 jobs:
   prepare:
@@ -36,23 +33,188 @@ jobs:
   # Windows (vars.ENABLE_WINDOWS == 'true', Edison runner): builds the installer, portable zip
   # and component zips and attaches them to the draft; its component inputs go to the Linux job,
   # which signs one manifest for both platforms.
-  windows:
+  windows-build:
     needs: prepare
     # Tags build only on the real Windows runner, never on a billing-locked hosted one.
     if: vars.ENABLE_WINDOWS == 'true' && vars.WINDOWS_RUNNER != ''
     uses: ./.github/workflows/windows-build.yml
     secrets: inherit
-  linux:
+  windows:
+    needs: windows-build
+    if: needs['windows-build'].result == 'success'
+    outputs:
+      windows_inputs: ${{ needs['windows-build'].outputs.windows_inputs }}
+    permissions:
+      contents: write
+    runs-on: ${{ fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify and attach staged Windows assets to the draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_ATTEMPT: ${{ needs['windows-build'].outputs.stage_attempt }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:BUILD_ATTEMPT -notmatch '^[1-9][0-9]*$') { throw 'Windows build stage attempt is missing' }
+          $Version = $env:GITHUB_REF_NAME.TrimStart('v')
+          py -3.12 scripts/ci-release-stage.py verify `
+            --tool-cache $env:RUNNER_TOOL_CACHE --run-id $env:GITHUB_RUN_ID `
+            --attempt $env:BUILD_ATTEMPT --sha $env:GITHUB_SHA --version $Version
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release stage verification failed' }
+          $Stage = Join-Path $env:RUNNER_TOOL_CACHE ('murmur-release-stage\{0}-{1}' -f $env:GITHUB_RUN_ID, $env:BUILD_ATTEMPT)
+          $Draft = gh release view $env:GITHUB_REF_NAME --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $Draft.isDraft) { throw 'Draft release is unavailable or already published' }
+          gh release upload $env:GITHUB_REF_NAME `
+            (Join-Path $Stage "Murmur_${Version}_x64-setup.exe") `
+            (Join-Path $Stage 'murmur-windows-x86_64.zip') `
+            (Join-Path $Stage "murmur-engine-windows-x86_64-${Version}.zip") `
+            (Join-Path $Stage "murmur-cuda-windows-x86_64-${Version}.zip") --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+  linux-build:
     needs: [prepare, windows]
     if: >-
       always() && needs.prepare.result == 'success' &&
       (needs.windows.result == 'success' || needs.windows.result == 'skipped')
     uses: ./.github/workflows/linux-build.yml
-    with:
-      windows_inputs: ${{ needs.windows.outputs.windows_inputs || '' }}
+  linux:
+    needs: [linux-build, windows]
+    if: >-
+      always() && needs['linux-build'].result == 'success' &&
+      (needs.windows.result == 'success' || needs.windows.result == 'skipped') &&
+      vars.MURMUR_RELEASE_TRUST_FINGERPRINT != ''
+    permissions:
+      contents: write
+      actions: read
+    environment: release-signing
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 120
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare isolated build caches
+        run: python3 scripts/ci-cache.py prepare
+      - name: Record starting resources and cache sizes
+        run: python3 scripts/ci-cache.py start
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: ${{ runner.environment != 'self-hosted' && 'npm' || '' }}
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - name: Verify pinned Rust version
+        run: test "$(rustc --version | cut -d' ' -f2)" = 1.100.0
+      - name: The committed trust root must be the configured release key
+        env:
+          EXPECTED: ${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          grep -q "RELEASE_PRIMARY_FINGERPRINT: &str = \"$EXPECTED\"" src-tauri/src/components/trust.rs
+          actual="$(gpg --batch --with-colons --show-keys src-tauri/trust/murmur-release.asc | awk -F: '/^fpr/ {print $10; exit}')"
+          test "$actual" = "$EXPECTED"
+      - name: Fetch the Windows component zips from the draft (when Windows is enabled)
+        if: needs.windows.outputs.windows_inputs != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WINDOWS_INPUTS: ${{ needs.windows.outputs.windows_inputs }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          windows="$RUNNER_TEMP/windows-components"
+          rm -rf "$windows" && mkdir -p "$windows"
+          printf '%s\n' "$WINDOWS_INPUTS" > "$windows/components-windows-inputs.json"
+          gh release download "$GITHUB_REF_NAME" --dir "$windows" \
+            --pattern "murmur-engine-windows-x86_64-$version.zip" --pattern "murmur-cuda-windows-x86_64-$version.zip"
+          # make-manifest.py re-checks both zips against these hashes before signing them.
+          echo "MURMUR_WINDOWS_COMPONENTS=$windows" >> "$GITHUB_ENV"
+      - name: Build, sign with the release subkey and test
+        env:
+          MURMUR_SIGNING_SUBKEY: ${{ secrets.MURMUR_SIGNING_SUBKEY }}
+          MURMUR_SIGNING_PASSPHRASE: ${{ secrets.MURMUR_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$MURMUR_SIGNING_SUBKEY" || { echo 'MURMUR_SIGNING_SUBKEY is not set in the release-signing environment' >&2; exit 1; }
+          scripts/build-linux.sh
+          python3 scripts/check-release.py signature .cache/artifacts/components "${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}"
+      - name: Validate final Linux assets on trusted GPU hardware
+        env:
+          MURMUR_GPU_TEST_MODELS: ${{ vars.MURMUR_GPU_TEST_MODELS }}
+        run: |
+          set -euo pipefail
+          test -n "$MURMUR_GPU_TEST_MODELS" || { echo 'Set MURMUR_GPU_TEST_MODELS to an offline staged model directory on the trusted runner.' >&2; exit 1; }
+          command -v nvidia-smi >/dev/null || { echo 'Trusted NVIDIA GPU runner required for release.' >&2; exit 1; }
+          python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux \
+            --components .cache/artifacts/components --models-dir "$MURMUR_GPU_TEST_MODELS"
+      - name: Release guard - no throwaway-signed manifest in the shipped binary
+        # build-linux.sh embeds the manifest it just signed. The binary must carry the release
+        # subkey's signature (the committed certificate checked above), never a throwaway one.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python3 scripts/check-embedded-manifest.py --trusted-cert src-tauri/trust/murmur-release.asc \
+            "$CARGO_TARGET_DIR/release/murmur"
+      - name: Attach Linux assets and components to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            .cache/artifacts/linux/*.AppImage \
+            .cache/artifacts/linux/*.deb \
+            .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
+            .cache/artifacts/linux/GPU-VALIDATION.json \
+            .cache/artifacts/components/murmur-*-linux-x86_64-*.zip \
+            .cache/artifacts/components/components-manifest.json \
+            .cache/artifacts/components/components-manifest.json.sig \
+            .cache/artifacts/components/murmur-release.asc --clobber
+      - name: Record final resources and cache sizes
+        if: always()
+        run: python3 scripts/ci-cache.py finish
   flipper:
     needs: prepare
-    uses: ./.github/workflows/flipper-build.yml
+    permissions:
+      contents: write
+    timeout-minutes: 20
+    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install ufbt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ufbt
+      - name: Prepare the SDK
+        run: ufbt update --channel=release
+      - name: Sync the companion version with Murmur
+        run: python3 companion/flipper/scripts/sync_version.py --check
+      - name: Test the wire parser
+        run: |
+          cc -std=c11 -Wall -Wextra -o /tmp/protocol_test companion/tests/protocol_test.c companion/flipper/src/protocol.c
+          /tmp/protocol_test
+      - name: Build the app
+        run: ufbt
+        working-directory: companion/flipper
+      - name: Verify the artifact
+        run: test -s dist/murmur_companion.fap
+        working-directory: companion/flipper
+      - name: Attach to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+          cp companion/flipper/dist/murmur_companion.fap "murmur-companion-${GITHUB_REF_NAME}.fap"
+          gh release upload "$GITHUB_REF_NAME" "murmur-companion-${GITHUB_REF_NAME}.fap" --clobber
   # Windows GPU validation of the FINAL signed assets on Edison (NVIDIA): tied to the release by
   # hash. Until it has passed for a release, the Windows GPU option stays hidden in the app
   # (components::detect::WINDOWS_GPU_OFFERED = false).
@@ -116,7 +278,10 @@ jobs:
           mkdir -p release-assets
           gh release download "$GITHUB_REF_NAME" --dir release-assets
           # Never publishes: the draft stays a draft for manual testing.
-          python3 scripts/check-release.py assets "$GITHUB_REF_NAME" release-assets $WINDOWS $WINDOWS_GPU
+          flags=()
+          if [[ -n "$WINDOWS" ]]; then flags+=("$WINDOWS"); fi
+          if [[ -n "$WINDOWS_GPU" ]]; then flags+=("$WINDOWS_GPU"); fi
+          python3 scripts/check-release.py assets "$GITHUB_REF_NAME" release-assets "${flags[@]}"
           if [ -n "$WINDOWS" ] && [ -z "$WINDOWS_GPU" ]; then
             echo 'Windows assets verified WITHOUT GPU evidence: the Windows GPU option must stay hidden.' >> "$GITHUB_STEP_SUMMARY"
           fi

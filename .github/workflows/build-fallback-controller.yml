@@ -2,8 +2,8 @@ name: Trusted build fallback controller
 
 on:
   schedule:
-    # Five-minute scans; GitHub may delay or drop scheduled events.
-    - cron: '2/5 * * * *'
+    # Ten-minute reconciliation; workflow_run events handle active transitions.
+    - cron: '2/10 * * * *'
   workflow_run:
     workflows: [Linux build, Windows build, Hosted build fallback]
     types: [requested, in_progress, completed]
@@ -18,10 +18,6 @@ permissions:
   actions: write
   contents: write
   statuses: write
-
-concurrency:
-  group: murmur-trusted-build-controller
-  cancel-in-progress: false
 
 jobs:
   control:

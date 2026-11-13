@@ -5,9 +5,9 @@ Status, November 13, 2026: the self-hosted Windows manual/GPU build passed in
 at `f3c153b`. A hosted Windows build and the release workflow still need live
 validation. The ordinary build cache and cold/warm measurement protocol are in
 [CI build performance](ci-build-performance.md).
-After default-branch activation, same-repository ordinary PR builds queued on
-Edison can use the hosted fallback described there. Manual `gpu=true` runs,
-release tags/signing, and the interactive desktop runner never fall back.
+After default-branch activation, same-repository ordinary PR and branch manual
+builds queued on Edison can use the hosted fallback described there. Manual
+`gpu=true` runs, release tags/signing, and the interactive desktop runner never fall back.
 Hosted Windows allocation and billing on this account are still unverified;
 the fallback uses `windows-latest`, not a paid larger-runner label.
 
@@ -116,15 +116,17 @@ manifest (on Edison, so without the launch smoke), then the **release guard**
 any embedded manifest must be signed by a key of the committed
 `src-tauri/trust/murmur-release.asc`, and without that certificate nothing may
 be embedded. Only then are the installer, portable zip and both component zips
-attached to the **draft** release with `gh` (no third-party publish action), and
+staged under Edison's `RUNNER_TOOL_CACHE`. A separate tag-only job checks their
+SHA-256 hashes and attaches them directly to the **draft** release with `gh`
+(no Actions artifact storage or third-party publish action), and
 the component inputs are passed to the Linux job as a workflow output. The
 Linux release job runs the same guard on its rebuilt binary before its upload.
 
 ## Release flow with Windows enabled
 
 ```
-prepare ─┬─ windows (Edison) ── linux (signs ONE manifest: Linux + Windows) ── windows-gpu (Edison) ─┐
-         └─ flipper ─────────────────────────────────────────────────────────────────────────────────┴─ validate
+prepare ─┬─ windows-build (Edison) ── windows upload (Edison) ── linux-build ── linux signing ── windows-gpu ─┐
+         └─ flipper ────────────────────────────────────────────────────────────────────────────────────────────┴─ validate
 ```
 
 - The Linux release job downloads the two Windows zips from the draft, and

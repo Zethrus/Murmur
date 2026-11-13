@@ -12,11 +12,11 @@ Cargo registry/git downloads, pip wheels, npm downloads, and PyInstaller cache
 under `RUNNER_TOOL_CACHE/murmur-build-cache`. The path is scoped by repository,
 runner name, OS, architecture and Rust version, and is outside `GITHUB_WORKSPACE`.
 The checked-out `.cache/artifacts` folders and fresh engine venv remain in the
-checkout; normal source cleanup cannot erase the compiler cache. The build and
-release jobs on each platform share a job concurrency group so only one writer
-uses that platform's runner-local cache at a time. The group can replace an
-older **pending** build under GitHub's default concurrency semantics; inspect
-cancelled runs when collecting measurements.
+checkout; normal source cleanup cannot erase the compiler cache. Each cache namespace is tied to one registered runner name. A GitHub runner
+agent runs one job at a time, so writes to a namespace are serialized by that
+agent. Do not register two agents with the same name and shared tool-cache path.
+There is no workflow/job concurrency group that can replace an older pending
+build or queued release. Separate runner names get separate cache namespaces.
 
 Before each self-hosted build, a target over 30 GiB is discarded, download
 caches over 8 GiB are discarded separately, and a 40 GiB total namespace limit
@@ -30,6 +30,8 @@ PyInstaller cache paths. Hosted runners retain `setup-node` npm caching and
 compression steps. Both platforms still run their linked llama.cpp CPU audit
 against the actual release target, packaging checks, size budgets and signing
 guards.
+The junction regression is mocked in the Linux script suite; a native Windows
+junction run on Edison remains to be validated live.
 
 ## Cold and two warm builds per platform
 
@@ -70,96 +72,110 @@ Those runs had different conditions and are context only, not the cold/warm
 comparison. The latest successful Windows manual/GPU run is 43472148187 at
 `f3c153b`.
 
-## Queued ordinary PR build fallback
+## Queued ordinary build fallback
 
-This is an opt-in controller for same-repository PR builds on a configured
-self-hosted runner. Set repository variable `MURMUR_BUILD_FALLBACK_ENABLED=true`
-**only after these workflow files have merged to the default branch**. The
-trusted controller runs from that branch on a five-minute schedule and on
-`workflow_run` activity. It inspects the original build job's state. If that
-job is still **queued** at or after `MURMUR_BUILD_FALLBACK_DELAY_MINUTES`
-(default `10`; allowed `1..120`), it records a dispatch guard and starts one
-hosted fallback workflow. The original is never cancelled by the controller.
-GitHub may delay or drop scheduled events, so the threshold is eligibility,
-not a start-time guarantee. `MURMUR_BUILD_FALLBACK_ENABLED=false` disables new
-controller decisions; do not change it while active builds are awaiting claims.
+This opt-in GitHub Actions controller covers same-repository PR builds and
+ordinary branch `workflow_dispatch` builds on a configured self-hosted runner.
+Windows manual runs with `gpu=true`, tag runs, signing jobs, forks on a
+self-hosted runner, and desktop jobs are excluded. Set repository variable
+`MURMUR_BUILD_FALLBACK_ENABLED=true` only after the workflows have merged to
+the default branch. `MURMUR_BUILD_FALLBACK_DELAY_MINUTES` defaults to `10`
+(allowed `1..120`). The delay is measured from the current attempt's build
+job `created_at`, or its attempt `run_started_at` when the job timestamp is
+unavailable. A rerun of an old run gets the full queue threshold.
 
-Both build jobs wait at their start for the trusted controller to create one
-immutable annotated tag ref under `refs/tags/ci-build-claims/v1/`. Its identity
-includes platform, original run ID and attempt. The ref's tag message names
-exactly one winning run/attempt and the original PR test-merge SHA. Only that
-job proceeds to source checkout and compilation. The losing job exits
-successfully without building. A second immutable dispatch tag prevents two
-controller executions from dispatching twice, even if the dispatch API's
-response is lost. The controller never deletes these refs automatically:
-GitHub can leave self-hosted jobs queued for 24 hours, and reruns or retained
-run records can still refer to them. An owner may prune old refs manually only
-after the relevant runs, attempts, and desired rerun window have expired.
+A `workflow_run` event asks the trusted default-branch controller to inspect
+that source or hosted run. A ten-minute schedule reconciles only active source
+and hosted runs, without a seven-day creation filter; it can find a newly
+rerun old run. If the original build job is still queued after the threshold,
+the controller reserves a dispatch attempt and requests a hosted build. It
+reconciles visible hosted runs before retrying an uncertain `503`/timeout,
+waits at least three minutes between reservations, and stops after three
+attempts. The original build is never cancelled. An uncertain accepted request
+can create more than one hosted *job* after a retry, but an atomic claim ref
+allows only one job to proceed to checkout and compilation. Extra queued or
+started hosted jobs can still consume hosted allocation minutes.
 
-The controller and status publisher execute default-branch code with
-`actions:write`, `contents:write`, and `statuses:write`. Build jobs have only
-`actions:read` and `contents:read`; they never receive a branch-write token.
-The Windows tag release upload is a separate job on the same self-hosted runner,
-after its build, with `contents:write`. Ordinary PR code does not receive that
-permission. It stages four assets in a three-day Actions artifact; available
-artifact storage for a live release remains unverified. The controller checks
-same-repository PR ownership, open/current PR head, current test-merge
-commit, byte-identical source workflow file against the default branch,
-source workflow path/name, latest run/attempt, and job state. Hosted
-fallback checks out the immutable original test-merge SHA rather than the
-fallback workflow's default-branch SHA. No PR checkout is run by the controller.
-PRs that edit these build workflow files will fail this trust check and need a
-separate trusted review/validation path before the fallback can be used.
-Forks, manual/GPU-requested runs, tags, signing, and desktop jobs are outside
-this fallback path. The existing release workflow remains self-hosted.
-With a self-hosted runner configured, fork PR build jobs are skipped and do not
-receive these stable statuses; requiring the contexts will block fork merges
-until a separate trusted hosted-fork policy is designed.
+The controller claims the first eligible running build job (self-hosted or
+hosted) through an immutable annotated tag ref keyed by platform, original
+run, and attempt. The claim records the exact original SHA and one winning
+run/attempt. The build gate reads that ref with a read-only token, rechecks the
+latest source run, attempt, and SHA immediately before compilation, and exits
+without compiling if it lost. The claim and dispatch reservations are retained
+so a long queue or rerun cannot reopen the same attempt. A completed hosted
+job without a claim, 30-minute hosted allocation stall, or exhausted dispatch
+retries publishes an `error` result instead of leaving an endless `pending`
+status. A later self-hosted claim can supersede that status if the job starts.
 
-The stable commit status contexts are `Murmur Linux build result` and
-`Murmur Windows build result`. The trusted controller publishes `pending`,
-then the winning run's success/failure, against the current PR head. The
-original job may later appear green as a losing no-op; use the stable status to
-judge the build. No required check currently exists on `master` (branch
-protection returned 404 and rulesets were empty when this change was made).
-**Recommended after live validation:** require these two exact status contexts
-in branch protection/rulesets, and retain any other desired independent checks.
-Do not require the raw `build` job as the fallback's canonical result.
+The privileged controller checks same-repository PR ownership, open/current
+PR head, current test-merge SHA, merge parents, and workflow path. It requires
+the trusted run title for fallback eligibility.
+It checks source workflow blob equality with the default branch **only for
+hosted fallback eligibility**. A same-repository PR editing its build workflow
+still runs the ordinary build and tests; it cannot use fallback. The
+controller checks an ordinary build job's conclusion before publishing green,
+so a skipped job cannot masquerade as a passing build. If an edited workflow
+changes the run title, its ordinary job still runs, but no stable status is
+published because the controller cannot verify the run's tested SHA from that
+title. The controller never checks out or executes PR code. Ordinary build
+jobs have `contents:read` and `actions:read`; only the default-branch
+controller has write permissions for fallback coordination. Trusted tag-only
+release jobs separately hold release write permissions.
+The release caller has `contents:write` and `actions:read`, while reusable
+build jobs explicitly downgrade to read. Signed Linux release work is in the
+trusted tag-only `release.yml` job. Windows tag assets stage on the sole
+configured Windows release runner, are hash-checked, then upload directly to
+the draft from a separate tag-only write-token job. That path does not require
+Actions artifact storage; ordinary throwaway-signed artifact upload remains
+best effort. The Windows staging contract requires that `WINDOWS_RUNNER`
+select one physical runner with a persistent `RUNNER_TOOL_CACHE` between jobs.
+The uploader uses the build job's recorded attempt number, so rerunning only
+the upload job does not look for assets under the uploader's newer attempt.
+Flipper release compilation and direct upload run in a tag-only `release.yml`
+job; the standalone Flipper build workflow has a read-only token.
 
-Before merging, run `python3 -m unittest scripts.tests.test_ci_build_controller
-scripts.tests.test_ci_cache`. For a local read-only scan, set `GH_TOKEN`,
-`GITHUB_REPOSITORY`, and `LINUX_RUNNER_CONFIGURED=true` and/or
-`WINDOWS_RUNNER_CONFIGURED=true`, then run
-`python3 scripts/ci-build-controller.py control --dry-run`.
-The dry run reads GitHub state but writes no refs,
-dispatches, or statuses. Leave the enable variable unset on the PR: the
-controller cannot be triggered until its workflow file exists on the default
-branch. Run ordinary PR cold/warm builds now where feasible. After merging,
-set the enable variable, trigger a **manual dry run** of `Trusted build fallback
-controller`, check logs, then test a queued ordinary PR on each platform with
-carefully observed billing and runner availability. The controller's manual
-dispatch defaults to dry run; choose `dry_run=false` only for a real scan.
+The stable PR commit status contexts are `Murmur Linux build result` and
+`Murmur Windows build result`. Manual builds use separate `Murmur Linux manual
+build result` and `Murmur Windows manual build result` contexts so they do not
+overwrite PR status at the same SHA. The winning run's conclusion controls the
+status; a losing original job may appear green after skipping compilation.
+No required check currently exists on `master` (branch protection returned 404
+and rulesets were empty when this change was made). After live validation,
+require the two PR contexts, along with any other independent checks. Do not
+require the raw `build` job as the fallback's canonical result.
 
-A controller API error fails its run and makes no optimistic fallback decision.
-A build gate times out after seven minutes without a claim, failing the job
-before compilation. The hosted gate is bounded but uses hosted minutes while
-waiting. The dispatch log states when hosted billing/allocation may apply; the
-controller fails visibly if a recorded dispatch has no hosted run after the
-threshold plus 20 minutes. A queued hosted run can still fail allocation or
-reach GitHub's own queue limit; there is no automatic second fallback. The
-winning build's failure remains the result. Hosted billing availability and
-cost on this account are unverified. No paid larger-runner labels are used.
-The controller and its jobs still depend on GitHub scheduling/API availability,
-and GitHub's commit-status API has no compare-and-set operation: a concurrent
-new PR event between the final freshness read and status POST can briefly
-leave an older status. The next controller scan re-evaluates current runs;
-branch protection should be enabled only after that behavior is observed live.
-Scans cover the last seven days of runs; a longer controller outage needs a
-manual investigation and rerun rather than an automatic stale publication.
+The controller is still a hosted Actions job. A healthy self-hosted build must
+wait for the trusted controller's event-triggered claim; no measured claim
+latency is available yet. The read-only gate waits at most seven minutes and
+fails visibly before compilation if Actions scheduling or the API cannot
+supply a claim. There is no safe fail-open path with read-only build tokens:
+bypassing the atomic claim could duplicate compilation. Ten-minute scheduled
+reconciliation means up to **144 controller job starts per day** while enabled,
+plus event-triggered starts. At a hypothetical 10–30 seconds of runner time per
+scheduled start, that is 24–72 hosted runner minutes per day before any billing
+rounding; it is an estimate, not a measurement. The scan asks for active runs
+rather than repeatedly scanning seven days of completed runs. GitHub may delay
+or drop scheduled events, so the ten-minute queue threshold is eligibility,
+not a fallback start-time guarantee. An outage longer than gate timeout can
+fail a healthy self-hosted build; more than 100 simultaneous active runs needs
+manual investigation. Status POST has no compare-and-set, so a PR update
+between final freshness read and POST can show a stale status. Since scheduled
+scans do not revisit completed runs, a dropped follow-up event can leave it
+until a new run or manual correction. Hosted billing and allocation on this
+account remain unverified.
 
-GitHub API references: [scheduled workflows and delay](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows),
-[PR test merge SHA](https://docs.github.com/en/rest/pulls/pulls),
-[atomic create-ref response](https://docs.github.com/en/rest/git/refs),
+Before merging, run `python3 -m unittest discover -s scripts/tests -p
+'test_*.py'`. For a local read-only scan, set `GH_TOKEN`,
+`GITHUB_REPOSITORY`, and the relevant `LINUX_RUNNER_CONFIGURED=true` or
+`WINDOWS_RUNNER_CONFIGURED=true`, then run `python3 scripts/ci-build-controller.py
+control --dry-run`. Leave the enable variable unset on the PR. After merge,
+set it, trigger a manual controller dry run, and then observe a queued ordinary
+PR and branch manual build on each platform. The parent reviewer should record
+cold and two warm build measurements separately; none are claimed here.
+
+GitHub references: [reusable workflow token permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations),
+[workflow-run API and status filter](https://docs.github.com/en/rest/actions/workflow-runs),
+[jobs by attempt](https://docs.github.com/en/rest/actions/workflow-jobs),
 [workflow dispatch](https://docs.github.com/en/rest/actions/workflows),
-[workflow jobs by attempt](https://docs.github.com/en/rest/actions/workflow-jobs),
-and [commit statuses](https://docs.github.com/en/rest/commits/statuses).
+[atomic ref creation](https://docs.github.com/en/rest/git/refs), and
+[commit statuses](https://docs.github.com/en/rest/commits/statuses).
