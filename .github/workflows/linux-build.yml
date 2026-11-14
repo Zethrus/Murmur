@@ -201,10 +201,14 @@ jobs:
           set -euo pipefail
           release="$CARGO_TARGET_DIR/release"
           test -s "$release/murmur"
+          version="$(node -p "require('./package.json').version")"
+          source scripts/select-linux-bundles.sh
+          select_linux_bundles "$release" "$version"
+          rm -rf .cache/artifacts/linux
           mkdir -p .cache/artifacts/linux
           engine/.release-venv/bin/python scripts/bundle-linux-runtime.py package \
-            --appimage "$release"/bundle/appimage/*.AppImage \
-            --deb "$release"/bundle/deb/*.deb \
+            --appimage "$LINUX_APPIMAGE" \
+            --deb "$LINUX_DEB" \
             --output .cache/artifacts/linux
           python3 scripts/test-linux-bundle.py .cache/artifacts/linux .cache/artifacts/components
           python3 scripts/test-linux-startup.py .cache/artifacts/linux/*.AppImage --components .cache/artifacts/components

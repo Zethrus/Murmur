@@ -1,3 +1,6 @@
+v0.5.0:
+Version synchronized with Murmur 0.5.0; companion protocol unchanged.
+
 v0.4.7:
 First Apps Catalog release. Added app icon and catalog description. Version matches Murmur 0.4.7.
 
