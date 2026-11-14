@@ -8,6 +8,7 @@ MURMUR_LOG=debug and RUST_BACKTRACE=1. Murmur is single-instance, so preflight r
 run while any other murmur.exe exists. WebView2 keeps its own data folder under the real
 %LOCALAPPDATA%.
 """
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -145,13 +146,13 @@ class MurmurSession:
         """
         if not self.history_path.is_file():
             return []
-        with sqlite3.connect(self.history_path.resolve().as_uri() + "?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(self.history_path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
             return db.execute("SELECT id, text FROM entries WHERE id > ? ORDER BY id", (cursor,)).fetchall()
 
     def history_cursor(self):
         if not self.history_path.is_file():
             return 0
-        with sqlite3.connect(self.history_path.resolve().as_uri() + "?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(self.history_path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
             return db.execute("SELECT COALESCE(MAX(id), 0) FROM entries").fetchone()[0]
 
     def prepare(self):

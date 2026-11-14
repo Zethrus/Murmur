@@ -1,4 +1,5 @@
 """Pure parts of the Windows desktop harness (scripts/windows/desktop), runnable on any OS."""
+from contextlib import closing
 import hashlib
 import json
 import multiprocessing
@@ -216,12 +217,67 @@ class GoldenTests(unittest.TestCase):
             self.assertEqual(session.history_cursor(), 0)
             self.assertFalse(session.history_path.exists())
             session.data.mkdir(parents=True)
-            with sqlite3.connect(session.history_path) as db:
+            with closing(sqlite3.connect(session.history_path)) as db, db:
                 db.execute("CREATE TABLE entries (id INTEGER PRIMARY KEY, text TEXT NOT NULL)")
                 db.execute("INSERT INTO entries(text) VALUES (?)", ("The fox. ",))
+            with self.assertRaises(sqlite3.ProgrammingError):
+                db.execute("SELECT 1")
             self.assertEqual(session.history_after(0), [(1, "The fox. ")])
             self.assertEqual(session.history_cursor(), 1)
             self.assertEqual(session.history_after(1), [])
+
+    def test_history_oracle_closes_connections_after_successful_reads(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as folder:
+            session = murmur.MurmurSession.__new__(murmur.MurmurSession)
+            session.home = Path(folder)
+            session.data.mkdir(parents=True)
+            with closing(sqlite3.connect(session.history_path)) as db, db:
+                db.execute("CREATE TABLE entries (id INTEGER PRIMARY KEY, text TEXT NOT NULL)")
+                db.execute("INSERT INTO entries(text) VALUES ('The fox. ')")
+
+            real_connect = sqlite3.connect
+            opened = []
+
+            def tracking_connect(*args, **kwargs):
+                db = real_connect(*args, **kwargs)
+                opened.append(db)
+                return db
+
+            with mock.patch.object(murmur.sqlite3, "connect", side_effect=tracking_connect):
+                self.assertEqual(session.history_after(0), [(1, "The fox. ")])
+                self.assertEqual(session.history_cursor(), 1)
+            self.assertEqual(len(opened), 2)
+            for db in opened:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    db.execute("SELECT 1")
+
+    def test_history_oracle_closes_connections_after_query_errors(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as folder:
+            session = murmur.MurmurSession.__new__(murmur.MurmurSession)
+            session.home = Path(folder)
+            session.data.mkdir(parents=True)
+            with closing(sqlite3.connect(session.history_path)) as db, db:
+                db.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)")
+
+            real_connect = sqlite3.connect
+            opened = []
+
+            def tracking_connect(*args, **kwargs):
+                db = real_connect(*args, **kwargs)
+                opened.append(db)
+                return db
+
+            with mock.patch.object(murmur.sqlite3, "connect", side_effect=tracking_connect):
+                with self.assertRaises(sqlite3.OperationalError):
+                    session.history_after(0)
+                with self.assertRaises(sqlite3.OperationalError):
+                    session.history_cursor()
+            self.assertEqual(len(opened), 2)
+            for db in opened:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    db.execute("SELECT 1")
 
     def test_history_opt_in_is_scoped_to_dictation_checks(self):
         ctx = Context.__new__(Context)
