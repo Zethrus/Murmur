@@ -471,10 +471,12 @@ class RunnerTests(unittest.TestCase):
         session = murmur.MurmurSession(SimpleNamespace(), self.work, SimpleNamespace(), {})
         session.process = SimpleNamespace(pid=42, poll=lambda: 101)
         session._launch_output = self.work / "murmur-launch-1.txt"
-        session._launch_output.write_text("panic from app\n", encoding="utf-8")
+        session._launch_output.write_bytes(b"panic from app\r\n")
         session.log_path.parent.mkdir(parents=True)
-        session.log_path.write_text("old log\nnew launch error\n", encoding="utf-8")
-        session._log_offset = len("old log\n")
+        session.log_path.write_bytes(b"old log\r\n")
+        session._log_offset = session.log_path.stat().st_size
+        with session.log_path.open("ab") as stream:
+            stream.write(b"new launch error\r\n")
 
         def startup(_):
             raise murmur.StartupError("Murmur exited before its Settings window appeared (exit code 101)", session)
@@ -490,6 +492,30 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((self.work / "P3-startup-log.txt").read_text(), "new launch error\n")
         self.assertIn("Murmur Overlay", (self.work / "P3-startup-windows.txt").read_text())
         self.assertIn(str(self.work / "P3-startup-log.txt"), results[0].artifacts)
+
+    def test_startup_diagnostics_preserve_crlf_and_replace_invalid_utf8(self):
+        session = murmur.MurmurSession(SimpleNamespace(), self.work, SimpleNamespace(), {})
+        session._launch_output = self.work / "murmur-launch-1.txt"
+        session._launch_output.write_bytes(b"panic from app\r\ninvalid: \xff\r\n")
+        session.log_path.parent.mkdir(parents=True)
+        session.log_path.write_bytes(b"old log\r\n")
+        session._log_offset = session.log_path.stat().st_size
+        with session.log_path.open("ab") as stream:
+            stream.write(b"new launch error\r\ninvalid: \xff\r\n")
+
+        def windows_write_text(path, data, encoding=None):
+            # Simulate Windows text-mode newline translation on any host OS.
+            return path.write_bytes(data.replace("\n", "\r\n").encode(encoding or "utf-8"))
+
+        with mock.patch.object(Path, "write_text", windows_write_text), \
+             mock.patch.object(murmur.win32, "enum_windows", return_value=[]):
+            session.save_startup_diagnostics(lambda suffix: self.work / suffix)
+
+        replacement = "\ufffd".encode("utf-8")
+        self.assertEqual((self.work / "startup-output.txt").read_bytes(),
+                         b"panic from app\r\ninvalid: " + replacement + b"\r\n")
+        self.assertEqual((self.work / "startup-log.txt").read_bytes(),
+                         b"new launch error\r\ninvalid: " + replacement + b"\r\n")
 
     def test_startup_window_wait_reports_early_process_exit(self):
         session = murmur.MurmurSession(SimpleNamespace(), self.work, SimpleNamespace(sleep=lambda _: None), {})

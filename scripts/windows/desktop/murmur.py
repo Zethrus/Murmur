@@ -245,7 +245,8 @@ class MurmurSession:
                 data = path.read_bytes()
                 if suffix == "startup-log.txt":
                     data = data[self._log_offset:]
-                evidence.write_text(data.decode("utf-8", errors="replace"), encoding="utf-8")
+                # Keep the log's newline bytes; Windows text writes would turn CRLF into CRCRLF.
+                evidence.write_bytes(data.decode("utf-8", errors="replace").encode("utf-8"))
             except OSError as error:
                 evidence.write_text(f"Could not read {path.name}: {error}\n", encoding="utf-8")
 
