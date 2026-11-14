@@ -1,6 +1,7 @@
 """Pure parts of the Windows desktop harness (scripts/windows/desktop), runnable on any OS."""
 import hashlib
 import json
+import multiprocessing
 from pathlib import Path
 import re
 import shutil
@@ -31,6 +32,19 @@ from context import Fail, Skip  # noqa: E402
 
 SHA = "a" * 40
 OTHER = "b" * 40
+
+
+def fake_observer_worker(connection):
+    """Spawn-safe test peer for the parent guard's process handshake."""
+    connection.send(("ready", {"probes_seen": 1}))
+    if connection.recv() == "stop":
+        connection.send(("diagnostics", {"probes_seen": 2}))
+    connection.close()
+
+
+def fake_early_input_worker(connection):
+    connection.send(("user_input", "real keyboard input during startup"))
+    connection.close()
 
 
 def digest(data):
@@ -589,18 +603,18 @@ if __name__ == "__main__":
 
 
 class GuardMouseTests(unittest.TestCase):
-    """guard.Guard.mouse_event: the pure decision behind the low-level mouse hook."""
+    """The observer's pure decision behind the low-level mouse hook."""
 
     def test_injected_input_never_trips(self):
-        g = guard.Guard()
+        g = guard._HookObserver()
         self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, True, (0, 0)))
         self.assertIsNone(g.mouse_event(0x0201, True, (0, 0)))  # WM_LBUTTONDOWN, injected
 
     def test_real_button_trips(self):
-        self.assertEqual(guard.Guard().mouse_event(0x0201, False, (5, 5)), "real mouse button or wheel input")
+        self.assertEqual(guard._HookObserver().mouse_event(0x0201, False, (5, 5)), "real mouse button or wheel input")
 
     def test_real_drift_within_tolerance_is_ignored_and_beyond_trips(self):
-        g = guard.Guard()
+        g = guard._HookObserver()
         self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (100, 100)))
         self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (102, 99)))
         self.assertEqual(g.mouse_event(guard.WM_MOUSEMOVE, False, (110, 100)), "real mouse movement")
@@ -608,7 +622,7 @@ class GuardMouseTests(unittest.TestCase):
     def test_injected_move_reanchors_the_origin(self):
         # Real jitter at the old place, the harness moves the cursor far away, then a pixel of real
         # jitter where the cursor now is: not a person.
-        g = guard.Guard()
+        g = guard._HookObserver()
         self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (100, 100)))
         self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, True, (900, 700)))
         self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (901, 700)))
@@ -620,7 +634,7 @@ class GuardMouseTests(unittest.TestCase):
         self.assertLess(guard.PROBE_TIMEOUT, guard.PROBE_INTERVAL)
 
     def test_missing_liveness_probe_trips_without_reenabling_input(self):
-        watcher = guard.Guard()
+        watcher = guard._HookObserver()
         with mock.patch.object(guard, "PROBE_INTERVAL", 0.001), \
              mock.patch.object(guard, "PROBE_TIMEOUT", 0.001), \
              mock.patch.object(watcher, "_send_probe", return_value=True) as send:
@@ -630,6 +644,103 @@ class GuardMouseTests(unittest.TestCase):
         self.assertEqual(send.call_count, 1)
         self.assertEqual(send.call_args.args[0] & 0xFFFFFFFF, guard.PROBE_TAG)
         self.assertEqual(watcher.diagnostics()["probes_seen"], 0)
+
+    def test_first_probe_is_sent_before_the_interval(self):
+        watcher = guard._HookObserver()
+
+        def observed(_tag):
+            watcher._probe_seen.set()
+            return True
+
+        with mock.patch.object(guard, "PROBE_INTERVAL", 10), \
+             mock.patch.object(watcher, "_send_probe", side_effect=observed) as send:
+            thread = guard.threading.Thread(target=watcher._watch)
+            thread.start()
+            try:
+                self.assertTrue(watcher._first_probe_done.wait(0.2))
+                send.assert_called_once()
+            finally:
+                watcher._stopping.set()
+                thread.join(1)
+
+
+class GuardProcessTests(unittest.TestCase):
+    """The parent must not inject after the observer reports input or loses contact."""
+
+    def setUp(self):
+        self.parent, self.child = multiprocessing.Pipe()
+        self.guard = guard.Guard()
+        self.guard._connection = self.parent
+        self.alive = True
+        self.guard._process = SimpleNamespace(is_alive=lambda: self.alive)
+        self.addCleanup(self.parent.close)
+        self.addCleanup(self.child.close)
+
+    def test_probe_diagnostics_do_not_mask_real_input(self):
+        self.child.send(("ready", {"probes_seen": 21}))
+        self.child.send(("user_input", "real keyboard input"))
+        self.child.send(("diagnostics", {"probes_seen": 22}))
+        with self.assertRaisesRegex(guard.UserInput, "real keyboard input"):
+            self.guard.check()
+        self.assertFalse(self.guard.unavailable)
+        self.assertEqual(self.guard.diagnostics()["probes_seen"], 22)
+
+    def test_missed_probe_is_fail_closed(self):
+        self.child.send(("unavailable", "probe not observed"))
+        with self.assertRaisesRegex(guard.GuardUnavailable, "probe not observed"):
+            self.guard.check()
+        self.assertTrue(self.guard.unavailable)
+
+    def test_silent_observer_death_is_fail_closed(self):
+        self.alive = False
+        with self.assertRaisesRegex(guard.GuardUnavailable, "observer stopped"):
+            self.guard.check()
+
+    def test_pipe_loss_is_fail_closed_even_if_process_appears_alive(self):
+        self.child.close()
+        with self.assertRaisesRegex(guard.GuardUnavailable, "connection closed"):
+            self.guard.check()
+
+    def test_spawn_handshake_and_clean_stop(self):
+        spawned = guard.Guard()
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(guard, "_guard_worker", fake_observer_worker):
+            try:
+                spawned.start()
+                self.assertIs(win32._before_input.__self__, spawned)
+                spawned.check()
+            finally:
+                spawned.stop()
+        self.assertIsNone(win32._before_input)
+        self.assertEqual(spawned.diagnostics()["probes_seen"], 2)
+
+    def test_real_input_before_first_probe_aborts_start(self):
+        spawned = guard.Guard()
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(guard, "_guard_worker", fake_early_input_worker):
+            with self.assertRaisesRegex(guard.UserInput, "real keyboard input during startup"):
+                spawned.start()
+        self.assertIsNone(win32._before_input)
+
+    def test_worker_preserves_real_input_during_initial_probe(self):
+        class TouchedObserver:
+            tripped = guard.threading.Event()
+            reason = "real mouse button or wheel input"
+            unavailable = False
+
+            def start(self):
+                self.tripped.set()
+                raise RuntimeError("first probe interrupted")
+
+            def stop(self):
+                pass
+
+            def diagnostics(self):
+                return {"probes_seen": 0}
+
+        with mock.patch.object(guard, "_HookObserver", TouchedObserver):
+            guard._guard_worker(self.child)
+        self.assertEqual(self.parent.recv(), ("user_input", "real mouse button or wheel input"))
 
 
 class SettingsCheckTests(unittest.TestCase):

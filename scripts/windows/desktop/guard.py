@@ -1,21 +1,23 @@
 """Real-input guard: stop the run as soon as a person touches the keyboard or mouse.
 
-A dedicated thread installs low-level keyboard and mouse hooks (WH_KEYBOARD_LL / WH_MOUSE_LL)
-and pumps messages for them. Events the harness injects carry LLKHF_INJECTED / LLMHF_INJECTED;
+A separate observer process installs low-level keyboard and mouse hooks (WH_KEYBOARD_LL /
+WH_MOUSE_LL) on a dedicated message-pump thread. This keeps the Python callbacks independent of
+the harness's UI Automation/COM work and GIL. Events the harness injects carry LLKHF_INJECTED / LLMHF_INJECTED;
 anything without that flag is a real person, which trips the guard. Input is never blocked: the
 hooks only observe and pass every event on. The harness checks the guard before every injected
 event (win32.set_input_check) and while it waits (Guard.sleep, 50 ms steps), so a run stops
 within ~100 ms, run.py restores everything and marks the remaining checks aborted.
 
-Windows silently removes a low-level hook whose callback is too slow (LowLevelHooksTimeout), and
-the callbacks here need the GIL. A removed or delayed hook could make the guard fail open, so a
-watchdog thread injects a harmless probe once a second (key-up of an unassigned virtual key,
-tagged in dwExtraInfo) and trips the guard if it is not seen within PROBE_TIMEOUT.
+Windows silently removes a low-level hook whose callback is too slow (LowLevelHooksTimeout), so
+the observer injects a harmless probe before reporting ready, then once a second (key-up of an
+unassigned virtual key, tagged in dwExtraInfo). A missed probe or lost observer trips the parent
+guard fail closed.
 Mouse moves the harness injects re-anchor the drift origin, so a pixel of real jitter after the
 harness moved the cursor is compared with where the cursor really is.
 """
 import ctypes
 from ctypes import wintypes
+import multiprocessing
 import threading
 import time
 
@@ -61,7 +63,7 @@ def is_injected_mouse(flags):
     return bool(flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED))
 
 
-class Guard:
+class _HookObserver:
     def __init__(self):
         self.tripped = threading.Event()
         self.reason = ""
@@ -82,6 +84,7 @@ class Guard:
         self._expected_probe_tag = None
         self._probe_started = 0
         self._probe_seen = threading.Event()
+        self._first_probe_done = threading.Event()
         self._stopping = threading.Event()
         self._watchdog = None
 
@@ -91,6 +94,7 @@ class Guard:
             self.reason = reason
             self.unavailable = unavailable
             self.tripped.set()
+            self._first_probe_done.set()
 
     def _run(self):
         user32, kernel32 = win32.user32, win32.kernel32
@@ -137,6 +141,8 @@ class Guard:
         while self.error is None and user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
             user32.TranslateMessage(ctypes.byref(message))
             user32.DispatchMessageW(ctypes.byref(message))
+        if not self._stopping.is_set() and self.error is None:
+            self._trip("input guard hook message pump stopped", unavailable=True)
         for hook in self._hooks:
             if not user32.UnhookWindowsHookEx(hook):
                 # Normally means Windows had already removed the hook (callback timeout).
@@ -168,7 +174,7 @@ class Guard:
         return win32.user32.SendInput(1, array, ctypes.sizeof(win32.INPUT)) == 1
 
     def _watch(self):
-        while not self._stopping.wait(PROBE_INTERVAL):
+        while not self._stopping.is_set():
             if self.tripped.is_set():
                 return
             self._probe_seen.clear()
@@ -185,6 +191,9 @@ class Guard:
                            f"(SendInput {self.last_probe_send_ms} ms, {self.probes_seen} earlier probes seen); "
                            "hook may be delayed or removed; stopping for safety", unavailable=True)
                 return
+            self._first_probe_done.set()
+            if self._stopping.wait(PROBE_INTERVAL):
+                return
 
     # ------------------------------------------------------------ public
     def start(self):
@@ -193,13 +202,13 @@ class Guard:
         self._thread.start()
         if not self._ready.wait(5) or self.error:
             raise RuntimeError(f"Could not install the input guard hooks: {self.error}")
-        win32.set_input_check(self.check)
         self._watchdog = threading.Thread(target=self._watch, name="input-guard-watchdog", daemon=True)
         self._watchdog.start()
+        if not self._first_probe_done.wait(5) or self.tripped.is_set():
+            raise RuntimeError(f"Could not verify the input guard hooks: {self.reason or 'first probe not completed'}")
         return self
 
     def stop(self):
-        win32.set_input_check(None)
         self._stopping.set()
         if self._watchdog:
             self._watchdog.join(3)
@@ -218,6 +227,156 @@ class Guard:
 
     def sleep(self, seconds):
         """time.sleep that stops within 50 ms of real input."""
+        deadline = time.monotonic() + seconds
+        while True:
+            self.check()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            self.tripped.wait(min(0.05, remaining))
+
+
+def _guard_worker(connection):
+    """Own the hooks and their Python callbacks in a process without UIA/COM work."""
+    observer = _HookObserver()
+    try:
+        observer.start()
+        connection.send(("ready", observer.diagnostics()))
+        last_count = 0
+        while not observer.tripped.is_set():
+            if connection.poll(0.025) and connection.recv() == "stop":
+                return
+            if observer.probes_seen != last_count:
+                last_count = observer.probes_seen
+                connection.send(("diagnostics", observer.diagnostics()))
+        connection.send(("unavailable" if observer.unavailable else "user_input", observer.reason))
+    except Exception as error:  # noqa: BLE001 - report observer failure to the harness
+        try:
+            if observer.tripped.is_set():
+                connection.send(("unavailable" if observer.unavailable else "user_input", observer.reason))
+            else:
+                connection.send(("error", f"{type(error).__name__}: {error}"))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        observer.stop()
+        try:
+            connection.send(("diagnostics", observer.diagnostics()))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        connection.close()
+
+
+class Guard:
+    """Parent-side fail-closed view of the isolated input observer."""
+
+    def __init__(self):
+        self.tripped = threading.Event()
+        self.reason = ""
+        self.unavailable = False
+        self._ready = threading.Event()
+        self._stopping = threading.Event()
+        self._process = None
+        self._connection = None
+        self._listener = None
+        self._receive_lock = threading.Lock()
+        self._diagnostics = {"probes_seen": 0, "last_probe_latency_ms": None,
+                             "max_probe_latency_ms": 0, "last_probe_send_ms": None,
+                             "unhook_errors": []}
+
+    def _trip(self, reason, unavailable=False):
+        if not self.tripped.is_set():
+            self.reason = reason
+            self.unavailable = unavailable
+            self.tripped.set()
+
+    def _receive(self):
+        """Drain pending events under one lock; check() may race the listener."""
+        with self._receive_lock:
+            try:
+                while self._connection.poll():
+                    kind, value = self._connection.recv()
+                    if kind == "ready":
+                        self._diagnostics = value
+                        self._ready.set()
+                    elif kind == "diagnostics":
+                        self._diagnostics = value
+                    elif kind == "user_input":
+                        self._trip(value)
+                        self._ready.set()
+                    else:
+                        self._trip(value, unavailable=True)
+                        self._ready.set()
+            except (EOFError, OSError):
+                if not self._stopping.is_set():
+                    self._trip("input guard observer connection closed", unavailable=True)
+                self._ready.set()
+
+    def _listen(self):
+        while not self._stopping.is_set() and not self.tripped.is_set():
+            self._receive()
+            if self._process and not self._process.is_alive():
+                self._receive()
+                if not self.tripped.is_set() and not self._stopping.is_set():
+                    self._trip("input guard observer stopped", unavailable=True)
+                self._ready.set()
+                return
+            self.tripped.wait(0.025)
+
+    def start(self):
+        win32.require_windows()
+        context = multiprocessing.get_context("spawn")
+        self._connection, worker_connection = context.Pipe()
+        self._process = context.Process(target=_guard_worker, args=(worker_connection,),
+                                        name="input-guard-observer", daemon=True)
+        try:
+            self._process.start()
+        finally:
+            worker_connection.close()
+        self._listener = threading.Thread(target=self._listen, name="input-guard-listener", daemon=True)
+        self._listener.start()
+        if not self._ready.wait(5):
+            self.stop()
+            raise RuntimeError("Could not install the input guard hooks: observer not ready")
+        if self.tripped.is_set():
+            try:
+                self.check()
+            finally:
+                self.stop()
+        win32.set_input_check(self.check)
+        return self
+
+    def stop(self):
+        win32.set_input_check(None)
+        self._stopping.set()
+        if self._connection and self._process and self._process.is_alive():
+            try:
+                self._connection.send("stop")
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            self._process.join(3)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(3)
+        if self._listener:
+            self._listener.join(3)
+        if self._connection:
+            self._receive()
+            self._connection.close()
+            self._connection = None
+
+    def check(self):
+        if self._connection:
+            self._receive()
+        if self._process and not self._process.is_alive() and not self._stopping.is_set():
+            self._trip("input guard observer stopped", unavailable=True)
+        if self.tripped.is_set():
+            raise (GuardUnavailable if self.unavailable else UserInput)(self.reason)
+
+    def diagnostics(self):
+        return dict(self._diagnostics)
+
+    def sleep(self, seconds):
         deadline = time.monotonic() + seconds
         while True:
             self.check()
