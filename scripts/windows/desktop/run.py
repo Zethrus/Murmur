@@ -94,8 +94,10 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
     from murmur import StartupError
     results = []
     plan = [(attempt, check) for attempt in range(1, repeat + 1) for check in selected]
+    mark_guard = getattr(ctx.guard, "mark", lambda stage: None)
     for position, (attempt, check) in enumerate(plan):
         ctx.begin(check.id)
+        mark_guard(f"{check.id}:{attempt}:begin")
         mark = ctx.restorer.mark()
         started = time.monotonic()
         status, reason = report.PASS, ""
@@ -106,8 +108,15 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
             lookup(check)(ctx)
             ctx.guard.check()
         except UserInput as error:
+            mark_guard(f"{check.id}:{attempt}:guard-abort")
             kind = "input guard unavailable" if isinstance(error, GuardUnavailable) else "user input"
             reason = f"aborted: {kind} ({error})"
+            if check.id == "P4":
+                # Preserve the launch log at the P3 -> P4 handoff before restoration stops Murmur.
+                try:
+                    ctx.murmur.save_startup_diagnostics(ctx.artifact)
+                except Exception as diagnostic_error:  # noqa: BLE001 - retain the original guard loss
+                    ctx.note(f"startup diagnostics failed: {type(diagnostic_error).__name__}: {diagnostic_error}")
             results.append(report.Result(check.id, report.ABORTED, reason, check.title, check.group,
                                          check.best_effort, list(ctx.artifacts), list(ctx.notes),
                                          round(time.monotonic() - started, 1), attempt))
@@ -153,6 +162,7 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
         results.append(report.Result(check.id, status, reason, check.title, check.group, check.best_effort,
                                      list(ctx.artifacts), list(ctx.notes), round(time.monotonic() - started, 1),
                                      attempt))
+        mark_guard(f"{check.id}:{attempt}:end:{status}")
         log(f"[{check.id}] {status}{': ' + reason if reason else ''}")
         if startup_failure:
             for remaining_attempt, rest in plan[position + 1:]:
@@ -212,7 +222,8 @@ def main(argv=None):
             "windows": ".".join(map(str, sys.getwindowsversion()[:3])), "selection": [c.id for c in selected]}
     restorer = Restorer()
     results, aborted = [], ""
-    guard = Guard()
+    # Include hook/pump state in the actual suite report, where P4 has lost the probe.
+    guard = Guard(diagnostic=True)
     session = None
     try:
         print("Preparing fixtures and the test profile (no input yet)...")
@@ -229,6 +240,7 @@ def main(argv=None):
         if win32.idle_seconds() < BANNER_SECONDS:
             raise UserInput("input during the start countdown")
         guard.start()
+        meta["parent_desktop_context"] = win32.desktop_context()
         ctx = Context(build=build, session=session, fixtures=speech, goldens=golden.GoldenStore(), restorer=restorer,
                       guard=guard, out=out, work=work, hotkey=args.hotkey, cache=cache)
         results, aborted = run_checks(ctx, selected, args.repeat, checks.lookup)

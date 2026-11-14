@@ -189,16 +189,22 @@ def p3_first_run(ctx):
 
 
 def p4_components(ctx):
+    ctx.guard.mark("P4:ensure:begin")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
+    ctx.guard.mark("P4:ensure:end")
     window = ctx.murmur.page("Components")
+    ctx.guard.mark("P4:components:open")
     for name in ("Speech engine", "Tiny (English)"):
         state = badge(ctx, window, name)
+        ctx.guard.mark(f"P4:{name}:badge")
         if state != "Active":
             raise Fail(f"{name} is {state!r}, not Active")
         uia.invoke(uia.find(window, name_=f"Verify {name}", control_type_=uia.BUTTON, timeout=10, sleep=ctx.sleep))
+        ctx.guard.mark(f"P4:{name}:verify-invoked")
         ctx.sleep(0.5)
     names = wait_names(ctx, lambda: ctx.murmur.settings(), lambda n: n.count("Files verified.") >= 2
                        or any(x.startswith("Verification failed") for x in n), 120)
+    ctx.guard.mark("P4:verification:finished")
     ctx.screenshot(ctx.murmur.settings_hwnd(), "components.png")
     if names is None or any(x.startswith("Verification failed") for x in names):
         raise Fail("Verify did not report 'Files verified.' for both components")

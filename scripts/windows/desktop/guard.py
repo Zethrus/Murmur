@@ -412,6 +412,8 @@ class Guard:
         self._diagnostics = {"probes_seen": 0, "last_probe_latency_ms": None,
                              "max_probe_latency_ms": 0, "last_probe_send_ms": None,
                              "unhook_errors": []}
+        self._started_at = None
+        self._timeline = []
 
     def _trip(self, reason, unavailable=False):
         if not self.tripped.is_set():
@@ -454,6 +456,7 @@ class Guard:
 
     def start(self):
         win32.require_windows()
+        self._started_at = time.monotonic()
         context = multiprocessing.get_context("spawn")
         self._connection, worker_connection = context.Pipe()
         worker_args = (worker_connection, True) if self._diagnostic else (worker_connection,)
@@ -504,7 +507,27 @@ class Guard:
             raise (GuardUnavailable if self.unavailable else UserInput)(self.reason)
 
     def diagnostics(self):
-        return dict(self._diagnostics)
+        result = dict(self._diagnostics)
+        if self._diagnostic:
+            result["timeline"] = list(self._timeline)
+        return result
+
+    def mark(self, stage):
+        """Correlate a suite action with the observer's last reported probe and hook state."""
+        if not self._diagnostic:
+            return
+        if self._connection:
+            self._receive()
+        hook = self._diagnostics.get("hook_state", {})
+        self._timeline.append({
+            "stage": stage,
+            "elapsed_s": round(time.monotonic() - self._started_at, 3) if self._started_at else None,
+            "probes_seen": self._diagnostics.get("probes_seen", 0),
+            "keyboard_callbacks": hook.get("keyboard_callbacks"),
+            "heartbeat_received": hook.get("heartbeat_received"),
+            "observer_alive": self._process.is_alive() if self._process else False,
+            "tripped": self.tripped.is_set(),
+        })
 
     def sleep(self, seconds):
         deadline = time.monotonic() + seconds
@@ -522,6 +545,9 @@ class NoGuard:
     reason = ""
 
     def check(self):
+        pass
+
+    def mark(self, stage):
         pass
 
     def sleep(self, seconds):

@@ -17,6 +17,7 @@ HARNESS = Path(__file__).resolve().parents[1] / "windows" / "desktop"
 sys.path.insert(0, str(HARNESS))
 
 import catalog  # noqa: E402
+from checks import setup as setup_checks  # noqa: E402
 import fixtures  # noqa: E402
 import golden  # noqa: E402
 import guard  # noqa: E402
@@ -506,6 +507,28 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("input guard unavailable", aborted)
         self.assertEqual([r.status for r in results], [report.ABORTED, report.ABORTED])
 
+    def test_p4_guard_loss_records_exact_handoff_and_preserves_launch_evidence(self):
+        stages = []
+        self.ctx.guard = SimpleNamespace(check=lambda: None, mark=stages.append)
+        self.ctx.fixtures = {"A": SimpleNamespace(path=self.work / "a.wav")}
+
+        def lost_in_ensure(_wav):
+            raise guard.GuardUnavailable("probe lost during main session launch")
+
+        def save_startup(artifact):
+            artifact("startup-log.txt").write_text("main session starting\n", encoding="utf-8")
+
+        self.ctx.murmur = SimpleNamespace(ensure=lost_in_ensure, save_startup_diagnostics=save_startup)
+        with mock.patch.object(win32, "release_all"):
+            results, aborted = run.run_checks(self.ctx, catalog.select("P4,S1"), 1,
+                                               lambda check: setup_checks.p4_components if check.id == "P4"
+                                               else lambda _: None, log=lambda _: None)
+        self.assertEqual([r.status for r in results], [report.ABORTED, report.ABORTED])
+        self.assertIn("input guard unavailable", aborted)
+        self.assertEqual(stages, ["P4:1:begin", "P4:ensure:begin", "P4:1:guard-abort"])
+        self.assertEqual((self.work / "P4-startup-log.txt").read_text(), "main session starting\n")
+        self.assertIn(str(self.work / "P4-startup-log.txt"), results[0].artifacts)
+
     def test_startup_failure_preserves_evidence_and_stops_cascading_checks(self):
         session = murmur.MurmurSession(SimpleNamespace(), self.work, SimpleNamespace(), {})
         session.process = SimpleNamespace(pid=42, poll=lambda: 101)
@@ -688,6 +711,22 @@ class GuardMouseTests(unittest.TestCase):
         with mock.patch.object(win32, "input_desktop", return_value="Default"):
             state = watcher.diagnostics()["hook_state"]["desktop_context"]
         self.assertEqual(state, watcher._desktop_context)
+
+    def test_full_run_mark_snapshots_probe_state_without_clearing_guard_loss(self):
+        watcher = guard.Guard(diagnostic=True)
+        watcher._started_at = guard.time.monotonic()
+        watcher._process = SimpleNamespace(is_alive=lambda: True)
+        watcher._diagnostics = {"probes_seen": 21,
+                                "hook_state": {"keyboard_callbacks": 21, "heartbeat_received": 21}}
+        watcher.mark("P4:ensure:begin")
+        watcher._trip("probe lost", unavailable=True)
+        watcher.mark("P4:1:guard-abort")
+        timeline = watcher.diagnostics()["timeline"]
+        self.assertEqual([point["stage"] for point in timeline], ["P4:ensure:begin", "P4:1:guard-abort"])
+        self.assertEqual([point["probes_seen"] for point in timeline], [21, 21])
+        self.assertEqual([point["tripped"] for point in timeline], [False, True])
+        with self.assertRaises(guard.GuardUnavailable):
+            watcher.check()
 
     def test_diagnostic_records_only_injected_probe_candidates_and_exact_match(self):
         watcher = guard._HookObserver(diagnostic=True)
