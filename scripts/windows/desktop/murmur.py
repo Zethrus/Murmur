@@ -4,8 +4,9 @@ APPDATA and LOCALAPPDATA point into the run's work folder (platform::Paths::disc
 so config.toml, murmur.log and installed components never touch the owner's profile. Launches
 pass MURMUR_QA_WAV (a WAV replaces the microphone, release builds included), the development
 trust root plus its acknowledgement (the CI build's manifest is signed by a throwaway key) and
-MURMUR_LOG=debug. Murmur is single-instance, so preflight refuses to run while any other
-murmur.exe exists. WebView2 keeps its own data folder under the real %LOCALAPPDATA%.
+MURMUR_LOG=debug and RUST_BACKTRACE=1. Murmur is single-instance, so preflight refuses to
+run while any other murmur.exe exists. WebView2 keeps its own data folder under the real
+%LOCALAPPDATA%.
 """
 import json
 import os
@@ -28,6 +29,14 @@ SETTINGS_TITLE, OVERLAY_TITLE = "Murmur Settings", "Murmur Overlay"
 MODEL, MODEL_ID = "tiny.en", "speech-tiny.en"
 STATES = {"Listening": "listening", "Finding your words": "transcribing", "Done": "done", "mur": "idle",
           "Focus changed": "held"}
+
+
+class StartupError(RuntimeError):
+    """A launch cannot reach a required window; retain the session for diagnostics."""
+
+    def __init__(self, message, session):
+        super().__init__(message)
+        self.session = session
 
 
 class Build:
@@ -99,6 +108,8 @@ class MurmurSession:
         self.wav = None
         self.process = None
         self._log_offset = 0
+        self._launch_count = 0
+        self._launch_output = None
 
     # ------------------------------------------------------------ profile
     @property
@@ -134,7 +145,7 @@ class MurmurSession:
         env = dict(os.environ)
         env.update(APPDATA=str(self.appdata), LOCALAPPDATA=str(self.localappdata),
                    MURMUR_DEV_TRUST_ROOT=str(self.build.certificate),
-                   MURMUR_DEV_TRUST_ROOT_ACK=linux_components.ACK, MURMUR_LOG="debug")
+                   MURMUR_DEV_TRUST_ROOT_ACK=linux_components.ACK, MURMUR_LOG="debug", RUST_BACKTRACE="1")
         env.pop("MURMUR_QA_WAV", None)
         if wav is not None:
             env["MURMUR_QA_WAV"] = str(wav)
@@ -173,20 +184,70 @@ class MurmurSession:
             self.write_config(config)
         self.wav = wav
         self._log_offset = self.log_path.stat().st_size if self.log_path.exists() else 0
-        self.process = subprocess.Popen([str(self.app), *args], env=self.env(wav, extra_env), cwd=str(self.work))
+        self._launch_count += 1
+        self._launch_output = self.home / f"murmur-launch-{self._launch_count}.txt"
+        with self._launch_output.open("wb") as output:
+            try:
+                self.process = subprocess.Popen([str(self.app), *args], env=self.env(wav, extra_env),
+                                                cwd=str(self.work), stdout=output, stderr=subprocess.STDOUT)
+            except OSError as error:
+                raise StartupError(f"Murmur could not launch: {error}", self) from error
         if wait_ready:
-            if not win32.wait_for(lambda: self.overlay_hwnd(), 40, sleep=self.guard.sleep):
-                raise RuntimeError(f"Murmur did not show its overlay (exit code {self.process.poll()})")
+            self._wait_for_window(self.overlay_hwnd, "overlay")
             if "--background" not in args:
-                hwnd = win32.wait_for(self.settings_hwnd, 40, sleep=self.guard.sleep)
-                if not hwnd:
-                    raise RuntimeError("The Settings window did not appear")
+                hwnd = self._wait_for_window(self.settings_hwnd, "Settings window")
                 if not keep_settings:
                     self.guard.sleep(1.0)
                     win32.close_window(hwnd)
                     win32.wait_for(lambda: not self.settings_hwnd(), 5, sleep=self.guard.sleep)
             self.guard.sleep(1.5)  # engine and hotkeys come up
         return self
+
+    def _wait_for_window(self, find, label):
+        def ready_or_exited():
+            hwnd = find()
+            if hwnd:
+                return hwnd
+            code = self.process.poll()
+            if code is not None:
+                raise StartupError(f"Murmur exited before its {label} appeared (exit code {code})", self)
+            return 0
+
+        hwnd = win32.wait_for(ready_or_exited, 40, sleep=self.guard.sleep)
+        if not hwnd:
+            raise StartupError(f"Murmur did not show its {label} (exit code {self.process.poll()})", self)
+        return hwnd
+
+    def save_startup_diagnostics(self, artifact):
+        """Copy only this test process's launch evidence before its profile is removed."""
+        pid = self.process.pid if self.process else None
+        code = self.process.poll() if self.process else None
+        lines = [f"pid: {pid}", f"exit code: {code}", "top-level windows for this pid:"]
+        try:
+            windows = [w for w in win32.enum_windows(visible_only=False) if w[1] == pid] if pid else []
+            lines.extend(
+                f"  hwnd={hwnd} title={title!r} class={class_name!r} "
+                f"visible={bool(win32.user32.IsWindowVisible(hwnd))}"
+                for hwnd, _, title, class_name in windows
+            )
+            if not windows:
+                lines.append("  none")
+        except Exception as error:  # noqa: BLE001 - preserve the original startup failure
+            lines.append(f"  enumeration failed: {type(error).__name__}: {error}")
+        artifact("startup-windows.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        for suffix, path in (("startup-output.txt", self._launch_output),
+                             ("startup-log.txt", self.log_path)):
+            evidence = artifact(suffix)
+            if not path or not path.is_file():
+                evidence.write_text("No file was created for this launch.\n", encoding="utf-8")
+                continue
+            try:
+                data = path.read_bytes()
+                if suffix == "startup-log.txt":
+                    data = data[self._log_offset:]
+                evidence.write_text(data.decode("utf-8", errors="replace"), encoding="utf-8")
+            except OSError as error:
+                evidence.write_text(f"Could not read {path.name}: {error}\n", encoding="utf-8")
 
     def stop(self):
         if self.process is not None:

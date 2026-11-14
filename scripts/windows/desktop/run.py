@@ -6,7 +6,8 @@
 
 Runs in the logged-in desktop session (the `desktop` runner, or by hand). It takes the keyboard
 and mouse: any real input aborts the run within ~100 ms, everything it changed is restored and
-the remaining checks are marked "aborted: user input". Writes desktop-report.json,
+the remaining checks are marked "aborted: user input". A shared Murmur startup failure also
+stops later checks, after saving app output, log and window evidence. Writes desktop-report.json,
 desktop-report.md and the evidence PNG/TXT files to --out. Exit code 0 only when nothing failed
 or aborted; skipped checks carry their reason.
 """
@@ -79,10 +80,11 @@ def remove_tree(path, attempts=10):
 
 
 def run_checks(ctx, selected, repeat, lookup, log=print):
-    """Run every check `repeat` times; returns (attempts, aborted reason or '')."""
+    """Run checks until complete, user input, or shared startup failure."""
     from guard import UserInput
     import win32
     from context import Fail, Skip
+    from murmur import StartupError
     results = []
     plan = [(attempt, check) for attempt in range(1, repeat + 1) for check in selected]
     for position, (attempt, check) in enumerate(plan):
@@ -90,6 +92,7 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
         mark = ctx.restorer.mark()
         started = time.monotonic()
         status, reason = report.PASS, ""
+        startup_failure = ""
         log(f"[{check.id}] {check.title} (attempt {attempt})")
         try:
             lookup(check)(ctx)
@@ -109,6 +112,15 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
             status, reason = report.SKIPPED, str(error) or "skipped"
         except Fail as error:
             status, reason = report.FAIL, str(error) or "failed"
+        except StartupError as error:
+            trace = ctx.artifact("harness-error.txt")
+            trace.write_text(traceback.format_exc(), encoding="utf-8")
+            try:
+                error.session.save_startup_diagnostics(ctx.artifact)
+            except Exception as diagnostic_error:  # noqa: BLE001 - do not hide the launch failure
+                ctx.note(f"startup diagnostics failed: {type(diagnostic_error).__name__}: {diagnostic_error}")
+            status, reason = report.FAIL, f"startup failure: {error}"
+            startup_failure = f"blocked after {check.id} startup failure: {error}"
         except Exception as error:  # noqa: BLE001 - one broken check must not stop the run
             trace = ctx.artifact("harness-error.txt")
             trace.write_text(traceback.format_exc(), encoding="utf-8")
@@ -124,6 +136,11 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
                                      list(ctx.artifacts), list(ctx.notes), round(time.monotonic() - started, 1),
                                      attempt))
         log(f"[{check.id}] {status}{': ' + reason if reason else ''}")
+        if startup_failure:
+            for remaining_attempt, rest in plan[position + 1:]:
+                results.append(report.Result(rest.id, report.ABORTED, startup_failure, rest.title, rest.group,
+                                             rest.best_effort, attempt=remaining_attempt))
+            return results, startup_failure
     return results, ""
 
 

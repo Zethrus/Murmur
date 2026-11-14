@@ -7,7 +7,9 @@ import shutil
 import sys
 import tempfile
 import tomllib
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 import wave
 
 HARNESS = Path(__file__).resolve().parents[1] / "windows" / "desktop"
@@ -19,6 +21,7 @@ import golden  # noqa: E402
 import guard  # noqa: E402
 import handoff  # noqa: E402
 import manual  # noqa: E402
+import murmur  # noqa: E402
 import report  # noqa: E402
 import restore  # noqa: E402
 import run  # noqa: E402
@@ -461,6 +464,45 @@ class RunnerTests(unittest.TestCase):
                          [("H1", report.PASS), ("H2", report.ABORTED), ("H3", report.ABORTED),
                           ("H1", report.ABORTED), ("H2", report.ABORTED), ("H3", report.ABORTED)])
         self.assertEqual(undone, ["H1", "H2"])
+
+    def test_startup_failure_preserves_evidence_and_stops_cascading_checks(self):
+        session = murmur.MurmurSession(SimpleNamespace(), self.work, SimpleNamespace(), {})
+        session.process = SimpleNamespace(pid=42, poll=lambda: 101)
+        session._launch_output = self.work / "murmur-launch-1.txt"
+        session._launch_output.write_text("panic from app\n", encoding="utf-8")
+        session.log_path.parent.mkdir(parents=True)
+        session.log_path.write_text("old log\nnew launch error\n", encoding="utf-8")
+        session._log_offset = len("old log\n")
+
+        def startup(_):
+            raise murmur.StartupError("Murmur exited before its Settings window appeared (exit code 101)", session)
+
+        with mock.patch.object(murmur.win32, "enum_windows", return_value=[(12, 42, "Murmur Overlay", "WebView")]), \
+             mock.patch.object(murmur.win32, "user32", SimpleNamespace(IsWindowVisible=lambda _: False)):
+            results, blocked, undone = self.run_with({"P3": startup}, "P3,P4,S1")
+        self.assertEqual([r.status for r in results], [report.FAIL, report.ABORTED, report.ABORTED])
+        self.assertIn("P3 startup failure", blocked)
+        self.assertEqual(undone, ["P3"])
+        self.assertEqual((self.work / "P3-startup-output.txt").read_text(), "panic from app\n")
+        self.assertEqual((self.work / "P3-startup-log.txt").read_text(), "new launch error\n")
+        self.assertIn("Murmur Overlay", (self.work / "P3-startup-windows.txt").read_text())
+        self.assertIn(str(self.work / "P3-startup-log.txt"), results[0].artifacts)
+
+    def test_startup_window_wait_reports_early_process_exit(self):
+        session = murmur.MurmurSession(SimpleNamespace(), self.work, SimpleNamespace(sleep=lambda _: None), {})
+        session.process = SimpleNamespace(poll=lambda: 101)
+        with mock.patch.object(murmur.win32, "wait_for", side_effect=lambda predicate, *_args, **_kwargs: predicate()):
+            with self.assertRaisesRegex(murmur.StartupError, "exit code 101") as raised:
+                session._wait_for_window(lambda: 0, "Settings window")
+        self.assertIs(raised.exception.session, session)
+
+    def test_launch_env_requests_backtrace_in_the_isolated_profile(self):
+        session = murmur.MurmurSession(SimpleNamespace(certificate=self.work / "ci.asc"), self.work,
+                                       SimpleNamespace(), {})
+        env = session.env()
+        self.assertEqual(env["RUST_BACKTRACE"], "1")
+        self.assertEqual(env["APPDATA"], str(session.appdata))
+        self.assertEqual(env["LOCALAPPDATA"], str(session.localappdata))
 
     def test_preflight_reports_every_problem(self):
         class FakeWin32:
