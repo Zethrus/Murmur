@@ -223,6 +223,20 @@ class DesktopWorkflowTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", self.text)
         self.assertNotIn("secrets.", self.text)
 
+    def test_guard_diagnostic_uses_same_owner_only_runner_without_build(self):
+        trigger = self.text.split("\npermissions:")[0].split("\non:\n", 1)[1]
+        self.assertIn("      guard_diagnostic:\n", trigger)
+        self.assertIn("        type: boolean\n", trigger)
+        for name in ("Harness virtual environment (hash-locked dependencies)",
+                     "Verify the handed-over build (SHA256SUMS and the build's own job log)",
+                     "Preflight (unlocked session, idle 60 s, no other Murmur or Notepad)",
+                     "Run the desktop checks (takes the keyboard and mouse; real input aborts)"):
+            self.assertIn("if: ${{ !inputs.guard_diagnostic }}", step("windows-desktop.yml", name))
+        diagnostic = step("windows-desktop.yml", "Diagnose the input guard (stdlib only; no app launch)")
+        self.assertIn("if: ${{ inputs.guard_diagnostic }}", diagnostic)
+        self.assertIn("& py -3.12 scripts/windows/desktop/guard_diagnostic.py", diagnostic)
+        self.assertNotIn("pip install", diagnostic)
+
     def test_build_workflows_never_target_the_desktop_runner(self):
         for workflow in WORKFLOWS.glob("*.yml"):
             if workflow.name != "windows-desktop.yml":

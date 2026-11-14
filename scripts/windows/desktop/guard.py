@@ -10,7 +10,7 @@ within ~100 ms, run.py restores everything and marks the remaining checks aborte
 
 Windows silently removes a low-level hook whose callback is too slow (LowLevelHooksTimeout), so
 the observer injects a harmless probe before reporting ready, then once a second (key-up of an
-unassigned virtual key, tagged in dwExtraInfo). A missed probe or lost observer trips the parent
+reserved virtual key, tagged in dwExtraInfo). A missed probe or lost observer trips the parent
 guard fail closed.
 Mouse moves the harness injects re-anchor the drift origin, so a pixel of real jitter after the
 harness moved the cursor is compared with where the cursor really is.
@@ -18,6 +18,7 @@ harness moved the cursor is compared with where the cursor really is.
 import ctypes
 from ctypes import wintypes
 import multiprocessing
+import os
 import threading
 import time
 
@@ -30,7 +31,7 @@ WM_QUIT = 0x0012
 WM_MOUSEMOVE = 0x0200
 # A real mouse that only drifts by a pixel or two (desk vibration) is not treated as a person.
 MOVE_TOLERANCE = 3
-# Liveness probe: key-up of an unassigned virtual key, tagged so it is recognised exactly.
+# Liveness probe: key-up of a reserved virtual key, tagged so it is recognised exactly.
 PROBE_VK = 0x88
 PROBE_TAG = 0x4D55524D  # "MURM"
 PROBE_INTERVAL = 1.0
@@ -64,7 +65,7 @@ def is_injected_mouse(flags):
 
 
 class _HookObserver:
-    def __init__(self):
+    def __init__(self, diagnostic=False):
         self.tripped = threading.Event()
         self.reason = ""
         self.unavailable = False
@@ -87,6 +88,34 @@ class _HookObserver:
         self._first_probe_done = threading.Event()
         self._stopping = threading.Event()
         self._watchdog = None
+        self._diagnostic = diagnostic
+        self._probe_events = []
+        self._keyboard_callbacks = 0
+        self._injected_key_events = 0
+        self._mouse_callbacks = 0
+        self._pump_started = False
+        self._pump_result = None
+        self._pump_error = None
+        self._installed_hooks = 0
+        self._last_send_result = None
+        self._last_send_error = None
+
+    def _record_injected_key(self, message, event):
+        """Keep only our probe candidates; never retain a person's keystrokes."""
+        if not self._diagnostic or not is_injected_key(event.flags):
+            return
+        self._injected_key_events += 1
+        if event.vkCode != PROBE_VK and event.dwExtraInfo & 0xFFFFFFFF != PROBE_TAG:
+            return
+        if len(self._probe_events) == 8:
+            self._probe_events.pop(0)
+        self._probe_events.append({"message": int(message), "vk": int(event.vkCode),
+                                   "scan": int(event.scanCode), "flags": int(event.flags),
+                                   "extra_info": f"0x{event.dwExtraInfo:016x}",
+                                   "expected_tag": f"0x{self._expected_probe_tag:016x}"
+                                   if self._expected_probe_tag is not None else None,
+                                   "matches_expected": event.vkCode == PROBE_VK
+                                   and event.dwExtraInfo == self._expected_probe_tag})
 
     # ------------------------------------------------------------ hook thread
     def _trip(self, reason, unavailable=False):
@@ -109,18 +138,22 @@ class _HookObserver:
 
         def keyboard(code, wparam, lparam):
             if code >= 0:
+                self._keyboard_callbacks += 1
                 event = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 if not is_injected_key(event.flags):
                     self._trip(f"real keyboard input (virtual key 0x{event.vkCode:02X})")
-                elif event.vkCode == PROBE_VK and event.dwExtraInfo == self._expected_probe_tag:
-                    self.probes_seen += 1
-                    self.last_probe_latency_ms = round((time.monotonic() - self._probe_started) * 1000)
-                    self.max_probe_latency_ms = max(self.max_probe_latency_ms, self.last_probe_latency_ms)
-                    self._probe_seen.set()
+                else:
+                    self._record_injected_key(wparam, event)
+                    if event.vkCode == PROBE_VK and event.dwExtraInfo == self._expected_probe_tag:
+                        self.probes_seen += 1
+                        self.last_probe_latency_ms = round((time.monotonic() - self._probe_started) * 1000)
+                        self.max_probe_latency_ms = max(self.max_probe_latency_ms, self.last_probe_latency_ms)
+                        self._probe_seen.set()
             return user32.CallNextHookEx(None, code, wparam, lparam)
 
         def mouse(code, wparam, lparam):
             if code >= 0:
+                self._mouse_callbacks += 1
                 event = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
                 reason = self.mouse_event(wparam, is_injected_mouse(event.flags), (event.pt.x, event.pt.y))
                 if reason:
@@ -135,10 +168,18 @@ class _HookObserver:
                 self.error = ctypes.WinError(ctypes.get_last_error())
                 break
             self._hooks.append(hook)
+            self._installed_hooks += 1
         self._thread_id = kernel32.GetCurrentThreadId()
         self._ready.set()
         message = wintypes.MSG()
-        while self.error is None and user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+        self._pump_started = self.error is None
+        while self.error is None:
+            result = user32.GetMessageW(ctypes.byref(message), None, 0, 0)
+            if result <= 0:
+                self._pump_result = result
+                if result < 0:
+                    self._pump_error = ctypes.get_last_error()
+                break
             user32.TranslateMessage(ctypes.byref(message))
             user32.DispatchMessageW(ctypes.byref(message))
         if not self._stopping.is_set() and self.error is None:
@@ -171,7 +212,11 @@ class _HookObserver:
         event.ki = win32.KEYBDINPUT(wVk=PROBE_VK, wScan=0, dwFlags=win32.KEYEVENTF_KEYUP, time=0,
                                     dwExtraInfo=tag)
         array = (win32.INPUT * 1)(event)
-        return win32.user32.SendInput(1, array, ctypes.sizeof(win32.INPUT)) == 1
+        sent = win32.user32.SendInput(1, array, ctypes.sizeof(win32.INPUT))
+        if self._diagnostic:
+            self._last_send_result = sent
+            self._last_send_error = ctypes.get_last_error() if sent != 1 else None
+        return sent == 1
 
     def _watch(self):
         while not self._stopping.is_set():
@@ -221,9 +266,31 @@ class _HookObserver:
             raise (GuardUnavailable if self.unavailable else UserInput)(self.reason)
 
     def diagnostics(self):
-        return {"probes_seen": self.probes_seen, "last_probe_latency_ms": self.last_probe_latency_ms,
-                "max_probe_latency_ms": self.max_probe_latency_ms, "last_probe_send_ms": self.last_probe_send_ms,
-                "unhook_errors": self.unhook_errors}
+        result = {"probes_seen": self.probes_seen, "last_probe_latency_ms": self.last_probe_latency_ms,
+                  "max_probe_latency_ms": self.max_probe_latency_ms, "last_probe_send_ms": self.last_probe_send_ms,
+                  "unhook_errors": self.unhook_errors}
+        if self._diagnostic:
+            result["hook_state"] = {"process_id": os.getpid(), "thread_id": self._thread_id,
+                                    "installed_hooks": self._installed_hooks, "pump_started": self._pump_started,
+                                    "pump_result": self._pump_result, "pump_error": self._pump_error,
+                                    "last_send_result": self._last_send_result,
+                                    "last_send_error": self._last_send_error,
+                                    "keyboard_callbacks": self._keyboard_callbacks,
+                                    "injected_key_events": self._injected_key_events,
+                                    "mouse_callbacks": self._mouse_callbacks,
+                                    "input_desktop": win32.input_desktop(),
+                                    "pointer_bits": ctypes.sizeof(ctypes.c_void_p) * 8,
+                                    "input_size": ctypes.sizeof(win32.INPUT),
+                                    "input_union_offset": win32.INPUT.u.offset,
+                                    "key_input_size": ctypes.sizeof(win32.KEYBDINPUT),
+                                    "key_input_extra_offset": win32.KEYBDINPUT.dwExtraInfo.offset,
+                                    "key_hook_size": ctypes.sizeof(KBDLLHOOKSTRUCT),
+                                    "key_hook_extra_offset": KBDLLHOOKSTRUCT.dwExtraInfo.offset}
+            result["expected_probe"] = {"vk": PROBE_VK, "sequence": self._probe_sequence,
+                                        "tag": f"0x{self._expected_probe_tag:016x}"
+                                        if self._expected_probe_tag is not None else None}
+            result["probe_events"] = list(self._probe_events)
+        return result
 
     def sleep(self, seconds):
         """time.sleep that stops within 50 ms of real input."""
@@ -236,9 +303,9 @@ class _HookObserver:
             self.tripped.wait(min(0.05, remaining))
 
 
-def _guard_worker(connection):
+def _guard_worker(connection, diagnostic=False):
     """Own the hooks and their Python callbacks in a process without UIA/COM work."""
-    observer = _HookObserver()
+    observer = _HookObserver(diagnostic=diagnostic) if diagnostic else _HookObserver()
     try:
         observer.start()
         connection.send(("ready", observer.diagnostics()))
@@ -270,7 +337,7 @@ def _guard_worker(connection):
 class Guard:
     """Parent-side fail-closed view of the isolated input observer."""
 
-    def __init__(self):
+    def __init__(self, diagnostic=False):
         self.tripped = threading.Event()
         self.reason = ""
         self.unavailable = False
@@ -280,6 +347,7 @@ class Guard:
         self._connection = None
         self._listener = None
         self._receive_lock = threading.Lock()
+        self._diagnostic = diagnostic
         self._diagnostics = {"probes_seen": 0, "last_probe_latency_ms": None,
                              "max_probe_latency_ms": 0, "last_probe_send_ms": None,
                              "unhook_errors": []}
@@ -327,7 +395,8 @@ class Guard:
         win32.require_windows()
         context = multiprocessing.get_context("spawn")
         self._connection, worker_connection = context.Pipe()
-        self._process = context.Process(target=_guard_worker, args=(worker_connection,),
+        worker_args = (worker_connection, True) if self._diagnostic else (worker_connection,)
+        self._process = context.Process(target=_guard_worker, args=worker_args,
                                         name="input-guard-observer", daemon=True)
         try:
             self._process.start()

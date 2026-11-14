@@ -20,6 +20,7 @@ import catalog  # noqa: E402
 import fixtures  # noqa: E402
 import golden  # noqa: E402
 import guard  # noqa: E402
+import guard_diagnostic  # noqa: E402
 import handoff  # noqa: E402
 import manual  # noqa: E402
 import murmur  # noqa: E402
@@ -44,6 +45,13 @@ def fake_observer_worker(connection):
 
 def fake_early_input_worker(connection):
     connection.send(("user_input", "real keyboard input during startup"))
+    connection.close()
+
+
+def fake_diagnostic_worker(connection, diagnostic):
+    connection.send(("ready", {"probes_seen": 1, "diagnostic": diagnostic}))
+    if connection.recv() == "stop":
+        connection.send(("diagnostics", {"probes_seen": 2, "diagnostic": diagnostic}))
     connection.close()
 
 
@@ -582,6 +590,17 @@ class RunnerTests(unittest.TestCase):
         (self.work / "build.json").write_text("{}")
         self.assertEqual(len(run.preflight(self.work, catalog.select("F1"), FakeWin32())), 3)
 
+    def test_guard_diagnostic_preflight_needs_no_build_and_refuses_busy_desktop(self):
+        fake = SimpleNamespace(input_desktop=lambda: "Default", pids=lambda _: [], idle_seconds=lambda: 61.0)
+        self.assertEqual(run.preflight_desktop(fake), [])
+        fake.idle_seconds = lambda: 5.0
+        problems = run.preflight_desktop(fake)
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=problems):
+            result = guard_diagnostic.diagnose(1)
+        self.assertEqual(result["status"], "preflight_refused")
+        self.assertIn("idle for 60", "\n".join(result["problems"]))
+
 
 class ManualTests(unittest.TestCase):
     def test_answers_items_and_results(self):
@@ -629,9 +648,37 @@ class GuardMouseTests(unittest.TestCase):
         self.assertIsNone(g.mouse_event(guard.WM_MOUSEMOVE, False, (902, 701)))
         self.assertEqual(g.mouse_event(guard.WM_MOUSEMOVE, False, (920, 701)), "real mouse movement")
 
-    def test_probe_is_an_unassigned_key_with_a_tag(self):
-        self.assertEqual(guard.PROBE_VK, 0x88)  # reserved/unassigned virtual-key code
+    def test_probe_is_a_reserved_key_with_a_tag(self):
+        self.assertEqual(guard.PROBE_VK, 0x88)  # reserved virtual-key code
         self.assertLess(guard.PROBE_TIMEOUT, guard.PROBE_INTERVAL)
+
+    def test_diagnostic_records_only_injected_probe_candidates_and_exact_match(self):
+        watcher = guard._HookObserver(diagnostic=True)
+        watcher._expected_probe_tag = guard.PROBE_TAG | (2 << 32)
+        real = SimpleNamespace(vkCode=0x41, scanCode=30, flags=0, dwExtraInfo=0)
+        unrelated = SimpleNamespace(vkCode=0x41, scanCode=30, flags=guard.LLKHF_INJECTED,
+                                    dwExtraInfo=0)
+        wrong_tag = SimpleNamespace(vkCode=guard.PROBE_VK, scanCode=0, flags=guard.LLKHF_INJECTED,
+                                    dwExtraInfo=guard.PROBE_TAG | (1 << 32))
+        exact = SimpleNamespace(vkCode=guard.PROBE_VK, scanCode=0, flags=guard.LLKHF_INJECTED,
+                                dwExtraInfo=watcher._expected_probe_tag)
+        for event in (real, unrelated, wrong_tag, exact):
+            watcher._record_injected_key(0x101, event)
+        self.assertEqual(watcher._injected_key_events, 3)
+        self.assertEqual([item["matches_expected"] for item in watcher._probe_events], [False, True])
+        self.assertNotIn("0x41", str(watcher._probe_events))
+
+    def test_diagnostic_redacts_real_key_reason(self):
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic.guard, "Guard") as factory:
+            instance = factory.return_value
+            instance.start.side_effect = guard.UserInput("real keyboard input (virtual key 0x41)")
+            instance.diagnostics.return_value = {"probes_seen": 0}
+            result = guard_diagnostic.diagnose(1)
+        self.assertEqual(result["status"], "real_input")
+        self.assertNotIn("0x41", str(result))
+        instance.stop.assert_called_once()
 
     def test_missing_liveness_probe_trips_without_reenabling_input(self):
         watcher = guard._HookObserver()
@@ -712,6 +759,17 @@ class GuardProcessTests(unittest.TestCase):
             finally:
                 spawned.stop()
         self.assertIsNone(win32._before_input)
+        self.assertEqual(spawned.diagnostics()["probes_seen"], 2)
+
+    def test_diagnostic_flag_reaches_isolated_worker(self):
+        spawned = guard.Guard(diagnostic=True)
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(guard, "_guard_worker", fake_diagnostic_worker):
+            try:
+                spawned.start()
+                self.assertTrue(spawned.diagnostics()["diagnostic"])
+            finally:
+                spawned.stop()
         self.assertEqual(spawned.diagnostics()["probes_seen"], 2)
 
     def test_real_input_before_first_probe_aborts_start(self):

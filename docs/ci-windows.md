@@ -260,6 +260,16 @@ unlocked, 60 s without input, no other `murmur.exe`, Notepad closed), shows a
 (same folder layout): `python scripts\windows\desktop\run.py --build <verified
 copy> --out <dir> [--only H1,F2] [--group focus] [--repeat 3]`.
 
+For an input-guard failure before the checks, dispatch the same workflow with
+`-f guard_diagnostic=true` and the matching `sha`. This branch skips the build,
+venv and app launch. It requires the owner's session to be unlocked and idle for
+60 seconds with no Murmur running, then runs the isolated guard for a 30-second
+probe window. It does not close any app. The local `guard-diagnostic.json` reports
+hook and message-pump state, ctypes structure sizes, SendInput result, callback
+counts, and up to eight recent **injected probe candidates** with their tag
+comparison. It never records real key fields. A missing or mismatched probe is
+still a failure; the diagnostic does not relax the guard.
+
 ### Reading the report
 
 The job summary shows `desktop-report.md`: one row per checklist id with

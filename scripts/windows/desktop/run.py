@@ -47,11 +47,9 @@ def base_config(hotkey):
     }
 
 
-def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
-    """Problems that prevent a safe run (empty list = go)."""
+def preflight_desktop(win32, idle_needed=IDLE_SECONDS):
+    """Shared safety checks before either desktop workflow sends input."""
     problems = []
-    if not (Path(build_dir) / "build.json").is_file():
-        problems.append(f"{build_dir} is not a verified build (run handoff.py first)")
     desktop = win32.input_desktop()
     if desktop != "Default":
         problems.append(f"the workstation is locked or on a secure desktop (input desktop: {desktop})")
@@ -59,11 +57,20 @@ def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
     if running:
         problems.append(f"another Murmur is running (pid {', '.join(map(str, running))}); quit it from the tray "
                         "(single instance would hand the test launch to it)")
-    if NOTEPAD_CHECKS & {c.id for c in selected} and win32.pids("Notepad.exe"):
-        problems.append("Notepad is running; close it (the Notepad checks open and close their own windows)")
     idle = win32.idle_seconds()
     if idle < idle_needed:
         problems.append(f"the desktop was used {idle:.0f} s ago; it must be idle for {idle_needed} s")
+    return problems
+
+
+def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
+    """Problems that prevent a safe run (empty list = go)."""
+    problems = []
+    if not (Path(build_dir) / "build.json").is_file():
+        problems.append(f"{build_dir} is not a verified build (run handoff.py first)")
+    problems.extend(preflight_desktop(win32, idle_needed))
+    if NOTEPAD_CHECKS & {c.id for c in selected} and win32.pids("Notepad.exe"):
+        problems.append("Notepad is running; close it (the Notepad checks open and close their own windows)")
     return problems
 
 
