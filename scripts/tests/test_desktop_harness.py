@@ -20,6 +20,7 @@ sys.path.insert(0, str(HARNESS))
 import catalog  # noqa: E402
 from checks import setup as setup_checks  # noqa: E402
 from checks import insertion as insertion_checks  # noqa: E402
+from checks import hotkeys as hotkey_checks  # noqa: E402
 from checks import microphone as microphone_checks  # noqa: E402
 import fixtures  # noqa: E402
 import golden  # noqa: E402
@@ -124,6 +125,55 @@ class ImportTests(unittest.TestCase):
         pad.win32.activate.assert_called_once_with(42, click_at=None)
         document.SetFocus.assert_called_once_with()
         pad.win32.click.assert_not_called()
+
+    def test_opt_in_hotkey_probe_samples_releases_and_preserves_exact_oracle(self):
+        self.assertNotIn("H8", [check.id for check in catalog.select()])
+        self.assertEqual([check.id for check in catalog.select("H8")], ["H8"])
+        phases = []
+        pad = SimpleNamespace(focus=mock.Mock(), wait_text=mock.Mock(return_value="partial"))
+        session = SimpleNamespace(ensure=mock.Mock(), wait_state=mock.Mock(return_value=True))
+        ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
+                              notepad=lambda _: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
+                              observed_text=lambda: "full", settle=mock.Mock())
+        with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
+             mock.patch.object(win32, "key_down") as down, \
+             mock.patch.object(win32, "key_up") as up, \
+             mock.patch.object(win32, "release_all") as release:
+            returned_pad, difference = hotkey_checks._notepad_focus_trial(ctx, "Ctrl+Alt+Shift+F9", "alt", phases)
+        self.assertIs(returned_pad, pad)
+        self.assertTrue(difference)
+        self.assertEqual([phase["stage"] for phase in phases],
+                         ["before modifiers", "before F9 down", "F9 held", "listening", "before F9 up",
+                          "after F9 up", "after shift up", "after alt up", "after ctrl up", "before delivery wait",
+                          "after delivery wait"])
+        self.assertEqual(down.call_args_list, [mock.call("ctrl", "alt", "shift"), mock.call("f9")])
+        self.assertEqual(up.call_args_list, [mock.call("f9"), mock.call("shift"), mock.call("alt"),
+                                              mock.call("ctrl")])
+        release.assert_called_once_with()
+
+    def test_drag_sampling_keeps_held_geometry_assertion(self):
+        samples = []
+        with mock.patch.object(win32, "mouse_move"), mock.patch.object(win32, "mouse_down"), \
+             mock.patch.object(win32, "mouse_up") as up, mock.patch.object(win32.time, "sleep"):
+            win32.drag((100, 100), (50, 50), steps=4, release=False,
+                       sample=lambda stage, step: samples.append((stage, step)))
+        self.assertEqual(samples, [("at-start", 0), ("button-down", 0), ("held-before-move", 0),
+                                   ("moving", 1), ("moving", 2), ("moving", 4)])
+        up.assert_not_called()
+
+    def test_hotkey_probe_records_both_trials_even_when_alt_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pads = [SimpleNamespace(close=mock.Mock()), SimpleNamespace(close=mock.Mock())]
+            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix)
+            with mock.patch.object(hotkey_checks, "_notepad_focus_trial",
+                                   side_effect=[(pads[0], "wrong text"), (pads[1], None)]) as trial:
+                with self.assertRaisesRegex(Fail, "alt: wrong text"):
+                    hotkey_checks.h8_focus_phases(ctx)
+            self.assertEqual(trial.call_count, 2)
+            self.assertEqual([pad.close.call_count for pad in pads], [1, 1])
+            evidence = json.loads((Path(directory) / "focus-phases.json").read_text())
+            self.assertEqual(evidence["alt"]["difference"], "wrong text")
+            self.assertIsNone(evidence["no-alt"]["difference"])
 
     def test_overlay_focus_check_refuses_to_blame_click_when_editor_already_lost_focus(self):
         from checks import overlay as checks_overlay
@@ -454,10 +504,11 @@ class ConfigWriterTests(unittest.TestCase):
 
 class CatalogTests(unittest.TestCase):
     def test_47_automated_checks_with_unique_ids(self):
-        ids = [c.id for c in catalog.CHECKS]
+        ids = [c.id for c in catalog.select()]
         self.assertEqual(len(ids), 47)
         self.assertEqual(len(set(ids)), 47)
-        self.assertEqual({c.id for c in catalog.CHECKS if c.best_effort}, {"T1", "T2", "I3", "K1"})
+        self.assertEqual({c.id for c in catalog.select() if c.best_effort}, {"T1", "T2", "I3", "K1"})
+        self.assertEqual(len({c.id for c in catalog.CHECKS}), len(catalog.CHECKS))
 
     def test_every_check_function_exists_in_its_group_module(self):
         for check in catalog.CHECKS:

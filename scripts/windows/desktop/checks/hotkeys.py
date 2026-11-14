@@ -1,7 +1,9 @@
-"""H1-H7: hold, release orders, B8 Shift, toggle, Escape, conflicts, code hotkey."""
+"""H1-H7 checklist checks and opt-in H8 Notepad focus diagnostic."""
 import json
 import re
+import time
 
+import golden
 import win32
 from checks.common import BLOCKED_HOTKEY, CODE_HOTKEY, SHIFT_HOTKEY
 from context import Fail
@@ -21,6 +23,89 @@ def h1_hold(ctx):
         win32.tap("esc")
         raise Fail("Notepad's menu was activated by the hotkey release")
     ctx.expect_delivery(text, "Notepad")
+
+
+def _focus_phase(pad, stage):
+    """Observe only: never send input or repair focus during a delivery."""
+    focused = pad.uia.focused()
+    foreground = win32.foreground()
+    try:
+        editor_focused = pad.editor_focused()
+        editor_focus_error = None
+    except Exception as error:  # noqa: BLE001 - stale UIA element must not end the probe
+        editor_focused = None
+        editor_focus_error = f"{type(error).__name__}: {error}"
+    target_chars = None
+    if stage == "before delivery wait":
+        try:
+            target_chars = len(pad.text())
+        except Exception:  # noqa: BLE001 - document can rebuild during injection
+            pass
+    return {"stage": stage, "time": time.time(), "foreground": hex(foreground),
+            "foreground_title": win32.window_text(foreground),
+            "focus": pad.uia.describe(focused),
+            "editor_focused": editor_focused, "editor_focus_error": editor_focus_error,
+            "target_chars": target_chars,
+            "menu_focused": bool(focused) and pad.uia.control_type(focused) in
+            (pad.uia.MENU, pad.uia.MENUBAR, pad.uia.MENUITEM),
+            "modifiers_down": win32.keys_down(),
+            "f9_down": "f9" in win32.keys_down(("f9",))}
+
+
+def _notepad_focus_trial(ctx, spec, name, phases):
+    ctx.murmur.ensure(ctx.fixtures["A"].path, {"general": {"hotkey": spec}})
+    pad = ctx.notepad(name)
+    pad.focus()
+    sample = lambda stage: phases.append(_focus_phase(pad, stage))
+    modifiers, key = win32.parse_combo(spec)
+    ctx.observe_delivery("A")
+    try:
+        sample("before modifiers")
+        win32.key_down(*modifiers)
+        sample("before F9 down")
+        win32.key_down(key)
+        sample("F9 held")
+        if not ctx.murmur.wait_state("listening", 5):
+            raise Fail(f"{name}: dictation did not start")
+        sample("listening")
+        ctx.sleep(ctx.fixtures["A"].speech_seconds + 0.8)
+        sample("before F9 up")
+        win32.key_up(key)
+        sample("after F9 up")
+        ctx.sleep(0.05)
+        for modifier in reversed(modifiers):
+            win32.key_up(modifier)
+            sample(f"after {modifier} up")
+        sample("before delivery wait")
+        expected = ctx.observed_text()
+        actual = pad.wait_text(timeout=8, stable=1.2, sleep=ctx.sleep)
+        ctx.settle()
+        sample("after delivery wait")
+        difference = golden.compare(expected, actual)
+        return pad, difference
+    finally:
+        # The run's fail-closed guard handles user input. This only releases keys owned by
+        # the harness if sampling or dictation fails before the normal key-up sequence.
+        win32.release_all()
+
+
+def h8_focus_phases(ctx):
+    """Opt-in native probe for Notepad's Alt-menu failure; keeps the exact history oracle."""
+    results = {}
+    artifact = ctx.artifact("focus-phases.json")
+    try:
+        for name, spec in (("alt", "Ctrl+Alt+Shift+F9"), ("no-alt", SHIFT_HOTKEY)):
+            results[name] = {"hotkey": spec, "phases": [], "difference": None}
+            pad, difference = _notepad_focus_trial(ctx, spec, name, results[name]["phases"])
+            results[name]["difference"] = difference
+            # Windows 11 Notepad may reuse the same top-level window for another tab.
+            # Close this harness-owned document before starting the comparison trial.
+            pad.close()
+    finally:
+        artifact.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    differences = [f"{name}: {result['difference']}" for name, result in results.items() if result["difference"]]
+    if differences:
+        raise Fail("; ".join(differences))
 
 
 def h2_release_order(ctx):

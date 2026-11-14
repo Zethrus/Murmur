@@ -327,15 +327,23 @@ def click(x, y, button="left", settle=0.05):
     mouse_up(button)
 
 
-def drag(start, end, steps=20, hold=0.15, step_delay=0.02, release=True):
+def drag(start, end, steps=20, hold=0.15, step_delay=0.02, release=True, sample=None):
     """Press at `start`, move in steps to `end`, release (unless release=False)."""
     mouse_move(*start)
     time.sleep(0.05)
+    if sample:
+        sample("at-start", 0)
     mouse_down()
+    if sample:
+        sample("button-down", 0)
     time.sleep(hold)
+    if sample:
+        sample("held-before-move", 0)
     for i in range(1, steps + 1):
         mouse_move(round(start[0] + (end[0] - start[0]) * i / steps), round(start[1] + (end[1] - start[1]) * i / steps))
         time.sleep(step_delay)
+        if sample and i in (1, steps // 2, steps):
+            sample("moving", i)
     if release:
         time.sleep(0.05)
         mouse_up()

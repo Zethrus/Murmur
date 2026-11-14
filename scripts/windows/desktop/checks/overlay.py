@@ -1,6 +1,7 @@
 """O1-O4, O6, O7: overlay states, drag and restore, B7 focus, scale, subclass log line."""
 import ctypes
 import re
+import time
 
 import fixtures
 import uia
@@ -77,9 +78,18 @@ def o2_drag(ctx):
     ctx.screenshot(hwnd, "drag-before.png")
     start = overlay_drag_point(ctx)
     end = (start[0] - 300, start[1] - 200)
+    hit = win32.user32.WindowFromPoint(win32.POINT(*start))
+    hit_root = win32.user32.GetAncestor(hit, win32.GA_ROOT)
+    samples = []
+
+    def sample(stage, step):
+        samples.append((round(time.monotonic(), 3), stage, step,
+                        win32.cursor(), bool(win32.user32.GetAsyncKeyState(0x01) & 0x8000),
+                        win32.window_rect(ctx.murmur.overlay_hwnd())))
+
     ctx.restorer.push("release the mouse button", win32.mouse_up)
     try:
-        win32.drag(start, end, steps=25, release=False)
+        win32.drag(start, end, steps=25, release=False, sample=sample)
         held = win32.window_rect(ctx.murmur.overlay_hwnd())
     finally:
         win32.mouse_up()
@@ -88,6 +98,10 @@ def o2_drag(ctx):
     ctx.screenshot(ctx.murmur.overlay_hwnd(), "drag-after.png")
     ctx.artifact("drag-diagnostic.txt").write_text(
         f"start: {start}; end: {end}\nbefore: {before}; held: {held}; after: {after}\n"
+        f"hit hwnd: {hex(hit)}; root: {hex(hit_root)}; overlay: {hex(hwnd)}; "
+        f"hit owned by overlay: {hit_root == hwnd}\n"
+        f"samples (monotonic, stage, step, cursor, physical left down, overlay rect):\n"
+        + "".join(f"  {row!r}\n" for row in samples) +
         f"cursor: {win32.cursor()}\nforeground: {hex(win32.foreground())} "
         f"{win32.window_text(win32.foreground())!r}\n"
         f"overlay names: {ctx.murmur.overlay_names()!r}\n"

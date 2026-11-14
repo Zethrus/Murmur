@@ -30,7 +30,7 @@ DEFAULT_HOTKEY = "Ctrl+Alt+Shift+F9"
 IDLE_SECONDS = 60
 BANNER_SECONDS = 10
 # Checks that drive Notepad: Windows 11 Notepad restores its tabs, so it must not be running.
-NOTEPAD_CHECKS = {"O3", "O4", "H1", "I1", "I4", "I5", "I6"}
+NOTEPAD_CHECKS = {"O3", "O4", "H1", "H8", "I1", "I4", "I5", "I6"}
 
 
 def base_config(hotkey):
