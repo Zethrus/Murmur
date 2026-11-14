@@ -257,11 +257,10 @@ class Notepad:
     CLICK_WHILE_HELD = False
 
     def document(self):
-        return self.uia.text_element(self.uia.from_handle(self.hwnd), timeout=5)
+        return self.uia.document_element(self.uia.from_handle(self.hwnd), timeout=5)
 
     def focus(self, click=True):
-        left, top, right, bottom = self.win32.window_rect(self.hwnd)
-        point = ((left + right) // 2, (top + bottom) // 2)
+        point = self.uia.center(self.document())
         self.win32.activate(self.hwnd, click_at=None if not click else point)
         if click:
             self.win32.click(*point)

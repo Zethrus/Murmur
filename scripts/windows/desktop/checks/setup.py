@@ -201,10 +201,19 @@ def p4_components(ctx):
             raise Fail(f"{name} is {state!r}, not Active")
         uia.invoke(uia.find(window, name_=f"Verify {name}", control_type_=uia.BUTTON, timeout=10, sleep=ctx.sleep))
         ctx.guard.mark(f"P4:{name}:verify-invoked")
-        ctx.sleep(0.5)
-    names = wait_names(ctx, lambda: ctx.murmur.settings(), lambda n: n.count("Files verified.") >= 2
-                       or any(x.startswith("Verification failed") for x in n), 120)
+        names = wait_names(ctx, lambda: ctx.murmur.settings(), lambda n: _component_verified(n, name)
+                           or any(x.startswith("Verification failed") for x in n), 120)
+        if names is None or not _component_verified(names, name):
+            raise Fail(f"Verify did not report 'Files verified.' for {name}")
     ctx.guard.mark("P4:verification:finished")
     ctx.screenshot(ctx.murmur.settings_hwnd(), "components.png")
-    if names is None or any(x.startswith("Verification failed") for x in names):
-        raise Fail("Verify did not report 'Files verified.' for both components")
+
+
+def _component_verified(names, display_name):
+    """Check the note in this component row, not a note left by an earlier Verify."""
+    try:
+        action = names.index(f"Verify {display_name}")
+        title = max(i for i, name in enumerate(names[:action]) if name == display_name)
+    except (ValueError, TypeError):
+        return False
+    return "Files verified." in names[title:action]

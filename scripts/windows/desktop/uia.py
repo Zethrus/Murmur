@@ -246,6 +246,34 @@ def has_pattern(element, pattern_id):
         return False
 
 
+def named_toggle(window, label, timeout=10.0, sleep=time.sleep):
+    """Find the switch itself, whose accessible name comes from its row label.
+
+    A following-button lookup can escape the page and select a title-bar button.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        for element in find_all(window, name_=label):
+            if has_pattern(element, TOGGLE):
+                return element
+        if time.monotonic() >= deadline:
+            raise NotFound(f"No toggle named {label!r} after {timeout:.0f} s")
+        sleep(0.25)
+
+
+def document_element(window, timeout=10.0, sleep=time.sleep):
+    """The editor document, never an unrelated TextPattern such as Notepad's style menu."""
+    deadline = time.monotonic() + timeout
+    while True:
+        for kind in (DOCUMENT, EDIT):
+            for element in find_all(window, control_type_=kind):
+                if has_pattern(element, TEXTPATTERN):
+                    return element
+        if time.monotonic() >= deadline:
+            raise NotFound("No document with TextPattern")
+        sleep(0.25)
+
+
 def text_element(window, timeout=10.0, sleep=time.sleep):
     """First descendant (or the window itself) that supports TextPattern."""
     deadline = time.monotonic() + timeout

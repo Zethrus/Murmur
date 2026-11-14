@@ -29,6 +29,7 @@ import report  # noqa: E402
 import restore  # noqa: E402
 import run  # noqa: E402
 import tomlconfig  # noqa: E402
+import uia  # noqa: E402
 import win32  # noqa: E402
 from context import Fail, Skip  # noqa: E402
 
@@ -84,6 +85,32 @@ class ImportTests(unittest.TestCase):
         self.assertFalse(guard.is_injected_key(0x00))
         self.assertTrue(guard.is_injected_mouse(0x01))
         self.assertFalse(guard.is_injected_mouse(0x00))
+
+    def test_uia_selectors_reject_title_bar_and_non_editor_text(self):
+        label, switch, minimize, style, document = object(), object(), object(), object(), object()
+        elements = [label, switch, minimize, style, document]
+        names = {label: "Start at login", switch: "Start at login", minimize: "Minimize",
+                 style: "Title", document: "Text Editor"}
+        types = {label: uia.TEXT, switch: uia.BUTTON, minimize: uia.BUTTON,
+                 style: uia.EDIT, document: uia.DOCUMENT}
+        patterns = {(switch, uia.TOGGLE), (style, uia.TEXTPATTERN), (document, uia.TEXTPATTERN)}
+        with mock.patch.object(uia, "descendants", return_value=elements), \
+             mock.patch.object(uia, "name", side_effect=names.get), \
+             mock.patch.object(uia, "control_type", side_effect=types.get), \
+             mock.patch.object(uia, "has_pattern", side_effect=lambda e, p: (e, p) in patterns):
+            self.assertIs(uia.named_toggle(object(), "Start at login", timeout=0), switch)
+            with self.assertRaises(uia.NotFound):
+                uia.named_toggle(object(), "Minimize", timeout=0)
+            self.assertIs(uia.document_element(object(), timeout=0), document)
+
+    def test_component_verify_note_is_scoped_to_its_row(self):
+        names = ["Speech engine", "Speech engine", "Files verified.", "Verify Speech engine",
+                 "Remove Speech engine", "Speech models", "Tiny (English)",
+                 "Verify Tiny (English)", "Remove Tiny (English)"]
+        self.assertTrue(setup_checks._component_verified(names, "Speech engine"))
+        self.assertFalse(setup_checks._component_verified(names, "Tiny (English)"))
+        names.insert(names.index("Verify Tiny (English)"), "Files verified.")
+        self.assertTrue(setup_checks._component_verified(names, "Tiny (English)"))
 
 
 class ReportTests(unittest.TestCase):

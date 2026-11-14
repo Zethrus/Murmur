@@ -1,9 +1,11 @@
 # Linux / Windows design parity
 
-Status, November 5, 2026: today's release covers Linux and Flipper. Earlier Linux
-checks do not establish that a newly changed binary has passed hardware testing.
-Matched cross-platform screenshots and Windows hardware validation are pending. Do not mark a checklist item complete solely because a build or DOM test
-passes. Windows remains **unverified on real Windows hardware**.
+Status, November 14, 2026: today's release covers Linux and Flipper. Earlier
+Linux checks do not establish that a newly changed binary has passed hardware
+testing. A full Windows desktop attempt on Edison completed with 20 pass, 26 fail,
+and 1 skipped; see [attempt 2 triage](desktop-43614418846-attempt2-triage.md).
+Matched cross-platform screenshots and Windows release validation remain pending.
+Do not mark a checklist item complete solely because a build or DOM test passes.
 
 Feature-level status and known bugs: [matrix.md](matrix.md). What was actually
 run, per platform: [test-ledger.md](test-ledger.md). Baseline 0.4.7 Linux

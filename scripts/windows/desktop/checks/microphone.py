@@ -23,7 +23,7 @@ def m1_desktop_apps_off(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     RegistryValue(win32.Registry(), CONSENT, "Value").set(ctx.restorer, "Deny", winreg.REG_SZ)
     ctx.murmur.page("Audio")
-    uia.invoke(uia.find(ctx.murmur.settings(), name_="Refresh", control_type_=uia.BUTTON, timeout=10, sleep=ctx.sleep))
+    uia.invoke(uia.find(ctx.murmur.settings(), name_="Refresh inputs", control_type_=uia.BUTTON, timeout=10, sleep=ctx.sleep))
     names = wait_names(ctx, ctx.murmur.settings, lambda n: any(EXPLANATION in x for x in n), 10)
     ctx.screenshot(ctx.murmur.settings_hwnd(), "desktop-apps-off.png")
     if not names:
@@ -44,7 +44,7 @@ def m3_restored(ctx):
     expected = ctx.golden("A")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     ctx.murmur.page("Audio")
-    uia.invoke(uia.find(ctx.murmur.settings(), name_="Refresh", control_type_=uia.BUTTON, timeout=10, sleep=ctx.sleep))
+    uia.invoke(uia.find(ctx.murmur.settings(), name_="Refresh inputs", control_type_=uia.BUTTON, timeout=10, sleep=ctx.sleep))
     ctx.sleep(2.0)
     if any(EXPLANATION in n or "turned off" in n for n in uia.names(ctx.murmur.settings())):
         raise Fail("The privacy explanation is still shown with the switches restored")

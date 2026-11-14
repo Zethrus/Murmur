@@ -715,7 +715,12 @@ pub fn init_logging(data: &Path) -> Result<()> {
 }
 fn payload_safe_for_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     let target = metadata.target();
-    if target == "tungstenite"
+    // enigo's Windows debug event formats `text(text: <entire transcript>)`.
+    // Its target is outside Murmur, so our own metadata-only transcript logs
+    // cannot prevent this payload from reaching murmur.log.
+    if target == "enigo" || target.starts_with("enigo::") {
+        false
+    } else if target == "tungstenite"
         || target.starts_with("tungstenite::")
         || target == "tokio_tungstenite"
         || target.starts_with("tokio_tungstenite::")
@@ -851,7 +856,7 @@ mod logging_tests {
     }
 
     #[test]
-    fn auth_token_is_not_formatted_by_websocket_targets() {
+    fn sensitive_dependency_payloads_are_not_formatted() {
         let output = Capture(Arc::new(Mutex::new(Vec::new())));
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
@@ -866,13 +871,17 @@ mod logging_tests {
                 .with_filter(filter_fn(payload_safe_for_metadata)),
         );
         let token = "AUTH OK secret-token-probe";
+        let transcript = "The private transcript should not be logged";
         tracing::subscriber::with_default(subscriber, || {
             tracing::trace!(target: "tungstenite::protocol", "{token}");
             tracing::trace!(target: "tokio_tungstenite::protocol", "{token}");
+            tracing::debug!(target: "enigo::platform::win_impl", "text(text: {transcript})");
+            tracing::info!(target: "enigo", "{transcript}");
             tracing::info!(target: "murmur", "application log probe");
         });
         let formatted = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
         assert!(formatted.contains("application log probe"));
         assert!(!formatted.contains(token));
+        assert!(!formatted.contains(transcript));
     }
 }

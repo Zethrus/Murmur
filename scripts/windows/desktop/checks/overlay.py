@@ -73,11 +73,13 @@ def o2_drag(ctx):
     ctx.restorer.push("reset the overlay placement", lambda: _reset_placement(ctx))
     hwnd = ctx.murmur.overlay_hwnd()
     before = win32.window_rect(hwnd)
+    ctx.screenshot(hwnd, "drag-before.png")
     start = ((before[0] + before[2]) // 2, (before[1] + before[3]) // 2)
     end = (start[0] - 300, start[1] - 200)
     win32.drag(start, end, steps=25)
     ctx.sleep(1.5)
     after = win32.window_rect(ctx.murmur.overlay_hwnd())
+    ctx.screenshot(ctx.murmur.overlay_hwnd(), "drag-after.png")
     if abs(after[0] - before[0]) < 100 and abs(after[1] - before[1]) < 100:
         raise Fail(f"Overlay did not move: {before} -> {after}")
     ctx.murmur.restart()

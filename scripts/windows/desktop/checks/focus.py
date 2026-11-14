@@ -147,6 +147,9 @@ def f11_drag_delivery(ctx):
         handle = (left + max(8, round(14 * win32.dpi_scale(ctx.murmur.overlay_hwnd()))), (top + bottom) // 2)
         win32.drag(handle, (handle[0] + 80, handle[1] - 60), steps=10, release=False)
         grabbed["origin"] = (left, top)
+        grabbed["engaged"] = win32.wait_for(
+            lambda: abs(win32.window_rect(ctx.murmur.overlay_hwnd())[0] - left) >= 20,
+            2, 0.1, sleep=ctx.sleep)
 
     ctx.restorer.push("release the mouse button", win32.mouse_up)
     ctx.dictate("A", during=grab)
@@ -158,6 +161,8 @@ def f11_drag_delivery(ctx):
     text = app.wait_text()
     ctx.settle()
     moved = win32.window_rect(ctx.murmur.overlay_hwnd())
+    if not grabbed["engaged"]:
+        raise Fail("Overlay did not move while the mouse button was held; drag-release safety was not exercised")
     if early:
         raise Fail(f"Text was delivered while the overlay was being dragged: {early!r}")
     if moved[:2] == (left, top):
