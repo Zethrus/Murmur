@@ -28,6 +28,8 @@ WH_KEYBOARD_LL, WH_MOUSE_LL = 13, 14
 LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED = 0x10, 0x02
 LLMHF_INJECTED, LLMHF_LOWER_IL_INJECTED = 0x01, 0x02
 WM_QUIT = 0x0012
+WM_USER = 0x0400
+WM_GUARD_HEARTBEAT = WM_USER + 1
 WM_MOUSEMOVE = 0x0200
 # A real mouse that only drifts by a pixel or two (desk vibration) is not treated as a person.
 MOVE_TOLERANCE = 3
@@ -96,9 +98,17 @@ class _HookObserver:
         self._pump_started = False
         self._pump_result = None
         self._pump_error = None
+        self._pump_exited_before_stop = False
         self._installed_hooks = 0
         self._last_send_result = None
         self._last_send_error = None
+        self._heartbeat_posted = 0
+        self._heartbeat_received = 0
+        self._heartbeat_post_error = None
+        self._mouse_probe_tag = None
+        self._mouse_probe_seen = 0
+        self._mouse_probe_send_result = None
+        self._mouse_probe_send_error = None
 
     def _record_injected_key(self, message, event):
         """Keep only our probe candidates; never retain a person's keystrokes."""
@@ -133,6 +143,11 @@ class _HookObserver:
         user32.SetWindowsHookExW.argtypes = (ctypes.c_int, hook_type, ctypes.c_void_p, wintypes.DWORD)
         user32.SetWindowsHookExW.restype = ctypes.c_void_p
         user32.UnhookWindowsHookEx.argtypes = (ctypes.c_void_p,)
+        user32.PeekMessageW.argtypes = (ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                                        wintypes.UINT, wintypes.UINT, wintypes.UINT)
+        user32.PostThreadMessageW.argtypes = (wintypes.DWORD, wintypes.UINT,
+                                              wintypes.WPARAM, wintypes.LPARAM)
+        user32.PostThreadMessageW.restype = wintypes.BOOL
         kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
         kernel32.GetModuleHandleW.restype = ctypes.c_void_p
 
@@ -155,7 +170,11 @@ class _HookObserver:
             if code >= 0:
                 self._mouse_callbacks += 1
                 event = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-                reason = self.mouse_event(wparam, is_injected_mouse(event.flags), (event.pt.x, event.pt.y))
+                injected = is_injected_mouse(event.flags)
+                if (self._diagnostic and injected and wparam == WM_MOUSEMOVE
+                        and event.dwExtraInfo == self._mouse_probe_tag):
+                    self._mouse_probe_seen += 1
+                reason = self.mouse_event(wparam, injected, (event.pt.x, event.pt.y))
                 if reason:
                     self._trip(reason)
             return user32.CallNextHookEx(None, code, wparam, lparam)
@@ -170,16 +189,22 @@ class _HookObserver:
             self._hooks.append(hook)
             self._installed_hooks += 1
         self._thread_id = kernel32.GetCurrentThreadId()
-        self._ready.set()
         message = wintypes.MSG()
+        # PostThreadMessage requires a queue; create it before the ready signal.
+        user32.PeekMessageW(ctypes.byref(message), None, WM_USER, WM_USER, 0)
+        self._ready.set()
         self._pump_started = self.error is None
         while self.error is None:
             result = user32.GetMessageW(ctypes.byref(message), None, 0, 0)
             if result <= 0:
                 self._pump_result = result
+                self._pump_exited_before_stop = not self._stopping.is_set()
                 if result < 0:
                     self._pump_error = ctypes.get_last_error()
                 break
+            if message.message == WM_GUARD_HEARTBEAT:
+                self._heartbeat_received += 1
+                continue
             user32.TranslateMessage(ctypes.byref(message))
             user32.DispatchMessageW(ctypes.byref(message))
         if not self._stopping.is_set() and self.error is None:
@@ -218,6 +243,24 @@ class _HookObserver:
             self._last_send_error = ctypes.get_last_error() if sent != 1 else None
         return sent == 1
 
+    def _post_heartbeat(self):
+        posted = win32.user32.PostThreadMessageW(self._thread_id, WM_GUARD_HEARTBEAT, 0, 0)
+        if posted:
+            self._heartbeat_posted += 1
+        else:
+            self._heartbeat_post_error = ctypes.get_last_error()
+
+    def _send_mouse_probe(self, tag):
+        # Diagnostic only: a zero-displacement move changes no button or cursor position.
+        event = win32.INPUT(type=win32.INPUT_MOUSE)
+        event.mi = win32.MOUSEINPUT(dx=0, dy=0, mouseData=0,
+                                    dwFlags=win32.MOUSEEVENTF_MOVE | win32.MOUSEEVENTF_MOVE_NOCOALESCE,
+                                    time=0, dwExtraInfo=tag)
+        array = (win32.INPUT * 1)(event)
+        sent = win32.user32.SendInput(1, array, ctypes.sizeof(win32.INPUT))
+        self._mouse_probe_send_result = sent
+        self._mouse_probe_send_error = ctypes.get_last_error() if sent != 1 else None
+
     def _watch(self):
         while not self._stopping.is_set():
             if self.tripped.is_set():
@@ -225,6 +268,13 @@ class _HookObserver:
             self._probe_seen.clear()
             self._probe_sequence += 1
             self._expected_probe_tag = PROBE_TAG | (self._probe_sequence << 32)
+            if self._diagnostic:
+                self._post_heartbeat()
+                if self._probe_sequence == 1:
+                    self._mouse_probe_tag = self._expected_probe_tag
+                    self._send_mouse_probe(self._mouse_probe_tag)
+                if self.tripped.is_set():
+                    return
             self._probe_started = time.monotonic()
             if not self._send_probe(self._expected_probe_tag):
                 self._trip("input guard probe could not be sent (desktop unavailable or injection blocked)",
@@ -273,11 +323,18 @@ class _HookObserver:
             result["hook_state"] = {"process_id": os.getpid(), "thread_id": self._thread_id,
                                     "installed_hooks": self._installed_hooks, "pump_started": self._pump_started,
                                     "pump_result": self._pump_result, "pump_error": self._pump_error,
+                                    "pump_exited_before_stop": self._pump_exited_before_stop,
+                                    "heartbeat_posted": self._heartbeat_posted,
+                                    "heartbeat_received": self._heartbeat_received,
+                                    "heartbeat_post_error": self._heartbeat_post_error,
                                     "last_send_result": self._last_send_result,
                                     "last_send_error": self._last_send_error,
                                     "keyboard_callbacks": self._keyboard_callbacks,
                                     "injected_key_events": self._injected_key_events,
                                     "mouse_callbacks": self._mouse_callbacks,
+                                    "zero_move_probe_send_result": self._mouse_probe_send_result,
+                                    "zero_move_probe_send_error": self._mouse_probe_send_error,
+                                    "zero_move_probe_seen": self._mouse_probe_seen,
                                     "input_desktop": win32.input_desktop(),
                                     "pointer_bits": ctypes.sizeof(ctypes.c_void_p) * 8,
                                     "input_size": ctypes.sizeof(win32.INPUT),

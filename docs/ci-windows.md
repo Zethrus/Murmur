@@ -270,6 +270,16 @@ counts, and up to eight recent **injected probe candidates** with their tag
 comparison. It never records real key fields. A missing or mismatched probe is
 still a failure; the diagnostic does not relax the guard.
 
+The observer creates its message queue before reporting ready. Diagnostic
+`heartbeat_posted` and `heartbeat_received` count private messages through that
+queue; a received heartbeat shows the pump ran but does not prove either hook
+is active. The diagnostic also sends one tagged, zero-displacement mouse move
+with no button action. `zero_move_probe_send_result` and
+`zero_move_probe_seen` can show whether the mouse hook receives injected input.
+A missing mouse callback is inconclusive because the system may suppress a
+zero-displacement move. `pump_result: 0` with
+`pump_exited_before_stop: false` is the expected cleanup `WM_QUIT`.
+
 ### Reading the report
 
 The job summary shows `desktop-report.md`: one row per checklist id with

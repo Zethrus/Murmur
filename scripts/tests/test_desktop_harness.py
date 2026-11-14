@@ -668,6 +668,47 @@ class GuardMouseTests(unittest.TestCase):
         self.assertEqual([item["matches_expected"] for item in watcher._probe_events], [False, True])
         self.assertNotIn("0x41", str(watcher._probe_events))
 
+    def test_diagnostic_mouse_probe_has_no_displacement_or_button_action(self):
+        watcher = guard._HookObserver(diagnostic=True)
+        tag = guard.PROBE_TAG | (1 << 32)
+        send = mock.Mock(return_value=1)
+        with mock.patch.object(win32, "user32", SimpleNamespace(SendInput=send)):
+            watcher._send_mouse_probe(tag)
+        count, events, size = send.call_args.args
+        self.assertEqual((count, size), (1, guard.ctypes.sizeof(win32.INPUT)))
+        self.assertEqual(events[0].type, win32.INPUT_MOUSE)
+        self.assertEqual((events[0].mi.dx, events[0].mi.dy, events[0].mi.mouseData), (0, 0, 0))
+        self.assertEqual(events[0].mi.dwFlags,
+                         win32.MOUSEEVENTF_MOVE | win32.MOUSEEVENTF_MOVE_NOCOALESCE)
+        self.assertEqual(events[0].mi.dwExtraInfo, tag)
+
+    def test_diagnostic_probe_adds_evidence_but_still_fails_closed(self):
+        watcher = guard._HookObserver(diagnostic=True)
+        with mock.patch.object(guard, "PROBE_TIMEOUT", 0.001), \
+             mock.patch.object(watcher, "_post_heartbeat") as heartbeat, \
+             mock.patch.object(watcher, "_send_mouse_probe") as mouse_probe, \
+             mock.patch.object(watcher, "_send_probe", return_value=True) as key_probe:
+            watcher._watch()
+        heartbeat.assert_called_once()
+        mouse_probe.assert_called_once_with(key_probe.call_args.args[0])
+        with self.assertRaises(guard.GuardUnavailable):
+            watcher.check()
+        self.assertEqual(watcher.probes_seen, 0)
+
+    def test_diagnostic_does_not_send_key_after_real_input_during_mouse_probe(self):
+        watcher = guard._HookObserver(diagnostic=True)
+
+        def real_input(_tag):
+            watcher._trip("real mouse movement")
+
+        with mock.patch.object(watcher, "_post_heartbeat"), \
+             mock.patch.object(watcher, "_send_mouse_probe", side_effect=real_input), \
+             mock.patch.object(watcher, "_send_probe") as key_probe:
+            watcher._watch()
+        key_probe.assert_not_called()
+        with self.assertRaises(guard.UserInput):
+            watcher.check()
+
     def test_diagnostic_redacts_real_key_reason(self):
         with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
              mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
