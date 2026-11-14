@@ -110,6 +110,40 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(pad.wait_text(timeout=1, stable=0, sleep=lambda _: None), "hello")
         self.assertEqual(pad.text.call_count, 3)
 
+    def test_notepad_focus_while_hotkey_held_targets_editor_without_click(self):
+        pad = targets.Notepad.__new__(targets.Notepad)
+        pad.hwnd = 42
+        document = SimpleNamespace(SetFocus=mock.Mock())
+        pad.document = mock.Mock(return_value=document)
+        pad.uia = SimpleNamespace(center=lambda _: (100, 200), focused=lambda: document,
+                                  descendants=lambda _: [], same=lambda first, second: first is second,
+                                  describe=lambda _: "Document")
+        pad.win32 = SimpleNamespace(activate=mock.Mock(), click=mock.Mock(),
+                                    wait_for=lambda predicate, _: predicate(), foreground=lambda: 42)
+        pad.focus(click=False)
+        pad.win32.activate.assert_called_once_with(42, click_at=None)
+        document.SetFocus.assert_called_once_with()
+        pad.win32.click.assert_not_called()
+
+    def test_overlay_focus_check_refuses_to_blame_click_when_editor_already_lost_focus(self):
+        from checks import overlay as checks_overlay
+        with tempfile.TemporaryDirectory() as directory:
+            pad = SimpleNamespace(hwnd=42, focus_diagnostic=lambda: "UIA focus: MenuItem 'File'\n",
+                                  editor_focused=lambda: False)
+            ctx = SimpleNamespace(murmur=SimpleNamespace(ensure=lambda *_: None),
+                                  fixtures={"A": SimpleNamespace(path="fixture.wav")},
+                                  clipboard_guard=lambda: None, target=lambda *_: object(),
+                                  artifact=lambda suffix: Path(directory) / suffix,
+                                  require=lambda condition, reason: self.assertTrue(condition, reason))
+            with mock.patch.object(checks_overlay, "_notepad_with_word", return_value=pad), \
+                 mock.patch.object(checks_overlay, "produce_held"), \
+                 mock.patch.object(checks_overlay, "click_overlay") as click, \
+                 mock.patch.object(win32, "foreground", return_value=42):
+                with self.assertRaisesRegex(Fail, "before the overlay Discard click"):
+                    checks_overlay.o3_buttons_keep_focus(ctx)
+            click.assert_not_called()
+            self.assertIn("MenuItem 'File'", (Path(directory) / "focus-diagnostic.txt").read_text())
+
     def test_overlay_drag_uses_exposed_handle_bounds_and_rejects_outside(self):
         from checks import common
         ctx = SimpleNamespace(murmur=SimpleNamespace(overlay=lambda: object(), overlay_hwnd=lambda: 42),
@@ -1405,6 +1439,21 @@ class OwnedProbeWindowTests(unittest.TestCase):
 
 
 class SettingsCheckTests(unittest.TestCase):
+    def test_resize_grip_requires_actual_window_and_native_corner_hit(self):
+        hits = []
+        def hit_test(_hwnd, _message, _wparam, packed):
+            hits.append(packed)
+            return win32.HTBOTTOMRIGHT if len(hits) == 2 else 1
+        fake = SimpleNamespace(WindowFromPoint=lambda _: 99, GetAncestor=lambda *_: 42,
+                               SendMessageW=hit_test)
+        with mock.patch.object(win32, "IS_WINDOWS", True), \
+             mock.patch.object(win32, "outer_rect", return_value=(0, 0, 1016, 819)), \
+             mock.patch.object(win32, "user32", fake):
+            self.assertEqual(win32.resize_grip(42), (1010, 813))
+            fake.GetAncestor = lambda *_: 77
+            with self.assertRaisesRegex(RuntimeError, "No reachable Settings bottom-right resize grip"):
+                win32.resize_grip(42)
+
     def test_theme_cannot_pass_a_boot_error_page_that_changes_colour(self):
         from checks import settings as checks_settings
         ctx = SimpleNamespace(murmur=SimpleNamespace(ensure=lambda *_: None, show_settings=lambda: 42,
@@ -1426,6 +1475,7 @@ class SettingsCheckTests(unittest.TestCase):
              mock.patch.object(win32, "dpi_scale", return_value=1), \
              mock.patch.object(win32, "client_size", side_effect=[(1000, 780), (700, 500)]), \
              mock.patch.object(win32, "activate"), \
+             mock.patch.object(win32, "resize_grip", return_value=(1012, 815)), \
              mock.patch.object(win32, "drag") as drag, \
              mock.patch.object(win32, "set_window_pos") as set_pos:
             with self.assertRaisesRegex(Fail, "below the 760x560 px minimum"):

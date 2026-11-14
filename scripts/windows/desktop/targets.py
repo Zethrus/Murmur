@@ -270,13 +270,20 @@ class Notepad:
         self.win32.activate(self.hwnd, click_at=None if not click else point)
         if click:
             self.win32.click(*point)
+        else:
+            # A foreground window can still have keyboard focus on File, especially when
+            # Alt is held for the global shortcut. Focus the editor without a Shift+click.
+            document.SetFocus()
         if not self.win32.wait_for(lambda: self.win32.foreground() == self.hwnd, 3):
             raise RuntimeError("Could not focus Notepad")
-        if click:
-            focused = self.uia.focused()
-            elements = [document] + self.uia.descendants(document)
-            if not focused or not any(self.uia.same(focused, element) for element in elements):
-                raise RuntimeError(f"Notepad foreground is active but editor focus is {self.uia.describe(focused)}")
+        if not self.editor_focused(document):
+            raise RuntimeError(f"Notepad foreground is active but editor focus is {self.uia.describe(self.uia.focused())}")
+
+    def editor_focused(self, document=None):
+        document = document or self.document()
+        focused = self.uia.focused()
+        return bool(focused) and any(self.uia.same(focused, element)
+                                     for element in [document] + self.uia.descendants(document))
 
     def focus_diagnostic(self):
         focused = self.uia.focused()

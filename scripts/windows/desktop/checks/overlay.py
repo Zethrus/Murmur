@@ -134,6 +134,10 @@ def o3_buttons_keep_focus(ctx):
         produce_held(ctx, "A", origin, pad)
         ctx.require(win32.foreground() == pad.hwnd, "Notepad lost focus before the overlay click")
         before_click = pad.focus_diagnostic()
+        if not pad.editor_focused():
+            ctx.artifact("focus-diagnostic.txt").write_text(
+                f"before overlay click:\n{before_click}", encoding="utf-8")
+            raise Fail(f"Notepad editor lost keyboard focus before the overlay {button} click")
         click_overlay(ctx, button, expect_foreground=pad.hwnd)
         expected += "x" if button == "Discard" else "y"
         _type_lands(ctx, pad, expected[-1], expected, before_click)

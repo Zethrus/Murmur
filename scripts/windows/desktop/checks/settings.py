@@ -89,11 +89,13 @@ def s4_minimum_size(ctx):
     scale = win32.dpi_scale(hwnd)
     # The configured minimum is a user resize limit. SetWindowPos can set an
     # undersized outer frame directly, so reproduce a user's corner drag.
-    start = (right - 4, bottom - 4)
+    if not win32.activate(hwnd):
+        raise Fail("Could not activate Settings before its resize drag")
+    start = win32.resize_grip(hwnd)
+    ctx.note(f"native bottom-right resize grip {start} in outer frame {(left, top, right, bottom)}")
     end = (start[0] - (right - left - round(500 * scale)),
            start[1] - (bottom - top - round(400 * scale)))
     before = win32.client_size(hwnd)
-    win32.activate(hwnd)
     win32.drag(start, end)
     ctx.sleep(1.0)
     width, height = win32.client_size(hwnd)

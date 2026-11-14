@@ -515,6 +515,7 @@ test("idle icon replaces hiding by default and gives way to every active state",
   assert.equal(h.root.dataset.idle,undefined,"startup shows the pill first");h.timers.tick(1500);
   assert.equal(pill.hidden,false);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.title,"Drag to move");
   h.emit("state",{state:"listening"});assert.equal(h.root.dataset.idle,undefined);assert.equal(pill.hidden,false);
+  const handle=h.root.querySelector(".drag-handle");assert.equal(handle.getAttribute("aria-label"),"Drag to move");assert.equal(handle.getAttribute("role"),"img");
   h.emit("state",{state:"done"});h.timers.tick(899);assert.equal(h.root.dataset.idle,undefined);h.timers.tick(1);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);
   h.emit("state",{state:"idle"});assert.equal(h.root.dataset.idle,"icon");
   h.emit("state",{state:"error"});assert.equal(h.root.dataset.idle,undefined);h.timers.tick(1600);assert.equal(h.root.dataset.idle,"icon");

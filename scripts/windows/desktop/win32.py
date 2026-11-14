@@ -31,6 +31,7 @@ MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP = 0x0008, 0x0010
 MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_ABSOLUTE = 0x4000, 0x8000
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 76, 77, 78, 79
 WM_CLOSE, WM_SETTINGCHANGE = 0x0010, 0x001A
+WM_NCHITTEST, HTBOTTOMRIGHT, GA_ROOT = 0x0084, 17, 2
 HWND_BROADCAST, SMTO_ABORTIFHUNG = 0xFFFF, 0x0002
 SW_RESTORE = 9
 SWP_NOZORDER, SWP_NOACTIVATE = 0x0004, 0x0010
@@ -124,6 +125,9 @@ def _declare():
         ("GetClassNameW", (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int), ctypes.c_int),
         ("GetWindowThreadProcessId", (wintypes.HWND, ctypes.POINTER(wintypes.DWORD)), wintypes.DWORD),
         ("GetWindowRect", (wintypes.HWND, ctypes.POINTER(RECT)), wintypes.BOOL),
+        ("WindowFromPoint", (POINT,), wintypes.HWND),
+        ("GetAncestor", (wintypes.HWND, wintypes.UINT), wintypes.HWND),
+        ("SendMessageW", (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM), ctypes.c_ssize_t),
         ("GetClientRect", (wintypes.HWND, ctypes.POINTER(RECT)), wintypes.BOOL),
         ("SetWindowPos", (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                           wintypes.UINT), wintypes.BOOL),
@@ -439,6 +443,24 @@ def outer_rect(hwnd):
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         raise ctypes.WinError(ctypes.get_last_error())
     return rect.tuple()
+
+
+def resize_grip(hwnd):
+    """A reachable bottom-right point that Windows identifies as the native resize grip."""
+    require_windows()
+    left, top, right, bottom = outer_rect(hwnd)
+    for inset in (4, 6, 8, 10, 12, 14, 16):
+        x, y = right - inset, bottom - inset
+        if x <= left or y <= top:
+            continue
+        point = POINT(x, y)
+        hit_window = user32.WindowFromPoint(point)
+        if user32.GetAncestor(hit_window, GA_ROOT) != hwnd:
+            continue
+        packed = ((y & 0xffff) << 16) | (x & 0xffff)
+        if user32.SendMessageW(hwnd, WM_NCHITTEST, 0, packed) == HTBOTTOMRIGHT:
+            return x, y
+    raise RuntimeError(f"No reachable Settings bottom-right resize grip in outer frame {(left, top, right, bottom)}")
 
 
 def client_size(hwnd):
