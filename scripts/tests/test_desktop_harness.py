@@ -652,6 +652,43 @@ class GuardMouseTests(unittest.TestCase):
         self.assertEqual(guard.PROBE_VK, 0x88)  # reserved virtual-key code
         self.assertLess(guard.PROBE_TIMEOUT, guard.PROBE_INTERVAL)
 
+    def test_desktop_context_reads_hook_thread_not_calling_thread(self):
+        def session_id(_pid, out):
+            win32.ctypes.cast(out, win32.ctypes.POINTER(win32.wintypes.DWORD)).contents.value = 9
+            return True
+
+        def object_info(handle, index, out, _size, _needed):
+            if index == 6:
+                win32.ctypes.cast(out, win32.ctypes.POINTER(win32.wintypes.BOOL)).contents.value = 1
+            else:
+                name = "WinSta0" if handle == 10 else "Default"
+                buffer = win32.ctypes.create_unicode_buffer(name)
+                win32.ctypes.memmove(out, buffer, win32.ctypes.sizeof(buffer))
+            return True
+
+        get_thread_desktop = mock.Mock(return_value=20)
+        fake_user32 = SimpleNamespace(GetProcessWindowStation=lambda: 10,
+                                      GetThreadDesktop=get_thread_desktop,
+                                      GetUserObjectInformationW=object_info,
+                                      GetForegroundWindow=lambda: 30)
+        fake_kernel32 = SimpleNamespace(GetCurrentThreadId=lambda: 77, ProcessIdToSessionId=session_id)
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(win32, "user32", fake_user32), \
+             mock.patch.object(win32, "kernel32", fake_kernel32):
+            context = win32.desktop_context(123)
+        get_thread_desktop.assert_called_once_with(123)
+        self.assertEqual(context, {"session_id": 9, "window_station": "WinSta0",
+                                   "thread_desktop": "Default", "thread_desktop_receives_input": True,
+                                   "foreground_window_present": True})
+
+    def test_hook_context_diagnostic_survives_observer_stop(self):
+        watcher = guard._HookObserver(diagnostic=True)
+        watcher._desktop_context = {"window_station": "WinSta0",
+                                    "thread_desktop_receives_input": True}
+        with mock.patch.object(win32, "input_desktop", return_value="Default"):
+            state = watcher.diagnostics()["hook_state"]["desktop_context"]
+        self.assertEqual(state, watcher._desktop_context)
+
     def test_diagnostic_records_only_injected_probe_candidates_and_exact_match(self):
         watcher = guard._HookObserver(diagnostic=True)
         watcher._expected_probe_tag = guard.PROBE_TAG | (2 << 32)
@@ -711,6 +748,8 @@ class GuardMouseTests(unittest.TestCase):
 
     def test_diagnostic_redacts_real_key_reason(self):
         with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context",
+                               return_value={"window_station": "WinSta0"}), \
              mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
              mock.patch.object(guard_diagnostic.guard, "Guard") as factory:
             instance = factory.return_value
@@ -718,6 +757,7 @@ class GuardMouseTests(unittest.TestCase):
             instance.diagnostics.return_value = {"probes_seen": 0}
             result = guard_diagnostic.diagnose(1)
         self.assertEqual(result["status"], "real_input")
+        self.assertEqual(result["parent_desktop_context"]["window_station"], "WinSta0")
         self.assertNotIn("0x41", str(result))
         instance.stop.assert_called_once()
 

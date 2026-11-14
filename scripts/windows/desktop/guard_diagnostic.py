@@ -20,6 +20,7 @@ def diagnose(seconds):
     if problems:
         return {"status": "preflight_refused", "problems": problems}
 
+    parent_desktop_context = win32.desktop_context()
     observer = guard.Guard(diagnostic=True)
     started = time.monotonic()
     status, reason = "ok", ""
@@ -36,6 +37,7 @@ def diagnose(seconds):
     finally:
         observer.stop()
     return {"status": status, "reason": reason, "elapsed_seconds": round(time.monotonic() - started, 2),
+            "parent_desktop_context": parent_desktop_context,
             "input_guard": observer.diagnostics()}
 
 

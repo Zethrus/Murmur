@@ -279,6 +279,13 @@ with no button action. `zero_move_probe_send_result` and
 A missing mouse callback is inconclusive because the system may suppress a
 zero-displacement move. `pump_result: 0` with
 `pump_exited_before_stop: false` is the expected cleanup `WM_QUIT`.
+Compare `parent_desktop_context` with `input_guard.hook_state.desktop_context`.
+The hook thread must be in the same session and window station as the parent,
+and `thread_desktop_receives_input` must be `true`. A desktop named `Default`
+alone is insufficient: a noninteractive window station can also have a default
+desktop. These fields are captured before the hook thread stops. If they match
+and both callback counts remain zero, the report has not yet separated hook
+registration from input delivery; do not run the desktop checks.
 
 ### Reading the report
 

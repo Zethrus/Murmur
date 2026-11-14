@@ -109,6 +109,7 @@ class _HookObserver:
         self._mouse_probe_seen = 0
         self._mouse_probe_send_result = None
         self._mouse_probe_send_error = None
+        self._desktop_context = None
 
     def _record_injected_key(self, message, event):
         """Keep only our probe candidates; never retain a person's keystrokes."""
@@ -189,6 +190,8 @@ class _HookObserver:
             self._hooks.append(hook)
             self._installed_hooks += 1
         self._thread_id = kernel32.GetCurrentThreadId()
+        if self._diagnostic:
+            self._desktop_context = win32.desktop_context(self._thread_id)
         message = wintypes.MSG()
         # PostThreadMessage requires a queue; create it before the ready signal.
         user32.PeekMessageW(ctypes.byref(message), None, WM_USER, WM_USER, 0)
@@ -336,6 +339,7 @@ class _HookObserver:
                                     "zero_move_probe_send_error": self._mouse_probe_send_error,
                                     "zero_move_probe_seen": self._mouse_probe_seen,
                                     "input_desktop": win32.input_desktop(),
+                                    "desktop_context": self._desktop_context,
                                     "pointer_bits": ctypes.sizeof(ctypes.c_void_p) * 8,
                                     "input_size": ctypes.sizeof(win32.INPUT),
                                     "input_union_offset": win32.INPUT.u.offset,

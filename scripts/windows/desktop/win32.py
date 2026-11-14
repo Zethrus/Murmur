@@ -135,6 +135,8 @@ def _declare():
         ("GetLastInputInfo", (ctypes.POINTER(LASTINPUTINFO),), wintypes.BOOL),
         ("OpenInputDesktop", (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD), handle),
         ("CloseDesktop", (handle,), wintypes.BOOL),
+        ("GetProcessWindowStation", (), handle),
+        ("GetThreadDesktop", (wintypes.DWORD,), handle),
         ("GetUserObjectInformationW", (handle, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
                                        ctypes.POINTER(wintypes.DWORD)), wintypes.BOOL),
         ("MapVirtualKeyW", (wintypes.UINT, wintypes.UINT), wintypes.UINT),
@@ -151,6 +153,7 @@ def _declare():
         ("GlobalFree", (handle,), handle),
         ("GetTickCount", (), wintypes.DWORD),
         ("GetCurrentThreadId", (), wintypes.DWORD),
+        ("ProcessIdToSessionId", (wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)), wintypes.BOOL),
         ("CreateToolhelp32Snapshot", (wintypes.DWORD, wintypes.DWORD), handle),
         ("Process32FirstW", (handle, ctypes.POINTER(PROCESSENTRY32W)), wintypes.BOOL),
         ("Process32NextW", (handle, ctypes.POINTER(PROCESSENTRY32W)), wintypes.BOOL),
@@ -641,6 +644,33 @@ def input_desktop():
         return buffer.value
     finally:
         user32.CloseDesktop(desktop)
+
+
+def desktop_context(thread_id=None):
+    """Read-only identity of this process's station and a thread's hook desktop."""
+    require_windows()
+
+    def object_name(handle):
+        if not handle:
+            return None
+        buffer = ctypes.create_unicode_buffer(256)
+        needed = wintypes.DWORD()
+        if not user32.GetUserObjectInformationW(handle, 2, buffer, ctypes.sizeof(buffer), ctypes.byref(needed)):
+            return None
+        return buffer.value
+
+    session = wintypes.DWORD()
+    session_id = session.value if kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)) else None
+    station = user32.GetProcessWindowStation()
+    thread = user32.GetThreadDesktop(thread_id or kernel32.GetCurrentThreadId())
+    receives_input = wintypes.BOOL()
+    needed = wintypes.DWORD()
+    input_state = (bool(receives_input.value) if thread and user32.GetUserObjectInformationW(
+        thread, 6, ctypes.byref(receives_input), ctypes.sizeof(receives_input), ctypes.byref(needed))
+        else None)
+    return {"session_id": session_id, "window_station": object_name(station),
+            "thread_desktop": object_name(thread), "thread_desktop_receives_input": input_state,
+            "foreground_window_present": bool(user32.GetForegroundWindow())}
 
 
 class HotkeyBlocker:
