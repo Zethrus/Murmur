@@ -1,4 +1,5 @@
 """H1-H7: hold, release orders, B8 Shift, toggle, Escape, conflicts, code hotkey."""
+import json
 import re
 
 import win32
@@ -14,6 +15,7 @@ def h1_hold(ctx):
     text = pad.wait_text()
     ctx.settle()
     ctx.screenshot(pad.hwnd, "notepad.png")
+    ctx.artifact("notepad-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     if pad.menu_open():
         win32.tap("esc")
         raise Fail("Notepad's menu was activated by the hotkey release")
@@ -32,6 +34,8 @@ def h2_release_order(ctx):
         ctx.sleep(1.5)
         if ctx.murmur.overlay_state() == "listening":
             raise Fail(f"Release order {order}: dictation restarted")
+        ctx.artifact(f"release-{order}-target.json").write_text(
+            json.dumps(app.state(), ensure_ascii=False, indent=2), encoding="utf-8")
         ctx.expect_delivery(text, f"release order {order}")
 
 

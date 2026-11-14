@@ -74,6 +74,28 @@ test("components page shows every state with its actions",async()=>{
   await button(row("engine"),"Verify").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_verify"));
   await button(h.root,"Check for updates").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_check_updates"));h.unload();
 });
+test("component Verify note survives a refresh before the reply",async()=>{
+  const h=await settings({components_verify:async(_,{emit})=>{
+    emit("components/changed",{});h.timers.tick(100);await settle();await settle();
+    return {verdict:"verified"};
+  }});
+  await button(h.root,"Components").dispatch("click");await settle();await settle();
+  await button(component(h.root,"engine"),"Verify").dispatch("click");await settle();await settle();
+  assert.match(component(h.root,"engine").textContent,/Files verified\./);
+  assert.doesNotMatch(component(h.root,"speech-distil-small.en").textContent,/Files verified\./);
+  h.unload();
+});
+test("component Verify mismatch never keeps a stale success note",async()=>{
+  let verified=true;
+  const h=await settings({components_verify:async()=>({verdict:verified?"verified":"mismatch"})});
+  await button(h.root,"Components").dispatch("click");await settle();await settle();
+  await button(component(h.root,"engine"),"Verify").dispatch("click");await settle();await settle();
+  assert.match(component(h.root,"engine").textContent,/Files verified\./);
+  verified=false;
+  await button(component(h.root,"engine"),"Verify").dispatch("click");await settle();await settle();
+  assert.doesNotMatch(component(h.root,"engine").textContent,/Files verified\./);
+  h.unload();
+});
 test("missing trust root explains what needs what and disables installs",async()=>{
   const h=await settings({componentsFixture:componentsFixture({engine:false,trust:false})});
   assert.equal(h.root.querySelector(".setup-layer").hidden,true,"setup does not open when nothing can be installed");

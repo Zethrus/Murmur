@@ -19,6 +19,8 @@ sys.path.insert(0, str(HARNESS))
 
 import catalog  # noqa: E402
 from checks import setup as setup_checks  # noqa: E402
+from checks import insertion as insertion_checks  # noqa: E402
+from checks import microphone as microphone_checks  # noqa: E402
 import fixtures  # noqa: E402
 import golden  # noqa: E402
 import guard  # noqa: E402
@@ -30,6 +32,7 @@ import report  # noqa: E402
 import restore  # noqa: E402
 import run  # noqa: E402
 import tomlconfig  # noqa: E402
+import targets  # noqa: E402
 import uia  # noqa: E402
 import win32  # noqa: E402
 from context import Context, Fail, Skip  # noqa: E402
@@ -69,6 +72,27 @@ def digest(data):
 
 
 class ImportTests(unittest.TestCase):
+    def test_windows_settings_selector_accepts_reused_window_without_matching_murmur(self):
+        windows = [(1, 10, "Murmur Settings", "TAURI"),
+                   (2, 20, "Settings", "ApplicationFrameWindow"),
+                   (3, 30, "Microphone", "Window")]
+        with mock.patch.object(win32, "enum_windows", return_value=windows), \
+             mock.patch.object(win32, "process_path", side_effect=lambda pid: "SystemSettings.exe" if pid == 30 else "other.exe"):
+            self.assertEqual(microphone_checks._windows_settings_windows(), [2, 3])
+
+    def test_target_key_events_preserve_exact_text_when_widget_rejects_ctrl_alt(self):
+        keys = [{"char": "", "keysym": "Control_L"}, {"char": "c", "keysym": "c"},
+                {"char": "a", "keysym": "a"}, {"char": "f", "keysym": "f"},
+                {"char": "é", "keysym": "eacute"}]
+        self.assertEqual(targets.delivered_characters(keys), "café")
+
+    def test_terminal_oracle_ignores_only_screen_padding_after_exact_output(self):
+        expected = "The quick brown fox jumps over the lazy dog. "
+        self.assertTrue(insertion_checks.terminal_line_matches(expected + " " * 20, expected))
+        self.assertFalse(insertion_checks.terminal_line_matches(expected[:-2] + " " * 20, expected))
+        self.assertFalse(insertion_checks.terminal_line_matches(expected + "".join([" " * 5, expected]), expected))
+        self.assertFalse(insertion_checks.terminal_line_matches("x" + expected, expected))
+
     def test_windows_modules_import_on_any_os(self):
         import capture  # noqa: F401
         import context  # noqa: F401

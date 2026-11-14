@@ -17,6 +17,7 @@ def i1_notepad(ctx):
     text = pad.wait_text()
     ctx.settle()
     ctx.screenshot(pad.hwnd, "notepad.png")
+    ctx.artifact("notepad-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     ctx.expect_delivery(text, "Notepad")
 
 
@@ -69,7 +70,17 @@ def i3_terminal(ctx):
     prompt = re.match(r"^PS [^>\n]*> ?", last)
     if not prompt:
         raise Fail(f"Sentence A is not on the prompt line: {last[-120:]!r}")
-    ctx.expect_delivery(last[prompt.end():], "PowerShell prompt line")
+    delivered = last[prompt.end():]
+    expected = ctx.observed_text()
+    # Terminal's TextPattern exposes every screen cell, including blank cells after the caret.
+    # Keep the transcript exact and reject any nonblank suffix (including a second delivery).
+    if not terminal_line_matches(delivered, expected):
+        ctx.expect_delivery(delivered, "PowerShell prompt line")
+        raise Fail(f"PowerShell prompt line has nonblank text after the transcript: {delivered!r}")
+
+
+def terminal_line_matches(line, expected):
+    return line.startswith(expected) and not line[len(expected):].strip()
 
 
 def i4_paste(ctx):
@@ -85,6 +96,7 @@ def i4_paste(ctx):
     ctx.sleep(2.0)
     clipboard = win32.clipboard_text()
     ctx.screenshot(pad.hwnd, "notepad.png")
+    ctx.artifact("notepad-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     ctx.expect_delivery(text, "Notepad (paste)")
     if clipboard != sentinel:
         raise Fail(f"Clipboard not restored after the paste: {clipboard!r}")
@@ -101,6 +113,7 @@ def i5_unicode(ctx):
     text = pad.wait_text()
     ctx.settle()
     ctx.screenshot(pad.hwnd, "notepad.png")
+    ctx.artifact("notepad-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     output = ctx.expect_delivery(text, "Notepad")
     if written.lower() not in output.lower():
         raise Fail(f"The replacement rule did not apply (output {output!r}); harness fixture problem")

@@ -204,6 +204,12 @@ def p4_components(ctx):
         names = wait_names(ctx, lambda: ctx.murmur.settings(), lambda n: _component_verified(n, name)
                            or any(x.startswith("Verification failed") for x in n), 120)
         if names is None or not _component_verified(names, name):
+            seen = names if names is not None else uia.names(ctx.murmur.settings())
+            ctx.artifact(f"verify-{name.lower().replace(' ', '-')}-diagnostic.txt").write_text(
+                f"component: {name}\nverdict names: {seen!r}\n"
+                f"component log: {[line for line in ctx.murmur.log().splitlines() if 'verif' in line.lower()][-20:]!r}\n",
+                encoding="utf-8")
+            ctx.screenshot(ctx.murmur.settings_hwnd(), f"verify-{name.lower().replace(' ', '-')}.png")
             raise Fail(f"Verify did not report 'Files verified.' for {name}")
     ctx.guard.mark("P4:verification:finished")
     ctx.screenshot(ctx.murmur.settings_hwnd(), "components.png")

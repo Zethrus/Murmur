@@ -1,6 +1,7 @@
 """F1-F8, F11-F13: the focus contract (docs/focus-contract.md) with TargetApp windows."""
 import time
 
+import targets
 import win32
 from checks.common import (D_HOTKEY, HOLD_FOR_SECONDS, click_overlay, focus_change_dictation, produce_held,
                            require_empty, wait_held, wait_not_held)
@@ -129,6 +130,7 @@ def f11_drag_delivery(ctx):
     ctx.restorer.push("reset the overlay placement", lambda: setattr(ctx.murmur, "config", {}))
     app = ctx.target("A")
     app.focus()
+    log_before = len(ctx.murmur.log())
     grabbed = {}
 
     def grab(_ctx):
@@ -152,6 +154,11 @@ def f11_drag_delivery(ctx):
     text = app.wait_text()
     ctx.settle()
     moved = win32.window_rect(ctx.murmur.overlay_hwnd())
+    ctx.artifact("drag-diagnostic.txt").write_text(
+        f"origin: {grabbed['origin']}; moved: {moved[:2]}; engaged: {grabbed['engaged']}\n"
+        f"target before release: {early!r}; target after release: {text!r}\n"
+        f"new log: {[line for line in ctx.murmur.log()[log_before:].splitlines() if 'drag' in line.lower() or 'deliver' in line.lower()]!r}\n",
+        encoding="utf-8")
     if not grabbed["engaged"]:
         raise Fail("Overlay did not move while the mouse button was held; drag-release safety was not exercised")
     if early:
@@ -212,15 +219,14 @@ def _hold_modifiers_through_delivery(ctx, app):
     # Keep Ctrl+Alt down past Murmur's 600 ms modifier wait, until typing has finished.
     while time.monotonic() < deadline:
         state = record("Ctrl+Alt held")
-        restarted = restarted or (state == "listening" and bool(app.text()))
+        restarted = restarted or (state == "listening" and bool(app.delivered()))
         typed = app.delivered()
         if typed and time.monotonic() - typed[-1]["t"] > 1.5:
             break
         ctx.sleep(0.05)
-    typed_while_held = bool(app.text())
+    typed_while_held = bool(app.delivered())
     win32.key_up(*reversed(modifiers))
     record("modifiers up")
-    text = app.wait_text()
     restarted = restarted or win32.wait_for(lambda: ctx.murmur.overlay_state() == "listening", 2.0, 0.05,
                                             sleep=ctx.sleep)
     ctx.settle()
@@ -235,16 +241,15 @@ def _hold_modifiers_through_delivery(ctx, app):
     if restarted:
         raise Fail("Typing a 'd' with Ctrl+Alt held restarted dictation")
     if not typed_while_held:
-        ctx.note("typing had not started while Ctrl+Alt were held (20 s); the retrigger path was not reached")
+        ctx.note("no character-producing key events while Ctrl+Alt were held (20 s)")
         raise Fail("Delivery did not start while the modifiers were held, so the retrigger path was not tested")
-    ctx.note(f"typed with Ctrl+Alt held: {text!r}")
     observed = ctx.observed_text()
+    keys = targets.delivered_characters(app.keys())
+    if keys != observed:
+        raise Fail(f"Target key events with Ctrl+Alt held differ from this utterance's output: {keys!r} vs {observed!r}")
+    ctx.note(f"exact target key events with Ctrl+Alt held; widget text {app.text()!r}")
     if "d" not in observed.lower():
         raise Fail("The D fixture output did not contain a retrigger key")
-    if text != observed:
-        # Characters typed with Ctrl+Alt down may be interpreted as AltGr combinations by the target.
-        ctx.note(f"target differed from this utterance's output {observed!r} "
-                 "(modifiers were down while typing)")
 
 
 def f13_no_retrigger(ctx):
