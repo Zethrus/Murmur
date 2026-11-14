@@ -883,6 +883,7 @@ class GuardMouseTests(unittest.TestCase):
              mock.patch.object(guard_diagnostic.win32, "desktop_context",
                                return_value={"window_station": "WinSta0"}), \
              mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])), \
              mock.patch.object(guard_diagnostic, "_OwnedProbeWindow") as window_factory, \
              mock.patch.object(guard_diagnostic.guard, "Guard") as factory:
             window_factory.return_value.hwnd = 55
@@ -909,6 +910,75 @@ class GuardMouseTests(unittest.TestCase):
             result = guard_diagnostic.diagnose(1)
         self.assertEqual(result["status"], "probe_window_unavailable")
         factory.assert_not_called()
+
+    def test_diagnostic_waits_for_user_focus_and_60_seconds_idle(self):
+        window = SimpleNamespace(status="waiting_for_focus",
+                                 focused=mock.Mock(side_effect=[False, False, True, True, True, True]))
+        with mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]) as preflight, \
+             mock.patch.object(guard_diagnostic.win32, "idle_seconds", side_effect=[0, 60]), \
+             mock.patch.object(guard_diagnostic.time, "monotonic", return_value=0), \
+             mock.patch.object(guard_diagnostic.time, "sleep"):
+            self.assertEqual(guard_diagnostic._wait_for_safe_desktop(window), ("ready", []))
+        self.assertEqual(preflight.call_args, mock.call(guard_diagnostic.win32))
+        self.assertEqual(preflight.call_count, 5)
+
+    def test_diagnostic_focus_wait_times_out_without_guard_or_input(self):
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "open", return_value=True), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "focused", return_value=False), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "close"), \
+             mock.patch.object(guard_diagnostic.time, "monotonic",
+                               side_effect=[0, guard_diagnostic.FOCUS_WAIT_SECONDS]), \
+             mock.patch.object(guard_diagnostic.guard, "Guard") as factory:
+            result = guard_diagnostic.diagnose(1)
+        self.assertEqual(result["status"], "probe_window_unavailable")
+        self.assertEqual(result["probe_window"]["status"], "focus_timeout")
+        factory.assert_not_called()
+
+    def test_diagnostic_focus_loss_during_idle_never_starts_guard(self):
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.win32, "idle_seconds", return_value=0), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "open", return_value=True), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "focused", side_effect=[True, True, False]), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "close"), \
+             mock.patch.object(guard_diagnostic.time, "monotonic", return_value=0), \
+             mock.patch.object(guard_diagnostic.time, "sleep"), \
+             mock.patch.object(guard_diagnostic.guard, "Guard") as factory:
+            result = guard_diagnostic.diagnose(1)
+        self.assertEqual(result["status"], "focus_lost")
+        factory.assert_not_called()
+
+    def test_diagnostic_idle_timeout_never_starts_guard(self):
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.win32, "idle_seconds", return_value=0), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "open", return_value=True), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "focused", return_value=True), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "close"), \
+             mock.patch.object(guard_diagnostic.time, "monotonic",
+                               side_effect=[0, 0, guard_diagnostic.IDLE_WAIT_SECONDS]), \
+             mock.patch.object(guard_diagnostic.guard, "Guard") as factory:
+            result = guard_diagnostic.diagnose(1)
+        self.assertEqual(result["status"], "idle_timeout")
+        factory.assert_not_called()
+
+    def test_diagnostic_rechecks_focus_immediately_before_guard_start(self):
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "open", return_value=True), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "focused", return_value=False), \
+             mock.patch.object(guard_diagnostic._OwnedProbeWindow, "close"), \
+             mock.patch.object(guard_diagnostic.guard, "Guard") as factory:
+            result = guard_diagnostic.diagnose(1)
+        self.assertEqual(result["status"], "focus_lost")
+        factory.return_value.start.assert_not_called()
 
     def test_missing_liveness_probe_trips_without_reenabling_input(self):
         watcher = guard._HookObserver()
@@ -1042,6 +1112,26 @@ class GuardProcessTests(unittest.TestCase):
 
 
 class OwnedProbeWindowTests(unittest.TestCase):
+    def test_window_stays_visible_after_focus_denial_until_user_clicks(self):
+        window = guard_diagnostic._OwnedProbeWindow()
+        user32 = SimpleNamespace(
+            GetForegroundWindow=mock.Mock(side_effect=[40, 40, 55, 55]),
+            CreateWindowExW=mock.Mock(return_value=55),
+            SetForegroundWindow=mock.Mock(side_effect=[False, True]),
+            SetFocus=mock.Mock(), GetFocus=mock.Mock(return_value=55),
+            PeekMessageW=mock.Mock(return_value=False), IsWindow=mock.Mock(return_value=True),
+            DestroyWindow=mock.Mock())
+        kernel32 = SimpleNamespace(GetModuleHandleW=mock.Mock(return_value=1))
+        with mock.patch.object(win32, "user32", user32), \
+             mock.patch.object(win32, "kernel32", kernel32), \
+             mock.patch.object(window._stop, "wait", side_effect=[False, False, True]):
+            window._run()
+        self.assertEqual(window.initial_focus, "denied")
+        self.assertEqual(window.status, "ready")
+        self.assertIn("Click this window", user32.CreateWindowExW.call_args.args[2])
+        self.assertEqual(user32.SetForegroundWindow.call_args_list, [mock.call(55), mock.call(40)])
+        user32.DestroyWindow.assert_called_once_with(55)
+
     def test_window_records_only_tagged_probe_messages(self):
         window = guard_diagnostic._OwnedProbeWindow()
         window.hwnd = 55
@@ -1074,7 +1164,7 @@ class OwnedProbeWindowTests(unittest.TestCase):
                 window = guard_diagnostic._OwnedProbeWindow()
                 window._stop.set()
                 user32 = SimpleNamespace(
-                    GetForegroundWindow=mock.Mock(side_effect=[40, 55, foreground_on_close]),
+                    GetForegroundWindow=mock.Mock(side_effect=[40, foreground_on_close]),
                     CreateWindowExW=mock.Mock(return_value=55),
                     SetForegroundWindow=mock.Mock(return_value=True),
                     SetFocus=mock.Mock(), GetFocus=mock.Mock(return_value=55),

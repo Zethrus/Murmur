@@ -17,9 +17,12 @@ import guard
 import run
 import win32
 
-WS_EX_TOOLWINDOW = 0x80
-WS_POPUP, WS_VISIBLE = 0x80000000, 0x10000000
+WS_EX_TOOLWINDOW, WS_EX_TOPMOST = 0x80, 0x08
+WS_OVERLAPPEDWINDOW, WS_VISIBLE, ES_READONLY = 0x00CF0000, 0x10000000, 0x0800
 PM_REMOVE = 1
+FOCUS_WAIT_SECONDS = 180
+IDLE_WAIT_SECONDS = 65
+IDLE_SECONDS = 60
 
 
 class _OwnedProbeWindow:
@@ -28,6 +31,7 @@ class _OwnedProbeWindow:
     def __init__(self):
         self.hwnd = None
         self.status = "pending"
+        self.initial_focus = "not_attempted"
         self.restoration = "not_started"
         self.received_events = []
         self._previous = None
@@ -41,7 +45,7 @@ class _OwnedProbeWindow:
         ready = self._ready.wait(3)
         if not ready:
             self.status = "window_thread_timeout"
-        if not ready or self.status != "ready":
+        if not ready or self.status.startswith(("create_failed", "window_error")):
             self.close()
             return False
         return True
@@ -50,24 +54,33 @@ class _OwnedProbeWindow:
         user32 = win32.user32
         try:
             self._previous = user32.GetForegroundWindow()
-            # EDIT is a built-in keyboard-capable class. Do not translate the packet to text.
-            self.hwnd = user32.CreateWindowExW(WS_EX_TOOLWINDOW, "EDIT", "", WS_POPUP | WS_VISIBLE,
-                                                0, 0, 80, 24, None, None,
+            # EDIT is keyboard-capable. The caption and read-only content tell the owner what to do.
+            instructions = ("Murmur guard diagnostic: Click this window, then leave the mouse "
+                            "and keyboard untouched for 60 seconds")
+            self.hwnd = user32.CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, "EDIT", instructions,
+                                                WS_OVERLAPPEDWINDOW | WS_VISIBLE | ES_READONLY,
+                                                80, 80, 600, 140, None, None,
                                                 win32.kernel32.GetModuleHandleW(None), None)
             if not self.hwnd:
                 self.status = f"create_failed:{ctypes.get_last_error()}"
-            elif not user32.SetForegroundWindow(self.hwnd):
-                self.status = "focus_denied"
             else:
-                user32.SetFocus(self.hwnd)
-                if user32.GetForegroundWindow() != self.hwnd or user32.GetFocus() != self.hwnd:
-                    self.status = "focus_unverified"
-                else:
-                    self.status = "ready"
+                self.initial_focus = ("granted" if user32.SetForegroundWindow(self.hwnd) else "denied")
+                self.status = "waiting_for_focus"
             self._ready.set()
-            if self.status == "ready":
+            if self.hwnd:
                 while not self._stop.wait(0.01):
                     self._drain_messages(user32)
+                    if self.status == "focus_lost":
+                        continue
+                    if user32.GetForegroundWindow() == self.hwnd:
+                        if user32.GetFocus() != self.hwnd:
+                            user32.SetFocus(self.hwnd)
+                        if user32.GetFocus() == self.hwnd:
+                            self.status = "ready"
+                        elif self.status == "ready":
+                            self.status = "focus_lost"
+                    elif self.status == "ready":
+                        self.status = "focus_lost"
                 self._drain_messages(user32)
         except Exception as error:  # noqa: BLE001 - return a report even for native setup errors
             self.status = f"window_error:{type(error).__name__}"
@@ -110,13 +123,51 @@ class _OwnedProbeWindow:
                 self.restoration = "window_thread_stop_timeout"
 
     def diagnostics(self):
-        return {"status": self.status, "restoration": self.restoration,
+        return {"status": self.status, "initial_focus": self.initial_focus,
+                "restoration": self.restoration,
                 "received_probe_events": list(self.received_events)}
+
+    def focused(self):
+        return self.status == "ready" and win32.user32.GetForegroundWindow() == self.hwnd
+
+
+def _wait_for_safe_desktop(window):
+    """Allow one owner click, then require 60 seconds without input while focus stays owned."""
+    focus_deadline = time.monotonic() + FOCUS_WAIT_SECONDS
+    while not window.focused():
+        if window.status.startswith(("window_error", "create_failed")):
+            return "probe_window_unavailable", []
+        if window.status == "focus_lost":
+            return "focus_lost", []
+        problems = run.preflight_desktop(win32, idle_needed=0)
+        if problems:
+            return "preflight_refused", problems
+        if time.monotonic() >= focus_deadline:
+            window.status = "focus_timeout"
+            return "probe_window_unavailable", []
+        time.sleep(0.25)
+
+    idle_deadline = time.monotonic() + IDLE_WAIT_SECONDS
+    while True:
+        if not window.focused():
+            return "focus_lost", []
+        problems = run.preflight_desktop(win32, idle_needed=0)
+        if problems:
+            return "preflight_refused", problems
+        if win32.idle_seconds() >= IDLE_SECONDS:
+            break
+        if time.monotonic() >= idle_deadline:
+            return "idle_timeout", []
+        time.sleep(0.25)
+    problems = run.preflight_desktop(win32)
+    if problems:
+        return "preflight_refused", problems
+    return ("ready", []) if window.focused() else ("focus_lost", [])
 
 
 def diagnose(seconds):
     win32.require_windows()
-    problems = run.preflight_desktop(win32)
+    problems = run.preflight_desktop(win32, idle_needed=0)
     if problems:
         return {"status": "preflight_refused", "problems": problems}
 
@@ -125,17 +176,22 @@ def diagnose(seconds):
     if not window.open():
         return {"status": "probe_window_unavailable", "parent_desktop_context": parent_desktop_context,
                 "probe_window": window.diagnostics()}
-    problems = run.preflight_desktop(win32)
-    if problems:
+    print("Click the Murmur guard diagnostic window, then leave mouse and keyboard untouched for 60 s.",
+          flush=True)
+    state, problems = _wait_for_safe_desktop(window)
+    if state != "ready":
         window.close()
-        return {"status": "preflight_refused", "problems": problems,
+        return {"status": state, "problems": problems,
                 "probe_window": window.diagnostics()}
     observer = guard.Guard(diagnostic=True, owned_probe_target=(window.hwnd, os.getpid()))
     started = time.monotonic()
     status, reason = "ok", ""
     try:
-        observer.start()
-        observer.sleep(seconds)
+        if not window.focused():
+            status = "focus_lost"
+        else:
+            observer.start()
+            observer.sleep(seconds)
     except guard.GuardUnavailable as error:
         status, reason = "guard_unavailable", str(error)
     except guard.UserInput:
