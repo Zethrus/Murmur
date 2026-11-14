@@ -9,7 +9,7 @@ const NOTICE_MS = 4000;
 const active = (e: Enhancement): boolean => e.phase !== "none";
 
 export async function mountOverlay(root: HTMLElement): Promise<void> {
-  root.innerHTML = '<section class="pill" role="status" aria-live="polite"><span class="pill-state"><span class="drag-handle" role="img" aria-label="Drag to move" title="Drag to move"><i></i><i></i><i></i><i></i></span><span class="indicator" aria-hidden="true"></span><span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><span class="pill-label"></span></span><span class="preview"></span>'
+  root.innerHTML = '<section class="pill" role="status" aria-live="polite"><span class="pill-state"><span class="drag-handle" role="img" aria-label="Drag to move" title="Drag to move"><i></i><i></i><i></i></span><span class="indicator" aria-hidden="true"></span><span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><span class="pill-label"></span></span><span class="preview"></span>'
     + '<div class="suggestion"><p class="suggestion-title">Suggested rewrite</p><p class="suggestion-text"></p><p class="suggestion-message"></p>'
     + '<div class="suggestion-actions"><button type="button" class="overlay-button primary accept-button">Accept — copy</button><button type="button" class="overlay-button discard-button">Discard</button></div></div></section>';
   const pill = root.querySelector<HTMLElement>(".pill")!, label = root.querySelector<HTMLElement>(".pill-label")!, preview = root.querySelector<HTMLElement>(".preview")!, indicator = root.querySelector<HTMLElement>(".indicator")!;
