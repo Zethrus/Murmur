@@ -344,9 +344,9 @@ class Terminal:
             raise RuntimeError("Could not focus Windows Terminal")
 
     def buffer(self):
-        """Terminal text through TextPattern, or None when this version does not expose it."""
+        """Prompt buffer through TextPattern, never the title-bar TextPattern."""
         try:
-            return self.uia.text(self.uia.text_element(self.uia.from_handle(self.hwnd), timeout=5))
+            return self.uia.text(self.uia.terminal_text_element(self.uia.from_handle(self.hwnd), timeout=5))
         except Exception:  # noqa: BLE001 - reported as a skip by I3
             return None
 

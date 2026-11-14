@@ -284,3 +284,23 @@ def text_element(window, timeout=10.0, sleep=time.sleep):
         if time.monotonic() >= deadline:
             raise NotFound("No element with TextPattern")
         sleep(0.25)
+
+
+def terminal_text_element(window, timeout=10.0, sleep=time.sleep):
+    """Find a descendant whose TextPattern contains a PowerShell prompt.
+
+    Windows Terminal's top-level window also exposes TextPattern, but that range contains its
+    title rather than the terminal buffer. The prompt proves this is the content range.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        for element in descendants(window):
+            if has_pattern(element, TEXTPATTERN):
+                try:
+                    if re.search(r"(?m)^PS [^>\n]*>", text(element)):
+                        return element
+                except Exception:  # noqa: BLE001 - a UIA element may be replaced during redraw
+                    pass
+        if time.monotonic() >= deadline:
+            raise NotFound("No terminal buffer TextPattern containing a PowerShell prompt")
+        sleep(0.25)

@@ -31,7 +31,7 @@ import run  # noqa: E402
 import tomlconfig  # noqa: E402
 import uia  # noqa: E402
 import win32  # noqa: E402
-from context import Fail, Skip  # noqa: E402
+from context import Context, Fail, Skip  # noqa: E402
 
 SHA = "a" * 40
 OTHER = "b" * 40
@@ -167,7 +167,7 @@ class GoldenTests(unittest.TestCase):
         self.assertIn("nothing delivered", golden.compare("x", None))
         self.assertIn("lengths 4 vs 3", golden.compare("abcd", "abc"))
 
-    def test_store_records_first_delivery_and_checks_later_ones(self):
+    def test_store_records_first_sample_for_semantics_only(self):
         store = golden.GoldenStore()
         key = golden.key("A", "hold", "Ctrl+Alt+Shift+F9")
         self.assertEqual(key, golden.key("A", "hold", "ctrl+alt+shift+f9"))
@@ -176,11 +176,77 @@ class GoldenTests(unittest.TestCase):
         store.record(key, "The quick brown fox. ")
         with self.assertRaises(ValueError):
             store.record(key, "again")
-        self.assertIsNone(store.check(key, "The quick brown fox. "))
-        self.assertIsNotNone(store.check(key, "The quick brown fox."))
-        with self.assertRaises(KeyError):
-            store.check(golden.key("B"), "x")
+        self.assertEqual(store.get(key), "The quick brown fox. ")
         self.assertNotEqual(key, golden.key("A", "hold", "Ctrl+Alt+Shift+F9", style="code"))
+
+    def test_fixture_recognition_is_separate_from_exact_delivery(self):
+        self.assertIsNone(golden.fixture_fidelity("A", "The quick brown fox jumps over the lazy dog "))
+        self.assertIsNone(golden.fixture_fidelity("A", "The quick brown fox jumps over the lazy dog. "))
+        self.assertIsNotNone(golden.fixture_fidelity("A", "The quick brown fox jumped over a dog. "))
+        self.assertIsNotNone(golden.fixture_fidelity("A", "The quick brown fox jumps over the very lazy dog. "))
+        self.assertIsNotNone(golden.compare("The quick brown fox jumps over the lazy dog ",
+                                           "The quick brown fox jumps over the lazy dog. "))
+
+    def test_per_utterance_oracle_accepts_distinct_inferences_and_catches_delivery_mismatch(self):
+        first = "The quick brown fox jumps over the lazy dog "
+        second = "The quick brown fox jumps over the lazy dog. "
+        outputs = [(1, first)]
+        session = SimpleNamespace(history_cursor=lambda: outputs[-1][0] - 1,
+                                  history_after=lambda cursor: [row for row in outputs if row[0] > cursor])
+        ctx = Context.__new__(Context)
+        ctx.murmur = session
+        ctx.sleep = lambda _: None
+        ctx.observe_delivery("A")
+        self.assertEqual(ctx.expect_delivery(first, "TargetApp"), first)
+        outputs.append((2, second))
+        ctx.observe_delivery("A")
+        # This observation starts at row 1, independently of the first sample.
+        self.assertEqual(ctx.expect_delivery(second, "TargetApp"), second)
+        with self.assertRaisesRegex(Fail, "differs at character"):
+            ctx.expect_delivery(first, "TargetApp")
+        outputs.append((3, second))
+        with self.assertRaisesRegex(Fail, "Expected one output"):
+            ctx.observed_text()
+
+    def test_history_oracle_reads_disposable_profile_without_creating_database(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as folder:
+            session = murmur.MurmurSession.__new__(murmur.MurmurSession)
+            session.home = Path(folder)
+            self.assertEqual(session.history_cursor(), 0)
+            self.assertFalse(session.history_path.exists())
+            session.data.mkdir(parents=True)
+            with sqlite3.connect(session.history_path) as db:
+                db.execute("CREATE TABLE entries (id INTEGER PRIMARY KEY, text TEXT NOT NULL)")
+                db.execute("INSERT INTO entries(text) VALUES (?)", ("The fox. ",))
+            self.assertEqual(session.history_after(0), [(1, "The fox. ")])
+            self.assertEqual(session.history_cursor(), 1)
+            self.assertEqual(session.history_after(1), [])
+
+    def test_history_opt_in_is_scoped_to_dictation_checks(self):
+        ctx = Context.__new__(Context)
+        ctx.murmur = SimpleNamespace(base_config={"privacy": {"history_enabled": False}})
+        for check_id, wanted in (("S1", False), ("H2", True), ("I3", True), ("F13", True),
+                                 ("M3", True), ("C1", False)):
+            ctx.begin(check_id)
+            self.assertEqual(ctx.murmur.base_config["privacy"]["history_enabled"], wanted)
+
+
+class TerminalBufferTests(unittest.TestCase):
+    def test_selector_ignores_title_text_pattern_and_chooses_prompt_buffer(self):
+        title, buffer = object(), object()
+        with mock.patch.object(uia, "descendants", return_value=[title, buffer]), \
+             mock.patch.object(uia, "has_pattern", return_value=True), \
+             mock.patch.object(uia, "text", side_effect=["Murmur desktop terminal",
+                                                        "PS C:\\Users\\qa> The quick brown fox"]):
+            self.assertIs(uia.terminal_text_element(object(), timeout=0), buffer)
+
+    def test_selector_does_not_accept_title_when_prompt_is_absent(self):
+        with mock.patch.object(uia, "descendants", return_value=[object()]), \
+             mock.patch.object(uia, "has_pattern", return_value=True), \
+             mock.patch.object(uia, "text", return_value="Murmur desktop terminal"):
+            with self.assertRaisesRegex(uia.NotFound, "PowerShell prompt"):
+                uia.terminal_text_element(object(), timeout=0)
 
 
 class ConfigWriterTests(unittest.TestCase):

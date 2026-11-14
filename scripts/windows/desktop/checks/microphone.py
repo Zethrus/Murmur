@@ -41,7 +41,6 @@ def m1_desktop_apps_off(ctx):
 
 
 def m3_restored(ctx):
-    expected = ctx.golden("A")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     ctx.murmur.page("Audio")
     uia.invoke(uia.find(ctx.murmur.settings(), name_="Refresh inputs", control_type_=uia.BUTTON, timeout=10, sleep=ctx.sleep))
@@ -52,6 +51,7 @@ def m3_restored(ctx):
     app = ctx.target("A")
     app.focus()
     levels = []
+    ctx.observe_delivery("A")
     ctx.press(ctx.hotkey)
     if not ctx.murmur.wait_state("listening", 5):
         ctx.release(ctx.hotkey, "together")
@@ -69,4 +69,4 @@ def m3_restored(ctx):
     ctx.note(f"level meter maximum {max(levels, default=0)} over {len(levels)} samples")
     if not levels or max(levels) <= 0:
         raise Fail("The level meter did not move during the dictation")
-    ctx.expect(expected, text, "dictation after restoring the switch")
+    ctx.expect_delivery(text, "dictation after restoring the switch")

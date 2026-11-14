@@ -8,30 +8,27 @@ from context import Fail
 
 
 def f1_same_window(ctx):
-    expected = ctx.golden("A")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     app = ctx.target("A")
     app.focus()
     ctx.dictate("A")
-    ctx.expect(expected, app.wait_text(), "same window")
+    ctx.expect_delivery(app.wait_text(), "same window")
     ctx.settle()
 
 
 def f2_focus_change(ctx):
-    expected = ctx.golden("A")
     a, b = ctx.target("A"), ctx.target("B")
     produce_held(ctx, "A", a, b)
     ctx.screenshot(ctx.murmur.overlay_hwnd(), "held.png")
     require_empty(a, b)
     b.focus()
     click_overlay(ctx, "Insert here", expect_foreground=b.hwnd)
-    ctx.expect(expected, b.wait_text(), "Insert here into the focused window")
+    ctx.expect_delivery(b.wait_text(), "Insert here into the focused window")
     require_empty(a)
     wait_not_held(ctx)
 
 
 def f3_window_replaced(ctx):
-    ctx.golden("A")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     a = ctx.target("A")
     a.focus()
@@ -50,7 +47,7 @@ def f3_window_replaced(ctx):
 
 
 def f4_copy_discard_expiry(ctx):
-    expected = ctx.golden("A")
+    ctx.murmur.ensure(ctx.fixtures["A"].path)
     ctx.clipboard_guard()
     a, b = ctx.target("A"), ctx.target("B")
     win32.set_clipboard_text("before")
@@ -58,8 +55,7 @@ def f4_copy_discard_expiry(ctx):
     click_overlay(ctx, "Copy", expect_foreground=b.hwnd)
     ctx.sleep(0.5)
     clipboard = win32.clipboard_text() or ""
-    if clipboard.strip() != expected.strip():
-        raise Fail(f"Copy put {clipboard!r} on the clipboard, expected {expected.strip()!r}")
+    ctx.expect_delivery(clipboard, "Copy clipboard")
     wait_not_held(ctx)
     produce_held(ctx, "A", a, b)
     click_overlay(ctx, "Discard", expect_foreground=b.hwnd)
@@ -77,7 +73,6 @@ def f4_copy_discard_expiry(ctx):
 
 
 def f5_refocus(ctx):
-    expected = ctx.golden("A")
     config = {"injection": {"focus_change": "refocus"}}
     a, b = ctx.target("A"), ctx.target("B")
     focus_change_dictation(ctx, "A", a, b, config)
@@ -89,11 +84,10 @@ def f5_refocus(ctx):
         ctx.note("Windows refused to refocus A: the transcript was held (accepted outcome)")
         click_overlay(ctx, "Discard")
         return
-    ctx.expect(expected, a.wait_text(), "refocused window A")
+    ctx.expect_delivery(a.wait_text(), "refocused window A")
 
 
 def f6_copy_mode(ctx):
-    expected = ctx.golden("A")
     config = {"injection": {"focus_change": "copy"}}
     ctx.clipboard_guard()
     win32.set_clipboard_text("before")
@@ -105,16 +99,14 @@ def f6_copy_mode(ctx):
     ctx.settle()
     require_empty(a, b)
     clipboard = win32.clipboard_text() or ""
-    if clipboard.strip() != expected.strip():
-        raise Fail(f"Copy mode put {clipboard!r} on the clipboard, expected {expected.strip()!r}")
+    ctx.expect_delivery(clipboard, "Copy mode clipboard")
     ctx.note(f"overlay after delivery: {names[:6]}")
 
 
 def f7_insert_mode(ctx):
-    expected = ctx.golden("A")
     a, b = ctx.target("A"), ctx.target("B")
     focus_change_dictation(ctx, "A", a, b, {"injection": {"focus_change": "insert"}})
-    ctx.expect(expected, b.wait_text(), "new focus (insert mode)")
+    ctx.expect_delivery(b.wait_text(), "new focus (insert mode)")
     require_empty(a)
     ctx.settle()
 
@@ -133,7 +125,6 @@ def f8_from_settings(ctx):
 
 
 def f11_drag_delivery(ctx):
-    expected = ctx.golden("A")
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"overlay": {"idle_view": "pill"}})
     ctx.restorer.push("reset the overlay placement", lambda: setattr(ctx.murmur, "config", {}))
     app = ctx.target("A")
@@ -170,11 +161,12 @@ def f11_drag_delivery(ctx):
     first = app.first_key_time()
     if first is None or first < released:
         raise Fail("Delivery did not wait for the mouse release")
-    ctx.expect(expected, text, "after the drag")
+    ctx.expect_delivery(text, "after the drag")
 
 
 def f12_log_privacy(ctx):
-    texts = [t.strip() for t in ctx.goldens.texts() if len(t.strip()) >= 8]
+    texts = [t.strip() for t in dict.fromkeys([row[1] for row in ctx.murmur.history_after(0)])
+             if len(t.strip()) >= 8]
     if not texts:
         expected = ctx.golden("A")
         texts = [expected.strip()]
@@ -184,26 +176,42 @@ def f12_log_privacy(ctx):
     leaked = [t for t in texts if t in log or t.lower() in log.lower()]
     if leaked:
         raise Fail(f"Transcript text appears in murmur.log: {leaked[0]!r}")
-    ctx.note(f"{len(texts)} golden texts searched in {len(log.splitlines())} log lines")
+    ctx.note(f"{len(texts)} observed outputs searched in {len(log.splitlines())} log lines")
 
 
-def _hold_modifiers_through_delivery(ctx, app, expected):
+def _hold_modifiers_through_delivery(ctx, app):
     """Direct delivery with Ctrl+Alt still physically held while the transcript is typed: the
     path where a typed 'd' could fire WM_HOTKEY again (hotkey.rs ignore_dictation_press)."""
     modifiers, key = win32.parse_combo(D_HOTKEY)
     app.focus()
+    ctx.observe_delivery("D")
+    log_before = len(ctx.murmur.log())
+    started = time.monotonic()
+    timeline = []
+
+    def record(stage):
+        state = ctx.murmur.overlay_state()
+        item = (round(time.monotonic() - started, 3), stage, state, len(app.text()), len(app.delivered()),
+                app.first_key_time())
+        if not timeline or item[1:3] != timeline[-1][1:3] or item[3:5] != timeline[-1][3:5]:
+            timeline.append(item)
+        return state
+
     ctx.press(D_HOTKEY)
+    record("hotkey down")
     if not ctx.murmur.wait_state("listening", 5):
         ctx.release(D_HOTKEY, "together")
         raise Fail(f"Dictation did not start (overlay: {ctx.murmur.overlay_state()})")
+    record("listening")
     ctx.restorer.push("release the hotkey modifiers", lambda: win32.key_up(*reversed(modifiers)))
     ctx.sleep(ctx.fixtures["D"].speech_seconds + 0.8)
     win32.key_up(key)
+    record("D up; Ctrl+Alt held")
     restarted = False
     deadline = time.monotonic() + 20
     # Keep Ctrl+Alt down past Murmur's 600 ms modifier wait, until typing has finished.
     while time.monotonic() < deadline:
-        state = ctx.murmur.overlay_state()
+        state = record("Ctrl+Alt held")
         restarted = restarted or (state == "listening" and bool(app.text()))
         typed = app.delivered()
         if typed and time.monotonic() - typed[-1]["t"] > 1.5:
@@ -211,28 +219,38 @@ def _hold_modifiers_through_delivery(ctx, app, expected):
         ctx.sleep(0.05)
     typed_while_held = bool(app.text())
     win32.key_up(*reversed(modifiers))
+    record("modifiers up")
     text = app.wait_text()
     restarted = restarted or win32.wait_for(lambda: ctx.murmur.overlay_state() == "listening", 2.0, 0.05,
                                             sleep=ctx.sleep)
     ctx.settle()
+    record("settled")
+    log_tail = ctx.murmur.log()[log_before:]
+    lines = ["time_s\tstage\toverlay\ttarget_chars\tdelivered_keys\tfirst_key_epoch",
+             *["\t".join(map(str, item)) for item in timeline], "app milestones:",
+             *[line for line in log_tail.splitlines() if any(phrase in line for phrase in
+               ("utterance captured", "transcript received", "transcript delivered", "utterance discarded"))],
+             f"new history outputs: {len(ctx.murmur.history_after(ctx._delivery_cursor))}"]
+    ctx.artifact("delivery-timing.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     if restarted:
         raise Fail("Typing a 'd' with Ctrl+Alt held restarted dictation")
     if not typed_while_held:
         ctx.note("typing had not started while Ctrl+Alt were held (20 s); the retrigger path was not reached")
         raise Fail("Delivery did not start while the modifiers were held, so the retrigger path was not tested")
     ctx.note(f"typed with Ctrl+Alt held: {text!r}")
-    if text != expected:
+    observed = ctx.observed_text()
+    if "d" not in observed.lower():
+        raise Fail("The D fixture output did not contain a retrigger key")
+    if text != observed:
         # Characters typed with Ctrl+Alt down may be interpreted as AltGr combinations by the target.
-        ctx.note(f"text differs from the clean golden {expected!r} (modifiers were down while typing)")
+        ctx.note(f"target differed from this utterance's output {observed!r} "
+                 "(modifiers were down while typing)")
 
 
 def f13_no_retrigger(ctx):
-    expected = ctx.golden("D", hotkey=D_HOTKEY)
-    if "d" not in expected.lower():
-        raise Fail(f"The fixture transcript has no 'd': {expected!r}")
     ctx.murmur.ensure(ctx.fixtures["D"].path, {"general": {"hotkey": D_HOTKEY}})
     ctx.clipboard_guard()  # the Prefer paste pass goes through the clipboard
-    _hold_modifiers_through_delivery(ctx, ctx.target("direct"), expected)
+    _hold_modifiers_through_delivery(ctx, ctx.target("direct"))
     for prefer_paste in (False, True):
         config = {"general": {"hotkey": D_HOTKEY}, "injection": {"prefer_paste": prefer_paste}}
         a, b = ctx.target(f"A{int(prefer_paste)}"), ctx.target(f"B{int(prefer_paste)}")
@@ -247,6 +265,6 @@ def f13_no_retrigger(ctx):
         ctx.settle()
         if restarted:
             raise Fail(f"Typing the transcript restarted dictation (prefer paste {prefer_paste})")
-        ctx.expect(expected, text, f"Insert here (prefer paste {prefer_paste})")
+        ctx.expect_delivery(text, f"Insert here (prefer paste {prefer_paste})")
         require_empty(a)
         wait_not_held(ctx)

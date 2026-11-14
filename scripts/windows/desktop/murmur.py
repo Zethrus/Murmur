@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import urllib.request
@@ -132,6 +133,27 @@ class MurmurSession:
     def config_path(self):
         return self.appdata / "Murmur" / "config.toml"
 
+    @property
+    def history_path(self):
+        return self.data / "history.sqlite"
+
+    def history_after(self, cursor):
+        """Read the app's pre-injection output, independently of any target window.
+
+        The database exists only in this disposable test profile. A missing database before
+        the first delivery has cursor zero; later reads never create one by accident.
+        """
+        if not self.history_path.is_file():
+            return []
+        with sqlite3.connect(self.history_path.resolve().as_uri() + "?mode=ro", uri=True) as db:
+            return db.execute("SELECT id, text FROM entries WHERE id > ? ORDER BY id", (cursor,)).fetchall()
+
+    def history_cursor(self):
+        if not self.history_path.is_file():
+            return 0
+        with sqlite3.connect(self.history_path.resolve().as_uri() + "?mode=ro", uri=True) as db:
+            return db.execute("SELECT COALESCE(MAX(id), 0) FROM entries").fetchone()[0]
+
     def prepare(self):
         if not self.app.is_file():
             self.app.parent.mkdir(parents=True, exist_ok=True)
@@ -155,7 +177,12 @@ class MurmurSession:
     def write_config(self, overrides=None):
         self.config = tomlconfig.merge(self.base_config, overrides or {})
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(tomlconfig.dumps(self.config), encoding="utf-8")
+        temporary = self.config_path.with_suffix(".toml.tmp")
+        try:
+            temporary.write_text(tomlconfig.dumps(self.config), encoding="utf-8")
+            os.replace(temporary, self.config_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def install(self, source):
         """Offline install through the app's own verifier (--install-component)."""
