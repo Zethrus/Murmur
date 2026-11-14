@@ -80,8 +80,8 @@ def remove_tree(path, attempts=10):
 
 
 def run_checks(ctx, selected, repeat, lookup, log=print):
-    """Run checks until complete, user input, or shared startup failure."""
-    from guard import UserInput
+    """Run checks until complete, real input, guard loss, or shared startup failure."""
+    from guard import GuardUnavailable, UserInput
     import win32
     from context import Fail, Skip
     from murmur import StartupError
@@ -95,9 +95,12 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
         startup_failure = ""
         log(f"[{check.id}] {check.title} (attempt {attempt})")
         try:
+            ctx.guard.check()
             lookup(check)(ctx)
+            ctx.guard.check()
         except UserInput as error:
-            reason = f"aborted: user input ({error})"
+            kind = "input guard unavailable" if isinstance(error, GuardUnavailable) else "user input"
+            reason = f"aborted: {kind} ({error})"
             results.append(report.Result(check.id, report.ABORTED, reason, check.title, check.group,
                                          check.best_effort, list(ctx.artifacts), list(ctx.notes),
                                          round(time.monotonic() - started, 1), attempt))
@@ -124,6 +127,14 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
         except Exception as error:  # noqa: BLE001 - one broken check must not stop the run
             trace = ctx.artifact("harness-error.txt")
             trace.write_text(traceback.format_exc(), encoding="utf-8")
+            # UIA misses otherwise have no visual evidence. Keep the failing profile's
+            # Settings frame before per-check restoration hides or stops it.
+            try:
+                hwnd = ctx.murmur.settings_hwnd()
+                if hwnd:
+                    ctx.screenshot(hwnd, "settings-error.png")
+            except Exception as diagnostic:  # noqa: BLE001 - retain the original failure
+                ctx.note(f"Settings diagnostic failed: {type(diagnostic).__name__}: {diagnostic}")
             message = f"harness error: {type(error).__name__}: {error}"
             # A best-effort check that could not run is a skip, never a pass (and not a failure).
             status, reason = (report.SKIPPED, f"could not run: {message}") if check.best_effort \
@@ -179,7 +190,7 @@ def main(argv=None):
     import golden
     import targets
     from context import Context
-    from guard import Guard, UserInput
+    from guard import Guard, GuardUnavailable, UserInput
     from murmur import Build, MurmurSession, fetch_model
     from restore import Restorer
 
@@ -216,7 +227,8 @@ def main(argv=None):
         results, aborted = run_checks(ctx, selected, args.repeat, checks.lookup)
         meta["goldens"] = ctx.goldens.as_dict()
     except UserInput as error:
-        aborted = f"aborted: user input ({error})"
+        kind = "input guard unavailable" if isinstance(error, GuardUnavailable) else "user input"
+        aborted = f"aborted: {kind} ({error})"
         results += [report.Result(c.id, report.ABORTED, aborted, c.title, c.group, c.best_effort) for c in selected
                     if c.id not in {r.id for r in results}]
     except Exception as error:  # noqa: BLE001 - setup failure: every check is reported
@@ -227,6 +239,7 @@ def main(argv=None):
                     for c in selected if c.id not in {r.id for r in results}]
     finally:
         guard.stop()
+        meta["input_guard"] = guard.diagnostics()
         win32.release_all()
         failures = restorer.restore_all()
         if failures:

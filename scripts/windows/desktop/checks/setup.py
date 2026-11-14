@@ -136,7 +136,11 @@ def p3_first_run(ctx):
     session.install_engine()  # the manifest's engine URL points at a release that does not exist
     session.launch(wav=ctx.fixtures["A"].path, config={}, keep_settings=True)
     window = session.settings()
-    uia.find(window, name_="Welcome", timeout=30, sleep=ctx.sleep)
+    try:
+        uia.find(window, name_="Welcome", timeout=30, sleep=ctx.sleep)
+    except uia.NotFound:
+        ctx.screenshot(session.settings_hwnd(), "missing-welcome.png")
+        raise
     _button(window, ctx, "Next")
     _radio(window, ctx, "English only")
     _button(window, ctx, "Next")

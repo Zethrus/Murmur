@@ -398,6 +398,7 @@ class FixtureTests(unittest.TestCase):
 class FakeContext:
     def __init__(self, work):
         self.restorer = restore.Restorer(log=lambda _: None)
+        self.guard = guard.NoGuard()
         self.out = Path(work)
         self.artifacts, self.notes, self.check_id = [], [], ""
 
@@ -466,6 +467,22 @@ class RunnerTests(unittest.TestCase):
                          [("H1", report.PASS), ("H2", report.ABORTED), ("H3", report.ABORTED),
                           ("H1", report.ABORTED), ("H2", report.ABORTED), ("H3", report.ABORTED)])
         self.assertEqual(undone, ["H1", "H2"])
+
+    def test_lost_input_guard_aborts_without_claiming_real_user_activity(self):
+        def lost(_):
+            raise guard.GuardUnavailable("probe not observed")
+
+        results, aborted, undone = self.run_with({"H1": lost}, "H1,H2")
+        self.assertIn("input guard unavailable", aborted)
+        self.assertNotIn("user input", aborted)
+        self.assertEqual([r.status for r in results], [report.ABORTED, report.ABORTED])
+        self.assertEqual(undone, ["H1"])
+
+    def test_guard_loss_during_a_check_cannot_be_reported_as_pass(self):
+        self.ctx.guard = SimpleNamespace(check=mock.Mock(side_effect=[None, guard.GuardUnavailable("probe lost")]))
+        results, aborted, _ = self.run_with({"H1": lambda _: None}, "H1,H2")
+        self.assertIn("input guard unavailable", aborted)
+        self.assertEqual([r.status for r in results], [report.ABORTED, report.ABORTED])
 
     def test_startup_failure_preserves_evidence_and_stops_cascading_checks(self):
         session = murmur.MurmurSession(SimpleNamespace(), self.work, SimpleNamespace(), {})
@@ -601,6 +618,50 @@ class GuardMouseTests(unittest.TestCase):
     def test_probe_is_an_unassigned_key_with_a_tag(self):
         self.assertEqual(guard.PROBE_VK, 0x88)  # reserved/unassigned virtual-key code
         self.assertLess(guard.PROBE_TIMEOUT, guard.PROBE_INTERVAL)
+
+    def test_missing_liveness_probe_trips_without_reenabling_input(self):
+        watcher = guard.Guard()
+        with mock.patch.object(guard, "PROBE_INTERVAL", 0.001), \
+             mock.patch.object(guard, "PROBE_TIMEOUT", 0.001), \
+             mock.patch.object(watcher, "_send_probe", return_value=True) as send:
+            watcher._watch()
+        with self.assertRaises(guard.GuardUnavailable):
+            watcher.check()
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(send.call_args.args[0] & 0xFFFFFFFF, guard.PROBE_TAG)
+        self.assertEqual(watcher.diagnostics()["probes_seen"], 0)
+
+
+class SettingsCheckTests(unittest.TestCase):
+    def test_theme_cannot_pass_a_boot_error_page_that_changes_colour(self):
+        from checks import settings as checks_settings
+        ctx = SimpleNamespace(murmur=SimpleNamespace(ensure=lambda *_: None, show_settings=lambda: 42,
+                                                     settings=lambda: "window"),
+                              fixtures={"A": SimpleNamespace(path="fixture.wav")},
+                              restorer=restore.Restorer(log=lambda _: None), sleep=lambda _: None)
+        with mock.patch.object(win32, "Registry", return_value=SimpleNamespace(read=lambda *_: restore.MISSING)), \
+             mock.patch.object(checks_settings.uia, "find", side_effect=checks_settings.uia.NotFound("General")):
+            with self.assertRaises(checks_settings.uia.NotFound):
+                checks_settings.s3_theme(ctx)
+
+    def test_minimum_size_uses_user_resize_and_detects_undersized_client(self):
+        from checks import settings as checks_settings
+        ctx = SimpleNamespace(murmur=SimpleNamespace(ensure=lambda _: None, show_settings=lambda: 42),
+                              fixtures={"A": SimpleNamespace(path="fixture.wav")},
+                              restorer=restore.Restorer(log=lambda _: None), sleep=lambda _: None, note=lambda _: None,
+                              screenshot=lambda *_: None)
+        with mock.patch.object(win32, "outer_rect", return_value=(0, 0, 1016, 819)), \
+             mock.patch.object(win32, "dpi_scale", return_value=1), \
+             mock.patch.object(win32, "client_size", side_effect=[(1000, 780), (700, 500)]), \
+             mock.patch.object(win32, "activate"), \
+             mock.patch.object(win32, "drag") as drag, \
+             mock.patch.object(win32, "set_window_pos") as set_pos:
+            with self.assertRaisesRegex(Fail, "below the 760x560 px minimum"):
+                checks_settings.s4_minimum_size(ctx)
+            drag.assert_called_once_with((1012, 815), (496, 396))
+            set_pos.assert_not_called()
+            ctx.restorer.restore_all()
+            set_pos.assert_called_once()
 
 
 class GoldenDuplicateTests(unittest.TestCase):

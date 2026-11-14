@@ -62,6 +62,8 @@ def s3_theme(ctx):
     ctx.restorer.push("broadcast the restored theme", lambda: win32.broadcast_setting_change("ImmersiveColorSet"))
     readings = {}
     for light in (1, 0, 1):
+        # A WebView boot-error page also follows the OS theme. Require real Settings content.
+        uia.find(ctx.murmur.settings(), name_="General", timeout=5, sleep=ctx.sleep)
         value.set(ctx.restorer, light, winreg.REG_DWORD)
         win32.broadcast_setting_change("ImmersiveColorSet")
         wanted = "light" if light else "dark"
@@ -81,15 +83,25 @@ def s3_theme(ctx):
 def s4_minimum_size(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     hwnd = ctx.murmur.show_settings()
-    left, top, right, bottom = win32.window_rect(hwnd)
+    left, top, right, bottom = win32.outer_rect(hwnd)
     ctx.restorer.push("restore the Settings size", lambda: win32.set_window_pos(hwnd, left, top, right - left,
                                                                                 bottom - top))
     scale = win32.dpi_scale(hwnd)
-    win32.set_window_pos(hwnd, left, top, round(500 * scale), round(400 * scale))
+    # The configured minimum is a user resize limit. SetWindowPos can set an
+    # undersized outer frame directly, so reproduce a user's corner drag.
+    start = (right - 4, bottom - 4)
+    end = (start[0] - (right - left - round(500 * scale)),
+           start[1] - (bottom - top - round(400 * scale)))
+    before = win32.client_size(hwnd)
+    win32.activate(hwnd)
+    win32.drag(start, end)
     ctx.sleep(1.0)
     width, height = win32.client_size(hwnd)
+    ctx.screenshot(hwnd, "min-size-result.png")
+    if before[0] - width < 20 or before[1] - height < 20:
+        raise RuntimeError(f"Settings resize grip did not move: client {before} -> {(width, height)}")
     minimum = (round(MINIMUM_SIZE[0] * scale), round(MINIMUM_SIZE[1] * scale))
-    ctx.note(f"asked for 500x400 logical, got client {width}x{height} px (minimum {minimum[0]}x{minimum[1]})")
+    ctx.note(f"dragged toward 500x400 logical, got client {width}x{height} px (minimum {minimum[0]}x{minimum[1]})")
     if width < minimum[0] - 2 or height < minimum[1] - 2:
         raise Fail(f"Settings shrank to {width}x{height} px, below the {minimum[0]}x{minimum[1]} px minimum")
     window = ctx.murmur.settings()
@@ -98,4 +110,3 @@ def s4_minimum_size(ctx):
         uia.invoke(button)
         ctx.sleep(0.6)
         ctx.screenshot(hwnd, f"min-{page.lower()}.png")
-    win32.set_window_pos(hwnd, left, top, round(DEFAULT_SIZE[0] * scale), round(DEFAULT_SIZE[1] * scale))

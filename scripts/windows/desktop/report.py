@@ -1,7 +1,7 @@
 """Check results and the desktop report (desktop-report.json / desktop-report.md). Pure Python.
 
 Every checklist id gets one row. A check returns pass, fail (with a reason) or skipped (with a
-reason); a run stopped by real user input marks the remaining checks "aborted". With --repeat N
+reason); a run stopped by real input or guard loss marks the remaining checks "aborted". With --repeat N
 each id keeps every attempt and the row shows the aggregate (any fail -> fail, "flaky" noted).
 """
 from dataclasses import asdict, dataclass, field

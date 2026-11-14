@@ -48,6 +48,13 @@ fn validate_overlay_acl_on_load(label: &str, event: tauri::webview::PageLoadEven
 
 fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let handle = app.handle().clone();
+    // Configured webviews can execute IPC before this hook runs. Create them only after
+    // AppState is managed, so the first get_config/get_status cannot race startup.
+    let runtime = app::AppState::new(handle.clone())?;
+    app.manage(runtime);
+    for window in &app.config().app.windows {
+        tauri::WebviewWindowBuilder::from_config(&handle, window)?.build()?;
+    }
     let overlay_view = handle
         .get_webview_window("overlay")
         .ok_or_else(|| anyhow::anyhow!("Overlay webview unavailable"))?;
@@ -57,8 +64,6 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     validate_overlay_drag_acl(overlay_view.as_ref())?;
     #[cfg(windows)]
     let _ = overlay_view;
-    let runtime = app::AppState::new(handle.clone())?;
-    app.manage(runtime);
     let state = app.state::<app::AppState>();
     state.companion.start();
     state.companion_network.start();
@@ -445,5 +450,8 @@ mod overlay_acl_tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("overlay-drag")));
+        let windows = config["app"]["windows"].as_array().unwrap();
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|window| window["create"] == false));
     }
 }

@@ -418,6 +418,14 @@ def window_rect(hwnd):
     return rect.tuple()
 
 
+def outer_rect(hwnd):
+    """Full frame, including the invisible resize border used for a mouse resize."""
+    rect = RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return rect.tuple()
+
+
 def client_size(hwnd):
     rect = RECT()
     user32.GetClientRect(hwnd, ctypes.byref(rect))
