@@ -31,11 +31,16 @@ WM_QUIT = 0x0012
 WM_USER = 0x0400
 WM_GUARD_HEARTBEAT = WM_USER + 1
 WM_MOUSEMOVE = 0x0200
+WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
 # A real mouse that only drifts by a pixel or two (desk vibration) is not treated as a person.
 MOVE_TOLERANCE = 3
 # Liveness probe: key-up of a reserved virtual key, tagged so it is recognised exactly.
 PROBE_VK = 0x88
 PROBE_TAG = 0x4D55524D  # "MURM"
+VK_PACKET = 0xE7
+# A Unicode noncharacter gives the owned diagnostic window a documented VK_PACKET event.
+# The window never translates the key message to text.
+OWNED_PROBE_CHAR = 0xFDD0
 PROBE_INTERVAL = 1.0
 PROBE_TIMEOUT = 0.5
 
@@ -67,7 +72,7 @@ def is_injected_mouse(flags):
 
 
 class _HookObserver:
-    def __init__(self, diagnostic=False):
+    def __init__(self, diagnostic=False, owned_probe_target=None):
         self.tripped = threading.Event()
         self.reason = ""
         self.unavailable = False
@@ -110,6 +115,13 @@ class _HookObserver:
         self._mouse_probe_send_result = None
         self._mouse_probe_send_error = None
         self._desktop_context = None
+        self._owned_probe_target = owned_probe_target
+        self._owned_probe_tag = None
+        self._owned_probe_messages = set()
+        self._owned_probe_status = "not_requested" if owned_probe_target is None else "pending"
+        self._owned_probe_send_result = None
+        self._owned_probe_send_error = None
+        self._owned_probe_release_result = None
 
     def _record_injected_key(self, message, event):
         """Keep only our probe candidates; never retain a person's keystrokes."""
@@ -118,6 +130,13 @@ class _HookObserver:
         self._injected_key_events += 1
         if event.vkCode != PROBE_VK and event.dwExtraInfo & 0xFFFFFFFF != PROBE_TAG:
             return
+        owned_match = (self._owned_probe_target is not None and event.vkCode == VK_PACKET
+                       and event.dwExtraInfo == self._owned_probe_tag
+                       and message in (WM_KEYDOWN, WM_KEYUP))
+        if owned_match:
+            self._owned_probe_messages.add(int(message))
+            if self._owned_probe_messages == {WM_KEYDOWN, WM_KEYUP}:
+                self._owned_probe_status = "both_hook_callbacks"
         if len(self._probe_events) == 8:
             self._probe_events.pop(0)
         self._probe_events.append({"message": int(message), "vk": int(event.vkCode),
@@ -125,8 +144,9 @@ class _HookObserver:
                                    "extra_info": f"0x{event.dwExtraInfo:016x}",
                                    "expected_tag": f"0x{self._expected_probe_tag:016x}"
                                    if self._expected_probe_tag is not None else None,
-                                   "matches_expected": event.vkCode == PROBE_VK
-                                   and event.dwExtraInfo == self._expected_probe_tag})
+                                   "matches_expected": (event.vkCode == PROBE_VK
+                                                        and event.dwExtraInfo == self._expected_probe_tag)
+                                   or owned_match})
 
     # ------------------------------------------------------------ hook thread
     def _trip(self, reason, unavailable=False):
@@ -264,6 +284,39 @@ class _HookObserver:
         self._mouse_probe_send_result = sent
         self._mouse_probe_send_error = ctypes.get_last_error() if sent != 1 else None
 
+    def _send_owned_probe(self, tag):
+        """Only diagnostic.py may request this, after foregrounding its own window."""
+        hwnd, owner_pid = self._owned_probe_target
+        actual_pid = wintypes.DWORD()
+        user32 = win32.user32
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(actual_pid))
+        if (not hwnd or actual_pid.value != owner_pid or user32.GetForegroundWindow() != hwnd):
+            self._owned_probe_status = "owner_or_focus_lost"
+            return False
+        if self.tripped.is_set():
+            self._owned_probe_status = "real_input"
+            return False
+        self._owned_probe_tag = tag
+        events = (win32.INPUT * 2)()
+        for index, flags in enumerate((win32.KEYEVENTF_UNICODE,
+                                       win32.KEYEVENTF_UNICODE | win32.KEYEVENTF_KEYUP)):
+            events[index].type = win32.INPUT_KEYBOARD
+            events[index].ki = win32.KEYBDINPUT(wVk=0, wScan=OWNED_PROBE_CHAR, dwFlags=flags,
+                                                time=0, dwExtraInfo=tag)
+        self._owned_probe_status = "callbacks_missing"
+        sent = user32.SendInput(2, events, ctypes.sizeof(win32.INPUT))
+        self._owned_probe_send_result = sent
+        self._owned_probe_send_error = ctypes.get_last_error() if sent != 2 else None
+        if sent != 2:
+            if sent == 1:
+                # If only key-down entered the stream, try to release VK_PACKET before stopping.
+                release = (win32.INPUT * 1)(events[1])
+                self._owned_probe_release_result = user32.SendInput(1, release,
+                                                                     ctypes.sizeof(win32.INPUT))
+            self._owned_probe_status = "send_failed"
+            return False
+        return True
+
     def _watch(self):
         while not self._stopping.is_set():
             if self.tripped.is_set():
@@ -274,6 +327,12 @@ class _HookObserver:
             if self._diagnostic:
                 self._post_heartbeat()
                 if self._probe_sequence == 1:
+                    if self._owned_probe_target is not None:
+                        if not self._send_owned_probe(self._expected_probe_tag):
+                            self._trip("owned diagnostic probe could not be sent safely", unavailable=True)
+                            return
+                        if self.tripped.is_set():
+                            return
                     self._mouse_probe_tag = self._expected_probe_tag
                     self._send_mouse_probe(self._mouse_probe_tag)
                 if self.tripped.is_set():
@@ -338,6 +397,11 @@ class _HookObserver:
                                     "zero_move_probe_send_result": self._mouse_probe_send_result,
                                     "zero_move_probe_send_error": self._mouse_probe_send_error,
                                     "zero_move_probe_seen": self._mouse_probe_seen,
+                                    "owned_probe_status": self._owned_probe_status,
+                                    "owned_probe_send_result": self._owned_probe_send_result,
+                                    "owned_probe_send_error": self._owned_probe_send_error,
+                                    "owned_probe_release_result": self._owned_probe_release_result,
+                                    "owned_probe_messages": sorted(self._owned_probe_messages),
                                     "input_desktop": win32.input_desktop(),
                                     "desktop_context": self._desktop_context,
                                     "pointer_bits": ctypes.sizeof(ctypes.c_void_p) * 8,
@@ -364,9 +428,10 @@ class _HookObserver:
             self.tripped.wait(min(0.05, remaining))
 
 
-def _guard_worker(connection, diagnostic=False):
+def _guard_worker(connection, diagnostic=False, owned_probe_target=None):
     """Own the hooks and their Python callbacks in a process without UIA/COM work."""
-    observer = _HookObserver(diagnostic=diagnostic) if diagnostic else _HookObserver()
+    observer = (_HookObserver(diagnostic=True, owned_probe_target=owned_probe_target)
+                if diagnostic else _HookObserver())
     try:
         observer.start()
         connection.send(("ready", observer.diagnostics()))
@@ -398,7 +463,9 @@ def _guard_worker(connection, diagnostic=False):
 class Guard:
     """Parent-side fail-closed view of the isolated input observer."""
 
-    def __init__(self, diagnostic=False):
+    def __init__(self, diagnostic=False, owned_probe_target=None):
+        if owned_probe_target is not None and not diagnostic:
+            raise ValueError("owned probe requires diagnostic mode")
         self.tripped = threading.Event()
         self.reason = ""
         self.unavailable = False
@@ -409,6 +476,7 @@ class Guard:
         self._listener = None
         self._receive_lock = threading.Lock()
         self._diagnostic = diagnostic
+        self._owned_probe_target = owned_probe_target
         self._diagnostics = {"probes_seen": 0, "last_probe_latency_ms": None,
                              "max_probe_latency_ms": 0, "last_probe_send_ms": None,
                              "unhook_errors": []}
@@ -459,7 +527,8 @@ class Guard:
         self._started_at = time.monotonic()
         context = multiprocessing.get_context("spawn")
         self._connection, worker_connection = context.Pipe()
-        worker_args = (worker_connection, True) if self._diagnostic else (worker_connection,)
+        worker_args = ((worker_connection, True, self._owned_probe_target) if self._owned_probe_target
+                       else (worker_connection, True) if self._diagnostic else (worker_connection,))
         self._process = context.Process(target=_guard_worker, args=worker_args,
                                         name="input-guard-observer", daemon=True)
         try:

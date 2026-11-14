@@ -56,6 +56,12 @@ def fake_diagnostic_worker(connection, diagnostic):
     connection.close()
 
 
+def fake_owned_probe_worker(connection, diagnostic, target):
+    connection.send(("ready", {"diagnostic": diagnostic, "target": target}))
+    connection.recv()
+    connection.close()
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -758,6 +764,93 @@ class GuardMouseTests(unittest.TestCase):
                          win32.MOUSEEVENTF_MOVE | win32.MOUSEEVENTF_MOVE_NOCOALESCE)
         self.assertEqual(events[0].mi.dwExtraInfo, tag)
 
+    def test_owned_probe_sends_unicode_pair_only_to_verified_foreground_owner(self):
+        watcher = guard._HookObserver(diagnostic=True, owned_probe_target=(55, 123))
+        tag = guard.PROBE_TAG | (1 << 32)
+        send = mock.Mock(return_value=2)
+
+        def window_owner(_hwnd, out):
+            guard.ctypes.cast(out, guard.ctypes.POINTER(guard.wintypes.DWORD)).contents.value = 123
+            return 1
+
+        user32 = SimpleNamespace(GetWindowThreadProcessId=window_owner,
+                                 GetForegroundWindow=mock.Mock(return_value=55), SendInput=send)
+        with mock.patch.object(win32, "user32", user32):
+            self.assertTrue(watcher._send_owned_probe(tag))
+            count, events, size = send.call_args.args
+            self.assertEqual((count, size), (2, guard.ctypes.sizeof(win32.INPUT)))
+            self.assertEqual([(event.type, event.ki.wVk, event.ki.wScan, event.ki.dwFlags,
+                               event.ki.dwExtraInfo) for event in events], [
+                (win32.INPUT_KEYBOARD, 0, guard.OWNED_PROBE_CHAR, win32.KEYEVENTF_UNICODE, tag),
+                (win32.INPUT_KEYBOARD, 0, guard.OWNED_PROBE_CHAR,
+                 win32.KEYEVENTF_UNICODE | win32.KEYEVENTF_KEYUP, tag)])
+            send.reset_mock()
+            user32.GetForegroundWindow.return_value = 77
+            self.assertFalse(watcher._send_owned_probe(tag))
+            send.assert_not_called()
+        self.assertEqual(watcher._owned_probe_status, "owner_or_focus_lost")
+
+    def test_owned_probe_does_not_send_after_real_input(self):
+        watcher = guard._HookObserver(diagnostic=True, owned_probe_target=(55, 123))
+        watcher._trip("real keyboard input")
+
+        def window_owner(_hwnd, out):
+            guard.ctypes.cast(out, guard.ctypes.POINTER(guard.wintypes.DWORD)).contents.value = 123
+            return 1
+
+        send = mock.Mock()
+        user32 = SimpleNamespace(GetWindowThreadProcessId=window_owner,
+                                 GetForegroundWindow=lambda: 55, SendInput=send)
+        with mock.patch.object(win32, "user32", user32):
+            self.assertFalse(watcher._send_owned_probe(guard.PROBE_TAG | (1 << 32)))
+        send.assert_not_called()
+        self.assertEqual(watcher._owned_probe_status, "real_input")
+
+    def test_partial_owned_probe_attempts_key_release_then_fails_closed(self):
+        watcher = guard._HookObserver(diagnostic=True, owned_probe_target=(55, 123))
+
+        def window_owner(_hwnd, out):
+            guard.ctypes.cast(out, guard.ctypes.POINTER(guard.wintypes.DWORD)).contents.value = 123
+            return 1
+
+        send = mock.Mock(side_effect=[1, 1])
+        user32 = SimpleNamespace(GetWindowThreadProcessId=window_owner,
+                                 GetForegroundWindow=lambda: 55, SendInput=send)
+        with mock.patch.object(win32, "user32", user32), \
+             mock.patch.object(guard.ctypes, "get_last_error", return_value=5, create=True):
+            self.assertFalse(watcher._send_owned_probe(guard.PROBE_TAG | (1 << 32)))
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(send.call_args.args[1][0].ki.dwFlags,
+                         win32.KEYEVENTF_UNICODE | win32.KEYEVENTF_KEYUP)
+        self.assertEqual(watcher._owned_probe_release_result, 1)
+        self.assertEqual(watcher._owned_probe_status, "send_failed")
+
+    def test_owned_probe_callbacks_separate_valid_event_from_reserved_key_loss(self):
+        watcher = guard._HookObserver(diagnostic=True, owned_probe_target=(55, 123))
+        tag = guard.PROBE_TAG | (1 << 32)
+
+        def valid_probe(value):
+            watcher._owned_probe_tag = value
+            for message in (guard.WM_KEYDOWN, guard.WM_KEYUP):
+                event = SimpleNamespace(vkCode=guard.VK_PACKET, scanCode=guard.OWNED_PROBE_CHAR,
+                                        flags=guard.LLKHF_INJECTED, dwExtraInfo=value)
+                watcher._record_injected_key(message, event)
+            return True
+
+        with mock.patch.object(guard, "PROBE_TIMEOUT", 0.001), \
+             mock.patch.object(watcher, "_post_heartbeat"), \
+             mock.patch.object(watcher, "_send_mouse_probe"), \
+             mock.patch.object(watcher, "_send_owned_probe", side_effect=valid_probe), \
+             mock.patch.object(watcher, "_send_probe", return_value=True):
+            watcher._watch()
+        with mock.patch.object(win32, "input_desktop", return_value="Default"):
+            state = watcher.diagnostics()["hook_state"]
+        self.assertEqual(state["owned_probe_status"], "both_hook_callbacks")
+        self.assertEqual(state["owned_probe_messages"], [guard.WM_KEYDOWN, guard.WM_KEYUP])
+        self.assertEqual(watcher.probes_seen, 0)
+        with self.assertRaises(guard.GuardUnavailable):
+            watcher.check()
+
     def test_diagnostic_probe_adds_evidence_but_still_fails_closed(self):
         watcher = guard._HookObserver(diagnostic=True)
         with mock.patch.object(guard, "PROBE_TIMEOUT", 0.001), \
@@ -790,7 +883,10 @@ class GuardMouseTests(unittest.TestCase):
              mock.patch.object(guard_diagnostic.win32, "desktop_context",
                                return_value={"window_station": "WinSta0"}), \
              mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic, "_OwnedProbeWindow") as window_factory, \
              mock.patch.object(guard_diagnostic.guard, "Guard") as factory:
+            window_factory.return_value.hwnd = 55
+            window_factory.return_value.open.return_value = True
             instance = factory.return_value
             instance.start.side_effect = guard.UserInput("real keyboard input (virtual key 0x41)")
             instance.diagnostics.return_value = {"probes_seen": 0}
@@ -799,6 +895,20 @@ class GuardMouseTests(unittest.TestCase):
         self.assertEqual(result["parent_desktop_context"]["window_station"], "WinSta0")
         self.assertNotIn("0x41", str(result))
         instance.stop.assert_called_once()
+        window_factory.return_value.close.assert_called_once()
+        factory.assert_called_once_with(diagnostic=True, owned_probe_target=(55, guard_diagnostic.os.getpid()))
+
+    def test_diagnostic_refuses_to_inject_when_own_window_cannot_take_focus(self):
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic, "_OwnedProbeWindow") as window_factory, \
+             mock.patch.object(guard_diagnostic.guard, "Guard") as factory:
+            window_factory.return_value.open.return_value = False
+            window_factory.return_value.diagnostics.return_value = {"status": "focus_denied"}
+            result = guard_diagnostic.diagnose(1)
+        self.assertEqual(result["status"], "probe_window_unavailable")
+        factory.assert_not_called()
 
     def test_missing_liveness_probe_trips_without_reenabling_input(self):
         watcher = guard._HookObserver()
@@ -892,6 +1002,16 @@ class GuardProcessTests(unittest.TestCase):
                 spawned.stop()
         self.assertEqual(spawned.diagnostics()["probes_seen"], 2)
 
+    def test_owned_probe_target_reaches_isolated_worker(self):
+        spawned = guard.Guard(diagnostic=True, owned_probe_target=(55, 123))
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(guard, "_guard_worker", fake_owned_probe_worker):
+            try:
+                spawned.start()
+                self.assertEqual(spawned.diagnostics()["target"], (55, 123))
+            finally:
+                spawned.stop()
+
     def test_real_input_before_first_probe_aborts_start(self):
         spawned = guard.Guard()
         with mock.patch.object(win32, "require_windows"), \
@@ -919,6 +1039,55 @@ class GuardProcessTests(unittest.TestCase):
         with mock.patch.object(guard, "_HookObserver", TouchedObserver):
             guard._guard_worker(self.child)
         self.assertEqual(self.parent.recv(), ("user_input", "real mouse button or wheel input"))
+
+
+class OwnedProbeWindowTests(unittest.TestCase):
+    def test_window_records_only_tagged_probe_messages(self):
+        window = guard_diagnostic._OwnedProbeWindow()
+        window.hwnd = 55
+        tag = guard.PROBE_TAG | (1 << 32)
+        messages = [(guard.WM_KEYDOWN, guard.VK_PACKET, tag),
+                    (guard.WM_KEYUP, guard.VK_PACKET, tag),
+                    (guard.WM_KEYDOWN, 0x41, 0)]
+        current = [None]
+
+        def peek(out, *_args):
+            if not messages:
+                return False
+            kind, vk, extra = messages.pop(0)
+            msg = guard.ctypes.cast(out, guard.ctypes.POINTER(guard.wintypes.MSG)).contents
+            msg.message, msg.wParam = kind, vk
+            current[0] = extra
+            return True
+
+        user32 = SimpleNamespace(PeekMessageW=peek, GetMessageExtraInfo=lambda: current[0],
+                                 DispatchMessageW=mock.Mock())
+        window._drain_messages(user32)
+        self.assertEqual([(event["message"], event["vk"]) for event in window.received_events],
+                         [(guard.WM_KEYDOWN, guard.VK_PACKET), (guard.WM_KEYUP, guard.VK_PACKET)])
+        self.assertEqual(user32.DispatchMessageW.call_count, 3)
+
+    def test_window_restores_previous_focus_only_if_it_still_owns_foreground(self):
+        for foreground_on_close, expected_calls in ((55, [mock.call(55), mock.call(40)]),
+                                                     (77, [mock.call(55)])):
+            with self.subTest(foreground_on_close=foreground_on_close):
+                window = guard_diagnostic._OwnedProbeWindow()
+                window._stop.set()
+                user32 = SimpleNamespace(
+                    GetForegroundWindow=mock.Mock(side_effect=[40, 55, foreground_on_close]),
+                    CreateWindowExW=mock.Mock(return_value=55),
+                    SetForegroundWindow=mock.Mock(return_value=True),
+                    SetFocus=mock.Mock(), GetFocus=mock.Mock(return_value=55),
+                    PeekMessageW=mock.Mock(return_value=False), IsWindow=mock.Mock(return_value=True),
+                    DestroyWindow=mock.Mock())
+                kernel32 = SimpleNamespace(GetModuleHandleW=mock.Mock(return_value=1))
+                with mock.patch.object(win32, "user32", user32), \
+                     mock.patch.object(win32, "kernel32", kernel32):
+                    window._run()
+                self.assertEqual(user32.SetForegroundWindow.call_args_list, expected_calls)
+                user32.DestroyWindow.assert_called_once_with(55)
+                self.assertEqual(window.restoration,
+                                 "restored" if foreground_on_close == 55 else "skipped_focus_changed")
 
 
 class SettingsCheckTests(unittest.TestCase):

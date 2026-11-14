@@ -264,7 +264,22 @@ For an input-guard failure before the checks, dispatch the same workflow with
 `-f guard_diagnostic=true` and the matching `sha`. This branch skips the build,
 venv and app launch. It requires the owner's session to be unlocked and idle for
 60 seconds with no Murmur running, then runs the isolated guard for a 30-second
-probe window. It does not close any app. The local `guard-diagnostic.json` reports
+probe window. It does not close any app. Run it locally in the owner-controlled,
+unlocked session without a build:
+
+```powershell
+py -3.12 scripts\windows\desktop\guard_diagnostic.py --seconds 30 --out C:\murmur-desktop-reports\guard-diagnostic.json
+```
+
+The diagnostic opens a small window owned by its own process, verifies that
+Windows gave that window foreground focus, and sends a tagged Unicode packet
+key-down/key-up pair to it. The foreground owner is checked again immediately
+before injection, and the window removes messages without calling
+`TranslateMessage`. The packet is a Unicode noncharacter, not a functional
+shortcut. If Windows refuses focus, it sends no controlled key and reports
+`probe_window_unavailable`. On exit it tries to restore the previous foreground
+window only while its own window is still foreground; it never steals focus back
+after another window has taken it. The local `guard-diagnostic.json` reports
 hook and message-pump state, ctypes structure sizes, SendInput result, callback
 counts, and up to eight recent **injected probe candidates** with their tag
 comparison. It never records real key fields. A missing or mismatched probe is
@@ -277,15 +292,30 @@ is active. The diagnostic also sends one tagged, zero-displacement mouse move
 with no button action. `zero_move_probe_send_result` and
 `zero_move_probe_seen` can show whether the mouse hook receives injected input.
 A missing mouse callback is inconclusive because the system may suppress a
-zero-displacement move. `pump_result: 0` with
+zero-displacement move. Compare `probe_window.received_probe_events` with
+`input_guard.hook_state.owned_probe_messages` and `owned_probe_status`:
+
+- Tagged `VK_PACKET` down/up messages in the owned window with no matching hook
+  callbacks show the key event reached the window queue while hook delivery failed.
+- Both matching hook callbacks with a missing reserved-key probe show that the
+  hook delivered a documented valid event immediately before the miss. The
+  reserved key or timing remains suspect; this alone does not establish why.
+- No window messages and no callbacks leave generation versus delivery unresolved,
+  even when `SendInput` reports two events inserted.
+
+The packet uses the documented [`KEYEVENTF_UNICODE` / `VK_PACKET` path](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput),
+with U+FDD0 as a [Unicode noncharacter](https://www.unicode.org/faq/private_use.html).
+The diagnostic window checks its messages using
+[`PeekMessageW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-peekmessagew).
+`pump_result: 0` with
 `pump_exited_before_stop: false` is the expected cleanup `WM_QUIT`.
 Compare `parent_desktop_context` with `input_guard.hook_state.desktop_context`.
 The hook thread must be in the same session and window station as the parent,
 and `thread_desktop_receives_input` must be `true`. A desktop named `Default`
 alone is insufficient: a noninteractive window station can also have a default
-desktop. These fields are captured before the hook thread stops. If they match
-and both callback counts remain zero, the report has not yet separated hook
-registration from input delivery; do not run the desktop checks.
+desktop. These fields are captured before the hook thread stops. If the valid
+packet is not seen by either the window or the hook, the cause remains
+unresolved; do not run the desktop checks.
 
 ### Reading the report
 
