@@ -5,7 +5,7 @@ import re
 import fixtures
 import uia
 import win32
-from checks.common import click_overlay, produce_held, wait_not_held
+from checks.common import click_overlay, overlay_drag_point, produce_held, wait_not_held
 from context import Fail
 
 GWL_EXSTYLE = -20
@@ -75,21 +75,26 @@ def o2_drag(ctx):
     log_before = len(ctx.murmur.log())
     before = win32.window_rect(hwnd)
     ctx.screenshot(hwnd, "drag-before.png")
-    start = ((before[0] + before[2]) // 2, (before[1] + before[3]) // 2)
+    start = overlay_drag_point(ctx)
     end = (start[0] - 300, start[1] - 200)
-    win32.drag(start, end, steps=25)
+    ctx.restorer.push("release the mouse button", win32.mouse_up)
+    try:
+        win32.drag(start, end, steps=25, release=False)
+        held = win32.window_rect(ctx.murmur.overlay_hwnd())
+    finally:
+        win32.mouse_up()
     ctx.sleep(1.5)
     after = win32.window_rect(ctx.murmur.overlay_hwnd())
     ctx.screenshot(ctx.murmur.overlay_hwnd(), "drag-after.png")
     ctx.artifact("drag-diagnostic.txt").write_text(
-        f"start: {start}; end: {end}\nbefore: {before}; after: {after}\n"
+        f"start: {start}; end: {end}\nbefore: {before}; held: {held}; after: {after}\n"
         f"cursor: {win32.cursor()}\nforeground: {hex(win32.foreground())} "
         f"{win32.window_text(win32.foreground())!r}\n"
         f"overlay names: {ctx.murmur.overlay_names()!r}\n"
         f"new log: {[line for line in ctx.murmur.log()[log_before:].splitlines() if 'drag' in line.lower()]!r}\n",
         encoding="utf-8")
-    if abs(after[0] - before[0]) < 100 and abs(after[1] - before[1]) < 100:
-        raise Fail(f"Overlay did not move: {before} -> {after}")
+    if abs(held[0] - before[0]) < 100 and abs(held[1] - before[1]) < 100:
+        raise Fail(f"Overlay did not move while the button was held: {before} -> {held}")
     ctx.murmur.restart()
     restored = win32.window_rect(ctx.murmur.overlay_hwnd())
     ctx.note(f"before {before}, dragged {after}, after restart {restored}")
@@ -105,13 +110,14 @@ def _notepad_with_word(ctx):
     return pad
 
 
-def _type_lands(ctx, pad, letter, expected):
+def _type_lands(ctx, pad, letter, expected, before_click=None):
     before = pad.focus_diagnostic()
     win32.type_unicode(letter)
     ctx.sleep(0.6)
     text = pad.text()
     if text != expected:
         ctx.artifact("focus-diagnostic.txt").write_text(
+            f"before overlay click:\n{before_click or 'not sampled'}\n"
             f"before typing:\n{before}\nafter typing:\n{pad.focus_diagnostic()}\n",
             encoding="utf-8")
         raise Fail(f"After the overlay click, typed {letter!r} did not land in Notepad (text {text!r}, "
@@ -127,9 +133,10 @@ def o3_buttons_keep_focus(ctx):
     for button in ("Discard", "Copy"):
         produce_held(ctx, "A", origin, pad)
         ctx.require(win32.foreground() == pad.hwnd, "Notepad lost focus before the overlay click")
+        before_click = pad.focus_diagnostic()
         click_overlay(ctx, button, expect_foreground=pad.hwnd)
         expected += "x" if button == "Discard" else "y"
-        _type_lands(ctx, pad, expected[-1], expected)
+        _type_lands(ctx, pad, expected[-1], expected, before_click)
         wait_not_held(ctx)
     ctx.note("held-transcript buttons (Discard, Copy) stand in for Enhance's Accept: both use pressWithoutFocus")
     ctx.screenshot(pad.hwnd, "notepad.png")
@@ -147,7 +154,7 @@ def o4_empty_area(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"overlay": {"idle_view": "icon"}})
     pad.focus()
     before = win32.window_rect(ctx.murmur.overlay_hwnd())
-    start = ((before[0] + before[2]) // 2, (before[1] + before[3]) // 2)
+    start = overlay_drag_point(ctx)
     win32.drag(start, (start[0] + 150, start[1] - 120), steps=20)
     ctx.sleep(1.0)
     after = win32.window_rect(ctx.murmur.overlay_hwnd())

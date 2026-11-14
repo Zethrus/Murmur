@@ -3,8 +3,8 @@ import time
 
 import targets
 import win32
-from checks.common import (D_HOTKEY, HOLD_FOR_SECONDS, click_overlay, focus_change_dictation, produce_held,
-                           require_empty, wait_held, wait_not_held)
+from checks.common import (D_HOTKEY, HOLD_FOR_SECONDS, click_overlay, focus_change_dictation,
+                           overlay_drag_point, produce_held, require_empty, wait_held, wait_not_held)
 from context import Fail
 
 
@@ -136,8 +136,8 @@ def f11_drag_delivery(ctx):
     def grab(_ctx):
         # Grab the pill by its drag handle (left end) while the hotkey is still held, so the
         # transcript cannot be delivered before the drag has started.
-        left, top, right, bottom = win32.window_rect(ctx.murmur.overlay_hwnd())
-        handle = (left + max(8, round(14 * win32.dpi_scale(ctx.murmur.overlay_hwnd()))), (top + bottom) // 2)
+        left, top, _, _ = win32.window_rect(ctx.murmur.overlay_hwnd())
+        handle = overlay_drag_point(ctx)
         win32.drag(handle, (handle[0] + 80, handle[1] - 60), steps=10, release=False)
         grabbed["origin"] = (left, top)
         grabbed["engaged"] = win32.wait_for(
@@ -164,7 +164,7 @@ def f11_drag_delivery(ctx):
     if early:
         raise Fail(f"Text was delivered while the overlay was being dragged: {early!r}")
     if moved[:2] == (left, top):
-        raise Fail("The overlay did not move: the drag handle position guess missed")
+        raise Fail("The overlay did not move after pressing its exposed drag handle")
     first = app.first_key_time()
     if first is None or first < released:
         raise Fail("Delivery did not wait for the mouse release")

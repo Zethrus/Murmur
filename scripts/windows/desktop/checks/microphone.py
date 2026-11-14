@@ -53,13 +53,17 @@ def m1_desktop_apps_off(ctx):
             f"Murmur UI feedback: {[n for n in names if 'Could not open Settings' in n]!r}\n",
             encoding="utf-8")
         raise Fail("'Open Windows privacy settings' did not open or foreground Windows Settings")
-    ctx.screenshot(opened, "windows-settings.png")
-    page_names = uia.names(uia.from_handle(opened))
-    ctx.artifact("windows-settings-names.txt").write_text(repr(page_names[:80]) + "\n", encoding="utf-8")
-    if not any("Microphone" in name for name in page_names):
-        raise Fail("Windows Settings opened without the Microphone page")
-    if opened not in before:
-        win32.close_window(opened)
+    try:
+        # The window exists before SystemSettings has built its accessibility tree.
+        page_names = wait_names(ctx, lambda: uia.from_handle(opened),
+                                lambda n: any("Microphone" in name for name in n), 15)
+        ctx.screenshot(opened, "windows-settings.png")
+        ctx.artifact("windows-settings-names.txt").write_text(repr((page_names or [])[:80]) + "\n", encoding="utf-8")
+        if not page_names:
+            raise Fail("Windows Settings opened, but the Microphone page was not exposed through UI Automation")
+    finally:
+        if opened not in before:
+            win32.close_window(opened)
 
 
 def m3_restored(ctx):

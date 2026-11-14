@@ -40,6 +40,19 @@ def click_overlay(ctx, label, expect_foreground=None):
     return x, y
 
 
+def overlay_drag_point(ctx):
+    """Center of the rendered drag affordance, rather than a window-size guess."""
+    element = uia.find(ctx.murmur.overlay(), name_="Drag to move", timeout=5, sleep=ctx.sleep)
+    handle = uia.rect(element)
+    if handle[2] <= handle[0] or handle[3] <= handle[1]:
+        raise Fail(f"Drag handle has no usable bounds: {handle}")
+    point = uia.center(element)
+    left, top, right, bottom = win32.window_rect(ctx.murmur.overlay_hwnd())
+    if not (left <= point[0] < right and top <= point[1] < bottom):
+        raise Fail(f"Drag handle {handle} is outside overlay {(left, top, right, bottom)}")
+    return point
+
+
 def wait_held(ctx, timeout=30):
     if not ctx.murmur.wait_state("held", timeout):
         raise Fail(f"Transcript was not held (overlay: {ctx.murmur.overlay_state()})")

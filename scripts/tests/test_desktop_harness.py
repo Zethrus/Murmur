@@ -93,6 +93,57 @@ class ImportTests(unittest.TestCase):
         self.assertFalse(insertion_checks.terminal_line_matches(expected + "".join([" " * 5, expected]), expected))
         self.assertFalse(insertion_checks.terminal_line_matches("x" + expected, expected))
 
+    def test_notepad_readback_never_injects_input_on_uia_failure(self):
+        pad = targets.Notepad.__new__(targets.Notepad)
+        pad.uia = SimpleNamespace(text=mock.Mock(side_effect=RuntimeError("document rebuilt")))
+        pad.win32 = SimpleNamespace(tap=mock.Mock())
+        pad.document = mock.Mock(return_value=object())
+        pad.focus = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, "document rebuilt"):
+            pad.text()
+        pad.focus.assert_not_called()
+        pad.win32.tap.assert_not_called()
+
+    def test_notepad_wait_retries_transient_uia_failure_without_input(self):
+        pad = targets.Notepad.__new__(targets.Notepad)
+        pad.text = mock.Mock(side_effect=[RuntimeError("document rebuilt"), "hello", "hello"])
+        self.assertEqual(pad.wait_text(timeout=1, stable=0, sleep=lambda _: None), "hello")
+        self.assertEqual(pad.text.call_count, 3)
+
+    def test_overlay_drag_uses_exposed_handle_bounds_and_rejects_outside(self):
+        from checks import common
+        ctx = SimpleNamespace(murmur=SimpleNamespace(overlay=lambda: object(), overlay_hwnd=lambda: 42),
+                              sleep=lambda _: None)
+        with mock.patch.object(common.uia, "find", return_value="handle"), \
+             mock.patch.object(common.uia, "center", side_effect=[(120, 130), (250, 130)]), \
+             mock.patch.object(common.uia, "rect", return_value=(110, 120, 130, 140)), \
+             mock.patch.object(win32, "window_rect", return_value=(100, 100, 200, 200)):
+            self.assertEqual(common.overlay_drag_point(ctx), (120, 130))
+            with self.assertRaisesRegex(Fail, "outside overlay"):
+                common.overlay_drag_point(ctx)
+
+    def test_microphone_page_waits_for_content_after_window_appears(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = SimpleNamespace(ensure=mock.Mock(), page=mock.Mock(), settings=lambda: "murmur-settings",
+                                  settings_hwnd=lambda: 1)
+            ctx = SimpleNamespace(murmur=app, fixtures={"A": SimpleNamespace(path="a.wav")},
+                                  restorer=object(), sleep=lambda _: None, screenshot=mock.Mock(),
+                                  artifact=lambda name: Path(directory) / name)
+            with mock.patch.object(microphone_checks, "winreg", SimpleNamespace(REG_SZ=1)), \
+                 mock.patch.object(win32, "Registry"), \
+                 mock.patch.object(microphone_checks.RegistryValue, "set"), \
+                 mock.patch.object(microphone_checks, "_windows_settings_windows", side_effect=[[], [42]]), \
+                 mock.patch.object(microphone_checks.uia, "find", return_value="button"), \
+                 mock.patch.object(microphone_checks.uia, "invoke"), \
+                 mock.patch.object(microphone_checks.uia, "from_handle", return_value="windows-settings"), \
+                 mock.patch.object(microphone_checks.uia, "names", side_effect=[
+                     [microphone_checks.EXPLANATION], [], ["Privacy & security", "Microphone"]]), \
+                 mock.patch.object(win32, "wait_for", side_effect=lambda predicate, *_a, **_kw: predicate()), \
+                 mock.patch.object(win32, "close_window") as close:
+                microphone_checks.m1_desktop_apps_off(ctx)
+            self.assertIn("Microphone", (Path(directory) / "windows-settings-names.txt").read_text())
+            close.assert_called_once_with(42)
+
     def test_windows_modules_import_on_any_os(self):
         import capture  # noqa: F401
         import context  # noqa: F401

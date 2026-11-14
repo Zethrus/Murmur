@@ -12,6 +12,7 @@ def h1_hold(ctx):
     pad = ctx.notepad()
     pad.focus()
     ctx.dictate("A", order="key-first")
+    ctx.artifact("after-hotkey-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     text = pad.wait_text()
     ctx.settle()
     ctx.screenshot(pad.hwnd, "notepad.png")

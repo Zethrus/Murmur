@@ -3,7 +3,7 @@
 - TargetApp: a small Tk window shipped with the harness (run as its own process). It records
   every received character with a timestamp, focus-in/out times and the widget text, and writes
   them to a JSON state file after every event. Exact, scriptable assertions.
-- Notepad (Windows 11): text read back through UI Automation TextPattern, else by saving.
+- Notepad (Windows 11): text read back through UI Automation TextPattern.
 - Windows Terminal running Windows PowerShell: buffer read back through TextPattern.
 - VS Code, only when installed: read back by saving the file.
 
@@ -288,26 +288,29 @@ class Notepad:
                 f"file bytes: {self.path.stat().st_size if self.path.exists() else 'missing'}\n")
 
     def text(self):
-        """Document text via TextPattern; falls back to Ctrl+S and reading the file."""
-        try:
-            # RichEdit reports a final paragraph mark; transcripts never end in a newline.
-            return self.uia.text(self.document()).replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
-        except Exception:  # noqa: BLE001 - fall back to the saved file
-            self.focus()
-            self.win32.tap("ctrl", "s")
-            time.sleep(1.0)
-            return self.path.read_text(encoding="utf-8-sig").replace("\r\n", "\n").rstrip("\n")
+        """Read the editor without sending input or changing focus during delivery."""
+        # RichEdit reports a final paragraph mark; transcripts never end in a newline.
+        return self.uia.text(self.document()).replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
 
     def wait_text(self, timeout=45, stable=1.2, sleep=time.sleep):
         deadline = time.monotonic() + timeout
         last, since = None, time.monotonic()
+        last_error = None
         while time.monotonic() < deadline:
-            current = self.text()
+            try:
+                current = self.text()
+                last_error = None
+            except Exception as error:  # noqa: BLE001 - UIA can rebuild the document during typing
+                last_error = error
+                sleep(0.2)
+                continue
             if current != last:
                 last, since = current, time.monotonic()
             elif current and time.monotonic() - since >= stable:
                 return current
             sleep(0.2)
+        if last is None and last_error is not None:
+            raise RuntimeError("Notepad document was unavailable through UI Automation") from last_error
         return last or ""
 
     def menu_open(self):
