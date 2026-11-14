@@ -43,15 +43,33 @@ def c1_remove_engine(ctx):
         raise Fail(f"Remove reported a file in use: {in_use[0]}")
     if not state:
         raise Fail("The engine is not 'Not installed' after Remove")
-    overlay = win32.wait_for(lambda: [n for n in ctx.murmur.overlay_names() if "engine not installed" in n.lower()], 15,
-                             0.5, sleep=ctx.sleep)
+    observed = []
+
+    def missing_engine():
+        names = ctx.murmur.overlay_names()
+        if not observed or names != observed[-1]:
+            observed.append(names)
+        return [n for n in names if "engine not installed" in n.lower()]
+
+    overlay = win32.wait_for(missing_engine, 15, 0.5, sleep=ctx.sleep)
     if not overlay:
         ctx.press(ctx.hotkey)  # the overlay reports the missing engine when a dictation is attempted
-        overlay = win32.wait_for(lambda: [n for n in ctx.murmur.overlay_names() if "engine not installed" in n.lower()],
-                                 10, 0.25, sleep=ctx.sleep)
+        # Hold mode remains Listening until key-up. Waiting for an engine failure while the
+        # key is still held mistakes a normal capture for missing error feedback.
+        overlay = win32.wait_for(missing_engine, 2, 0.25, sleep=ctx.sleep)
         ctx.release(ctx.hotkey, "together")
+        if not overlay:
+            overlay = win32.wait_for(missing_engine, 8, 0.25, sleep=ctx.sleep)
+    ctx.artifact("overlay-names.txt").write_text(
+        "\n".join(f"snapshot {index}: {names!r}" for index, names in enumerate(observed, 1)) + "\n",
+        encoding="utf-8")
     ctx.screenshot(ctx.murmur.overlay_hwnd(), "overlay.png")
     if not overlay:
+        ctx.artifact("missing-engine-diagnostic.txt").write_text(
+            f"overlay state: {ctx.murmur.overlay_state()}\n"
+            f"settings engine notices: {[n for n in names if 'engine' in n.lower()][:20]!r}\n"
+            f"log lines: {[line for line in ctx.murmur.log().splitlines() if 'engine' in line.lower() or 'component' in line.lower()][-30:]!r}\n",
+            encoding="utf-8")
         raise Fail("The overlay does not say the speech engine is missing")
 
 

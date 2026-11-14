@@ -39,11 +39,19 @@ class Context:
         self.notes = []
         self.check_id = ""
         self._targets = []
+        self._delivery_cursor = None
+        self._delivery_fixture = None
 
     # ------------------------------------------------------------ bookkeeping
     def begin(self, check_id):
         self.check_id = check_id
         self.artifacts, self.notes = [], []
+        self._delivery_cursor = self._delivery_fixture = None
+        # Only dictation checks opt into the app's existing history in this disposable profile.
+        # Settings/Privacy screenshots retain the default-off setting. The next ensure() applies
+        # this base configuration before the check drives Murmur.
+        self.murmur.base_config["privacy"]["history_enabled"] = (
+            check_id.startswith(("H", "I", "F")) or check_id == "M3")
 
     def artifact(self, suffix):
         """Path for an evidence file of the current check (registered in the report)."""
@@ -137,6 +145,7 @@ class Context:
         the hotkey is still held (hold) or before the second press (toggle), e.g. to change focus.
         Returns the time the dictation was released/stopped."""
         hotkey = hotkey or self.hotkey
+        self.observe_delivery(fixture)
         speech = self.fixtures[fixture].speech_seconds
         if mode == "hold":
             self.press(hotkey)
@@ -156,13 +165,39 @@ class Context:
         self.tap_hotkey(hotkey)
         return time.time()
 
+    def observe_delivery(self, fixture):
+        """Start an exact observation before a manually driven or ordinary utterance."""
+        self._delivery_cursor = self.murmur.history_cursor()
+        self._delivery_fixture = fixture
+
+    def observed_text(self):
+        """Exactly one output for the current utterance, saved before target readback."""
+        if self._delivery_cursor is None:
+            raise Fail("No per-utterance output observation was started")
+        rows = win32.wait_for(lambda: self.murmur.history_after(self._delivery_cursor), 5, 0.1,
+                              sleep=self.sleep) or []
+        if len(rows) != 1:
+            raise Fail(f"Expected one output for this utterance, found {len(rows)}")
+        text = rows[0][1]
+        fidelity = golden.fixture_fidelity(self._delivery_fixture, text)
+        if fidelity:
+            raise Fail(fidelity)
+        return text
+
+    def expect_delivery(self, actual, where):
+        expected = self.observed_text()
+        difference = golden.compare(expected, actual)
+        if difference:
+            raise Fail(f"{where}: {difference}")
+        return expected
+
     def settle(self, timeout=45):
         """Wait until the overlay leaves listening/transcribing."""
         return self.murmur.wait_state(("done", "idle", "held", "unknown"), timeout) or self.murmur.overlay_state()
 
     # ------------------------------------------------------------ goldens
     def golden(self, fixture, mode="hold", hotkey=None, style="prose", variant="", config=None):
-        """Expected text for these settings; made by a first delivery into a fresh TargetApp."""
+        """First sample for semantic checks; exact delivery checks use the same utterance's history."""
         hotkey = hotkey or self.hotkey
         key = golden.key(fixture, mode, hotkey, style, variant)
         if self.goldens.has(key):
@@ -187,11 +222,7 @@ class Context:
         app.close()
         if not text:
             raise Fail(f"No text reached TargetApp while recording the golden text for {fixture}")
+        self.expect_delivery(text, "golden TargetApp")
         self.goldens.record(key, text)
         self.note(f"golden {fixture}/{mode}/{style}{('/' + variant) if variant else ''}: {text!r}")
         return text
-
-    def expect(self, expected, actual, where):
-        difference = golden.compare(expected, actual)
-        if difference:
-            raise Fail(f"{where}: {difference}")

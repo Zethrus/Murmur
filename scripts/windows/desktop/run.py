@@ -6,7 +6,8 @@
 
 Runs in the logged-in desktop session (the `desktop` runner, or by hand). It takes the keyboard
 and mouse: any real input aborts the run within ~100 ms, everything it changed is restored and
-the remaining checks are marked "aborted: user input". Writes desktop-report.json,
+the remaining checks are marked "aborted: user input". A shared Murmur startup failure also
+stops later checks, after saving app output, log and window evidence. Writes desktop-report.json,
 desktop-report.md and the evidence PNG/TXT files to --out. Exit code 0 only when nothing failed
 or aborted; skipped checks carry their reason.
 """
@@ -46,11 +47,9 @@ def base_config(hotkey):
     }
 
 
-def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
-    """Problems that prevent a safe run (empty list = go)."""
+def preflight_desktop(win32, idle_needed=IDLE_SECONDS):
+    """Shared safety checks before either desktop workflow sends input."""
     problems = []
-    if not (Path(build_dir) / "build.json").is_file():
-        problems.append(f"{build_dir} is not a verified build (run handoff.py first)")
     desktop = win32.input_desktop()
     if desktop != "Default":
         problems.append(f"the workstation is locked or on a secure desktop (input desktop: {desktop})")
@@ -58,11 +57,20 @@ def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
     if running:
         problems.append(f"another Murmur is running (pid {', '.join(map(str, running))}); quit it from the tray "
                         "(single instance would hand the test launch to it)")
-    if NOTEPAD_CHECKS & {c.id for c in selected} and win32.pids("Notepad.exe"):
-        problems.append("Notepad is running; close it (the Notepad checks open and close their own windows)")
     idle = win32.idle_seconds()
     if idle < idle_needed:
         problems.append(f"the desktop was used {idle:.0f} s ago; it must be idle for {idle_needed} s")
+    return problems
+
+
+def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
+    """Problems that prevent a safe run (empty list = go)."""
+    problems = []
+    if not (Path(build_dir) / "build.json").is_file():
+        problems.append(f"{build_dir} is not a verified build (run handoff.py first)")
+    problems.extend(preflight_desktop(win32, idle_needed))
+    if NOTEPAD_CHECKS & {c.id for c in selected} and win32.pids("Notepad.exe"):
+        problems.append("Notepad is running; close it (the Notepad checks open and close their own windows)")
     return problems
 
 
@@ -79,22 +87,36 @@ def remove_tree(path, attempts=10):
 
 
 def run_checks(ctx, selected, repeat, lookup, log=print):
-    """Run every check `repeat` times; returns (attempts, aborted reason or '')."""
-    from guard import UserInput
+    """Run checks until complete, real input, guard loss, or shared startup failure."""
+    from guard import GuardUnavailable, UserInput
     import win32
     from context import Fail, Skip
+    from murmur import StartupError
     results = []
     plan = [(attempt, check) for attempt in range(1, repeat + 1) for check in selected]
+    mark_guard = getattr(ctx.guard, "mark", lambda stage: None)
     for position, (attempt, check) in enumerate(plan):
         ctx.begin(check.id)
+        mark_guard(f"{check.id}:{attempt}:begin")
         mark = ctx.restorer.mark()
         started = time.monotonic()
         status, reason = report.PASS, ""
+        startup_failure = ""
         log(f"[{check.id}] {check.title} (attempt {attempt})")
         try:
+            ctx.guard.check()
             lookup(check)(ctx)
+            ctx.guard.check()
         except UserInput as error:
-            reason = f"aborted: user input ({error})"
+            mark_guard(f"{check.id}:{attempt}:guard-abort")
+            kind = "input guard unavailable" if isinstance(error, GuardUnavailable) else "user input"
+            reason = f"aborted: {kind} ({error})"
+            if check.id == "P4":
+                # Preserve the launch log at the P3 -> P4 handoff before restoration stops Murmur.
+                try:
+                    ctx.murmur.save_startup_diagnostics(ctx.artifact)
+                except Exception as diagnostic_error:  # noqa: BLE001 - retain the original guard loss
+                    ctx.note(f"startup diagnostics failed: {type(diagnostic_error).__name__}: {diagnostic_error}")
             results.append(report.Result(check.id, report.ABORTED, reason, check.title, check.group,
                                          check.best_effort, list(ctx.artifacts), list(ctx.notes),
                                          round(time.monotonic() - started, 1), attempt))
@@ -109,9 +131,26 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
             status, reason = report.SKIPPED, str(error) or "skipped"
         except Fail as error:
             status, reason = report.FAIL, str(error) or "failed"
+        except StartupError as error:
+            trace = ctx.artifact("harness-error.txt")
+            trace.write_text(traceback.format_exc(), encoding="utf-8")
+            try:
+                error.session.save_startup_diagnostics(ctx.artifact)
+            except Exception as diagnostic_error:  # noqa: BLE001 - do not hide the launch failure
+                ctx.note(f"startup diagnostics failed: {type(diagnostic_error).__name__}: {diagnostic_error}")
+            status, reason = report.FAIL, f"startup failure: {error}"
+            startup_failure = f"blocked after {check.id} startup failure: {error}"
         except Exception as error:  # noqa: BLE001 - one broken check must not stop the run
             trace = ctx.artifact("harness-error.txt")
             trace.write_text(traceback.format_exc(), encoding="utf-8")
+            # UIA misses otherwise have no visual evidence. Keep the failing profile's
+            # Settings frame before per-check restoration hides or stops it.
+            try:
+                hwnd = ctx.murmur.settings_hwnd()
+                if hwnd:
+                    ctx.screenshot(hwnd, "settings-error.png")
+            except Exception as diagnostic:  # noqa: BLE001 - retain the original failure
+                ctx.note(f"Settings diagnostic failed: {type(diagnostic).__name__}: {diagnostic}")
             message = f"harness error: {type(error).__name__}: {error}"
             # A best-effort check that could not run is a skip, never a pass (and not a failure).
             status, reason = (report.SKIPPED, f"could not run: {message}") if check.best_effort \
@@ -123,7 +162,13 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
         results.append(report.Result(check.id, status, reason, check.title, check.group, check.best_effort,
                                      list(ctx.artifacts), list(ctx.notes), round(time.monotonic() - started, 1),
                                      attempt))
+        mark_guard(f"{check.id}:{attempt}:end:{status}")
         log(f"[{check.id}] {status}{': ' + reason if reason else ''}")
+        if startup_failure:
+            for remaining_attempt, rest in plan[position + 1:]:
+                results.append(report.Result(rest.id, report.ABORTED, startup_failure, rest.title, rest.group,
+                                             rest.best_effort, attempt=remaining_attempt))
+            return results, startup_failure
     return results, ""
 
 
@@ -162,7 +207,7 @@ def main(argv=None):
     import golden
     import targets
     from context import Context
-    from guard import Guard, UserInput
+    from guard import Guard, GuardUnavailable, UserInput
     from murmur import Build, MurmurSession, fetch_model
     from restore import Restorer
 
@@ -177,7 +222,8 @@ def main(argv=None):
             "windows": ".".join(map(str, sys.getwindowsversion()[:3])), "selection": [c.id for c in selected]}
     restorer = Restorer()
     results, aborted = [], ""
-    guard = Guard()
+    # Include hook/pump state in the actual suite report, where P4 has lost the probe.
+    guard = Guard(diagnostic=True)
     session = None
     try:
         print("Preparing fixtures and the test profile (no input yet)...")
@@ -194,12 +240,14 @@ def main(argv=None):
         if win32.idle_seconds() < BANNER_SECONDS:
             raise UserInput("input during the start countdown")
         guard.start()
+        meta["parent_desktop_context"] = win32.desktop_context()
         ctx = Context(build=build, session=session, fixtures=speech, goldens=golden.GoldenStore(), restorer=restorer,
                       guard=guard, out=out, work=work, hotkey=args.hotkey, cache=cache)
         results, aborted = run_checks(ctx, selected, args.repeat, checks.lookup)
         meta["goldens"] = ctx.goldens.as_dict()
     except UserInput as error:
-        aborted = f"aborted: user input ({error})"
+        kind = "input guard unavailable" if isinstance(error, GuardUnavailable) else "user input"
+        aborted = f"aborted: {kind} ({error})"
         results += [report.Result(c.id, report.ABORTED, aborted, c.title, c.group, c.best_effort) for c in selected
                     if c.id not in {r.id for r in results}]
     except Exception as error:  # noqa: BLE001 - setup failure: every check is reported
@@ -210,6 +258,7 @@ def main(argv=None):
                     for c in selected if c.id not in {r.id for r in results}]
     finally:
         guard.stop()
+        meta["input_guard"] = guard.diagnostics()
         win32.release_all()
         failures = restorer.restore_all()
         if failures:

@@ -7,7 +7,7 @@ const button = (root,label) => root.querySelectorAll("button").find(b=>b.textCon
 async function settings(overrides){const h=await harness(overrides);await (await h.module("settings/app.ts")).mountSettings(h.root);await settle();return h;}
 test("settings mounts six pages, status/version, and releases all listeners",async()=>{
   const h=await settings();assert.equal(h.root.querySelectorAll(".nav-button").length,6);assert.match(h.root.textContent,/Version 0.1.0/);
-  for(const page of ["General","Components","Audio","Behavior","Privacy","Companion"]){await button(h.root,page).dispatch("click");await settle();assert.equal(h.root.querySelector("h1").textContent,page);assert.ok(h.root.querySelectorAll(".card").length>=2);}
+  for(const page of ["General","Components","Audio","Behavior","Privacy","Companion"]){assert.equal(button(h.root,page).getAttribute("aria-label"),page);await button(h.root,page).dispatch("click");await settle();assert.equal(h.root.querySelector("h1").textContent,page);assert.ok(h.root.querySelectorAll(".card").length>=2);}
   h.unload();assert.equal([...h.events.values()].reduce((n,s)=>n+s.size,0),0);
 });
 test("general saves coding hotkey and theme through set_config",async()=>{
@@ -74,6 +74,28 @@ test("components page shows every state with its actions",async()=>{
   await button(row("engine"),"Verify").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_verify"));
   await button(h.root,"Check for updates").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_check_updates"));h.unload();
 });
+test("component Verify note survives a refresh before the reply",async()=>{
+  const h=await settings({components_verify:async(_,{emit})=>{
+    emit("components/changed",{});h.timers.tick(100);await settle();await settle();
+    return {verdict:"verified"};
+  }});
+  await button(h.root,"Components").dispatch("click");await settle();await settle();
+  await button(component(h.root,"engine"),"Verify").dispatch("click");await settle();await settle();
+  assert.match(component(h.root,"engine").textContent,/Files verified\./);
+  assert.doesNotMatch(component(h.root,"speech-distil-small.en").textContent,/Files verified\./);
+  h.unload();
+});
+test("component Verify mismatch never keeps a stale success note",async()=>{
+  let verified=true;
+  const h=await settings({components_verify:async()=>({verdict:verified?"verified":"mismatch"})});
+  await button(h.root,"Components").dispatch("click");await settle();await settle();
+  await button(component(h.root,"engine"),"Verify").dispatch("click");await settle();await settle();
+  assert.match(component(h.root,"engine").textContent,/Files verified\./);
+  verified=false;
+  await button(component(h.root,"engine"),"Verify").dispatch("click");await settle();await settle();
+  assert.doesNotMatch(component(h.root,"engine").textContent,/Files verified\./);
+  h.unload();
+});
 test("missing trust root explains what needs what and disables installs",async()=>{
   const h=await settings({componentsFixture:componentsFixture({engine:false,trust:false})});
   assert.equal(h.root.querySelector(".setup-layer").hidden,true,"setup does not open when nothing can be installed");
@@ -103,6 +125,14 @@ test("setup still opens with an expired list but cannot install, and says why",a
 // ---- First-run setup ----
 const stepTitle=h=>h.root.querySelector(".setup-title").textContent;
 const radio=(h,name,value)=>h.root.querySelectorAll("input").find(i=>i.name===name&&i.value===value);
+test("an installed engine without the selected model still opens first-run setup",async()=>{
+  const fixture=componentsFixture();Object.assign(fixture.components.find(c=>c.id==="speech-distil-small.en"),{state:"available",installed_version:null});
+  const h=await settings({componentsFixture:fixture});
+  assert.equal(stepTitle(h),"Welcome");assert.equal(h.root.querySelector(".settings-shell").hidden,true);
+  for(let i=0;i<4;i++)await button(h.root,"Next").dispatch("click");
+  assert.match(h.root.textContent,/Download335 MB/);
+  h.unload();
+});
 test("setup opens on first run, walks six steps in order and installs only after consent",async()=>{
   const h=await settings({componentsFixture:componentsFixture({engine:false})});
   assert.equal(h.root.querySelector(".setup-layer").hidden,false);assert.equal(h.root.querySelector(".settings-shell").hidden,true);

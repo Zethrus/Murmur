@@ -72,6 +72,8 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   const report = (e: unknown): void => { notice.textContent = String(e); notice.dataset.tone = "error"; };
   const theme = (): void => { document.documentElement.dataset.theme = config.general.theme; };
   const noEngine = (): boolean => snapshot !== null && !snapshot.engine_installed;
+  const needsSetup = (): boolean => noEngine() || (snapshot !== null && !snapshot.components.some(c =>
+    c.kind === "speech-model" && c.model === config.engine.model && (c.state === "active" || c.state === "installed")));
   const chrome = (): void => { dot.dataset.online = String(status.sidecar_alive); engineStatus.textContent = noEngine() ? "Speech engine not installed" : !status.sidecar_alive ? "Engine offline" : !status.model_available ? "No model selected" : status.state === "idle" ? "Ready when you are" : status.state;
     banner.hidden = status.model_available && !noEngine();
     bannerText.textContent = noEngine() ? "The speech engine is not installed. Dictation needs it and one speech model." : "Choose a speech model to start dictating";
@@ -118,6 +120,7 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   }
   function navigate(next: Page): void { page = next; renderPage(); main.scrollTop = 0; }
   (Object.keys(pages) as Page[]).forEach((name,index)=>{const b = button(name,()=>navigate(name),"nav-button"); b.dataset.page = name;
+    b.setAttribute("aria-label",name);
     b.prepend(el("span","nav-number",String(index+1).padStart(2,"0"))); nav.append(b);});
   const subscribe = async <K extends keyof Events>(event: K, handler: (data: Events[K])=>void): Promise<void> => {
     const off = await on(event,handler); if (disposed) off(); else disposers.push(off);
@@ -136,5 +139,5 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   await subscribe("components/changed",()=>{ void refreshSnapshot().then(()=>{ chrome(); refreshStatus(); }); });
   theme(); chrome(); renderPage();
   // First run: open setup automatically unless the user chose "Set up later" before.
-  if (noEngine() && !config.setup.postponed && snapshot?.trust.ok) openSetup();
+  if (needsSetup() && !config.setup.postponed && snapshot?.trust.ok) openSetup();
 }

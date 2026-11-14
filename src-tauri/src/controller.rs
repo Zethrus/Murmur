@@ -825,7 +825,14 @@ impl Controller {
             Action::ToggleOverlay => {
                 state.update(json!({"overlay":{"enabled":!state.config()?.overlay.enabled}}))?;
             }
-            Action::Reload => state.reload()?,
+            Action::Reload => {
+                // Metadata only: the desktop gate needs to distinguish a missed file-watch
+                // event from a rejected rebind without putting configuration or text in logs.
+                tracing::debug!("configuration reload requested");
+                let result = state.reload();
+                tracing::debug!(ok = result.is_ok(), "configuration reload finished");
+                result?;
+            }
             Action::ComponentsChanged(kind) => {
                 use crate::components::manifest::Kind;
                 match kind {

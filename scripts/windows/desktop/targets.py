@@ -134,6 +134,11 @@ def delivered_keys(keys):
     return [k for k in keys if k.get("char") and k["char"].isprintable()]
 
 
+def delivered_characters(keys):
+    """Characters seen by the target's key handler, even if held modifiers stop Tk insertion."""
+    return "".join(key["char"] for key in delivered_keys(keys))
+
+
 class TargetApp:
     """Handle on one TargetApp window. Use clear() between deliveries."""
 
@@ -257,16 +262,30 @@ class Notepad:
     CLICK_WHILE_HELD = False
 
     def document(self):
-        return self.uia.text_element(self.uia.from_handle(self.hwnd), timeout=5)
+        return self.uia.document_element(self.uia.from_handle(self.hwnd), timeout=5)
 
     def focus(self, click=True):
-        left, top, right, bottom = self.win32.window_rect(self.hwnd)
-        point = ((left + right) // 2, (top + bottom) // 2)
+        document = self.document()
+        point = self.uia.center(document)
         self.win32.activate(self.hwnd, click_at=None if not click else point)
         if click:
             self.win32.click(*point)
         if not self.win32.wait_for(lambda: self.win32.foreground() == self.hwnd, 3):
             raise RuntimeError("Could not focus Notepad")
+        if click:
+            focused = self.uia.focused()
+            elements = [document] + self.uia.descendants(document)
+            if not focused or not any(self.uia.same(focused, element) for element in elements):
+                raise RuntimeError(f"Notepad foreground is active but editor focus is {self.uia.describe(focused)}")
+
+    def focus_diagnostic(self):
+        focused = self.uia.focused()
+        return (f"scratch path: {self.path}\n"
+                f"Notepad hwnd: {hex(self.hwnd)}; foreground: {hex(self.win32.foreground())} "
+                f"{self.win32.window_text(self.win32.foreground())!r}\n"
+                f"UIA focus: {self.uia.describe(focused)}\n"
+                f"menu open: {self.menu_open()}\n"
+                f"file bytes: {self.path.stat().st_size if self.path.exists() else 'missing'}\n")
 
     def text(self):
         """Document text via TextPattern; falls back to Ctrl+S and reading the file."""
@@ -345,9 +364,9 @@ class Terminal:
             raise RuntimeError("Could not focus Windows Terminal")
 
     def buffer(self):
-        """Terminal text through TextPattern, or None when this version does not expose it."""
+        """Prompt buffer through TextPattern, never the title-bar TextPattern."""
         try:
-            return self.uia.text(self.uia.text_element(self.uia.from_handle(self.hwnd), timeout=5))
+            return self.uia.text(self.uia.terminal_text_element(self.uia.from_handle(self.hwnd), timeout=5))
         except Exception:  # noqa: BLE001 - reported as a skip by I3
             return None
 

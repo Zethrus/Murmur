@@ -72,12 +72,22 @@ def o2_drag(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"overlay": {"idle_view": "icon"}})
     ctx.restorer.push("reset the overlay placement", lambda: _reset_placement(ctx))
     hwnd = ctx.murmur.overlay_hwnd()
+    log_before = len(ctx.murmur.log())
     before = win32.window_rect(hwnd)
+    ctx.screenshot(hwnd, "drag-before.png")
     start = ((before[0] + before[2]) // 2, (before[1] + before[3]) // 2)
     end = (start[0] - 300, start[1] - 200)
     win32.drag(start, end, steps=25)
     ctx.sleep(1.5)
     after = win32.window_rect(ctx.murmur.overlay_hwnd())
+    ctx.screenshot(ctx.murmur.overlay_hwnd(), "drag-after.png")
+    ctx.artifact("drag-diagnostic.txt").write_text(
+        f"start: {start}; end: {end}\nbefore: {before}; after: {after}\n"
+        f"cursor: {win32.cursor()}\nforeground: {hex(win32.foreground())} "
+        f"{win32.window_text(win32.foreground())!r}\n"
+        f"overlay names: {ctx.murmur.overlay_names()!r}\n"
+        f"new log: {[line for line in ctx.murmur.log()[log_before:].splitlines() if 'drag' in line.lower()]!r}\n",
+        encoding="utf-8")
     if abs(after[0] - before[0]) < 100 and abs(after[1] - before[1]) < 100:
         raise Fail(f"Overlay did not move: {before} -> {after}")
     ctx.murmur.restart()
@@ -96,10 +106,14 @@ def _notepad_with_word(ctx):
 
 
 def _type_lands(ctx, pad, letter, expected):
+    before = pad.focus_diagnostic()
     win32.type_unicode(letter)
     ctx.sleep(0.6)
     text = pad.text()
     if text != expected:
+        ctx.artifact("focus-diagnostic.txt").write_text(
+            f"before typing:\n{before}\nafter typing:\n{pad.focus_diagnostic()}\n",
+            encoding="utf-8")
         raise Fail(f"After the overlay click, typed {letter!r} did not land in Notepad (text {text!r}, "
                    f"expected {expected!r})")
 

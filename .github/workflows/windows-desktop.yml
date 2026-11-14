@@ -30,6 +30,11 @@ on:
         required: false
         type: string
         default: '1'
+      guard_diagnostic:
+        description: Probe the input guard only (no app build or harness dependencies)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -67,6 +72,7 @@ jobs:
           persist-credentials: false
 
       - name: Harness virtual environment (hash-locked dependencies)
+        if: ${{ !inputs.guard_diagnostic }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -82,6 +88,7 @@ jobs:
           "MURMUR_DESKTOP_PYTHON=$Python" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Verify the handed-over build (SHA256SUMS and the build's own job log)
+        if: ${{ !inputs.guard_diagnostic }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -99,6 +106,7 @@ jobs:
           "MURMUR_DESKTOP_OUT=$Out" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Preflight (unlocked session, idle 60 s, no other Murmur or Notepad)
+        if: ${{ !inputs.guard_diagnostic }}
         shell: pwsh
         env:
           ONLY: ${{ inputs.only }}
@@ -109,6 +117,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Preflight refused to start (see above); nothing was run' }
 
       - name: Run the desktop checks (takes the keyboard and mouse; real input aborts)
+        if: ${{ !inputs.guard_diagnostic }}
         shell: pwsh
         env:
           ONLY: ${{ inputs.only }}
@@ -119,12 +128,29 @@ jobs:
           & $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/run.py @RunArgs
           if ($LASTEXITCODE -ne 0) { throw "Desktop checks failed or were aborted; report in $env:MURMUR_DESKTOP_OUT" }
 
+      - name: Diagnose the input guard (stdlib only; no app launch)
+        if: ${{ inputs.guard_diagnostic }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Out = "C:\murmur-desktop-reports\$env:GITHUB_SHA\$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "MURMUR_DESKTOP_OUT=$Out" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & py -3.12 scripts/windows/desktop/guard_diagnostic.py --out (Join-Path $Out 'guard-diagnostic.json')
+          if ($LASTEXITCODE -ne 0) { throw "Input guard diagnostic stopped; report in $Out" }
+
       - name: Report to the job summary
         if: always()
         shell: pwsh
         run: |
+          $Diagnostic = Join-Path "$env:MURMUR_DESKTOP_OUT" 'guard-diagnostic.json'
           $Report = Join-Path "$env:MURMUR_DESKTOP_OUT" 'desktop-report.md'
-          if ($env:MURMUR_DESKTOP_OUT -and (Test-Path -LiteralPath $Report)) {
+          if ($env:MURMUR_DESKTOP_OUT -and (Test-Path -LiteralPath $Diagnostic)) {
+            'Input guard diagnostic:' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            '~~~json' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            Get-Content -LiteralPath $Diagnostic -Raw | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            '~~~' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            "Evidence: ``$env:MURMUR_DESKTOP_OUT`` on Edison." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          } elseif ($env:MURMUR_DESKTOP_OUT -and (Test-Path -LiteralPath $Report)) {
             Get-Content -LiteralPath $Report -Raw | Out-File $env:GITHUB_STEP_SUMMARY -Append
             "Evidence: ``$env:MURMUR_DESKTOP_OUT`` on Edison." | Out-File $env:GITHUB_STEP_SUMMARY -Append
           } else {

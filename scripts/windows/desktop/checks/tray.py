@@ -148,8 +148,7 @@ def _watch_run_keys(ctx):
 
 def _toggle_autostart(ctx, wanted):
     window = ctx.murmur.page("General")
-    switch = uia.find_following(window, "Start at login", control_type_=(uia.CHECKBOX, uia.BUTTON), timeout=10,
-                                sleep=ctx.sleep)
+    switch = uia.named_toggle(window, "Start at login", timeout=10, sleep=ctx.sleep)
     if uia.toggle_state(switch) != int(wanted):
         uia.toggle(switch)
     ctx.sleep(1.5)

@@ -26,6 +26,7 @@ ULONG_PTR = ctypes.c_size_t
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE = 0x0001, 0x0002, 0x0004
 MOUSEEVENTF_MOVE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0001, 0x0002, 0x0004
+MOUSEEVENTF_MOVE_NOCOALESCE = 0x2000
 MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP = 0x0008, 0x0010
 MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_ABSOLUTE = 0x4000, 0x8000
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 76, 77, 78, 79
@@ -102,7 +103,17 @@ def _declare():
     for name, args, res in (
         ("SendInput", (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int), wintypes.UINT),
         ("GetForegroundWindow", (), wintypes.HWND),
+        ("CreateWindowExW", (wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                             ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND,
+                             wintypes.HWND, handle, ctypes.c_void_p), wintypes.HWND),
+        ("DestroyWindow", (wintypes.HWND,), wintypes.BOOL),
         ("SetForegroundWindow", (wintypes.HWND,), wintypes.BOOL),
+        ("SetFocus", (wintypes.HWND,), wintypes.HWND),
+        ("GetFocus", (), wintypes.HWND),
+        ("GetMessageExtraInfo", (), wintypes.LPARAM),
+        ("PeekMessageW", (ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT,
+                          wintypes.UINT, wintypes.UINT), wintypes.BOOL),
+        ("DispatchMessageW", (ctypes.POINTER(wintypes.MSG),), ctypes.c_ssize_t),
         ("BringWindowToTop", (wintypes.HWND,), wintypes.BOOL),
         ("ShowWindow", (wintypes.HWND, ctypes.c_int), wintypes.BOOL),
         ("IsIconic", (wintypes.HWND,), wintypes.BOOL),
@@ -134,6 +145,8 @@ def _declare():
         ("GetLastInputInfo", (ctypes.POINTER(LASTINPUTINFO),), wintypes.BOOL),
         ("OpenInputDesktop", (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD), handle),
         ("CloseDesktop", (handle,), wintypes.BOOL),
+        ("GetProcessWindowStation", (), handle),
+        ("GetThreadDesktop", (wintypes.DWORD,), handle),
         ("GetUserObjectInformationW", (handle, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
                                        ctypes.POINTER(wintypes.DWORD)), wintypes.BOOL),
         ("MapVirtualKeyW", (wintypes.UINT, wintypes.UINT), wintypes.UINT),
@@ -150,6 +163,8 @@ def _declare():
         ("GlobalFree", (handle,), handle),
         ("GetTickCount", (), wintypes.DWORD),
         ("GetCurrentThreadId", (), wintypes.DWORD),
+        ("GetModuleHandleW", (wintypes.LPCWSTR,), handle),
+        ("ProcessIdToSessionId", (wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)), wintypes.BOOL),
         ("CreateToolhelp32Snapshot", (wintypes.DWORD, wintypes.DWORD), handle),
         ("Process32FirstW", (handle, ctypes.POINTER(PROCESSENTRY32W)), wintypes.BOOL),
         ("Process32NextW", (handle, ctypes.POINTER(PROCESSENTRY32W)), wintypes.BOOL),
@@ -418,6 +433,14 @@ def window_rect(hwnd):
     return rect.tuple()
 
 
+def outer_rect(hwnd):
+    """Full frame, including the invisible resize border used for a mouse resize."""
+    rect = RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return rect.tuple()
+
+
 def client_size(hwnd):
     rect = RECT()
     user32.GetClientRect(hwnd, ctypes.byref(rect))
@@ -632,6 +655,33 @@ def input_desktop():
         return buffer.value
     finally:
         user32.CloseDesktop(desktop)
+
+
+def desktop_context(thread_id=None):
+    """Read-only identity of this process's station and a thread's hook desktop."""
+    require_windows()
+
+    def object_name(handle):
+        if not handle:
+            return None
+        buffer = ctypes.create_unicode_buffer(256)
+        needed = wintypes.DWORD()
+        if not user32.GetUserObjectInformationW(handle, 2, buffer, ctypes.sizeof(buffer), ctypes.byref(needed)):
+            return None
+        return buffer.value
+
+    session = wintypes.DWORD()
+    session_id = session.value if kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)) else None
+    station = user32.GetProcessWindowStation()
+    thread = user32.GetThreadDesktop(thread_id or kernel32.GetCurrentThreadId())
+    receives_input = wintypes.BOOL()
+    needed = wintypes.DWORD()
+    input_state = (bool(receives_input.value) if thread and user32.GetUserObjectInformationW(
+        thread, 6, ctypes.byref(receives_input), ctypes.sizeof(receives_input), ctypes.byref(needed))
+        else None)
+    return {"session_id": session_id, "window_station": object_name(station),
+            "thread_desktop": object_name(thread), "thread_desktop_receives_input": input_state,
+            "foreground_window_present": bool(user32.GetForegroundWindow())}
 
 
 class HotkeyBlocker:

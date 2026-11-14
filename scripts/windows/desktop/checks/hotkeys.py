@@ -1,4 +1,5 @@
 """H1-H7: hold, release orders, B8 Shift, toggle, Escape, conflicts, code hotkey."""
+import json
 import re
 
 import win32
@@ -7,7 +8,6 @@ from context import Fail
 
 
 def h1_hold(ctx):
-    expected = ctx.golden("A")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     pad = ctx.notepad()
     pad.focus()
@@ -15,14 +15,14 @@ def h1_hold(ctx):
     text = pad.wait_text()
     ctx.settle()
     ctx.screenshot(pad.hwnd, "notepad.png")
+    ctx.artifact("notepad-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     if pad.menu_open():
         win32.tap("esc")
         raise Fail("Notepad's menu was activated by the hotkey release")
-    ctx.expect(expected, text, "Notepad")
+    ctx.expect_delivery(text, "Notepad")
 
 
 def h2_release_order(ctx):
-    expected = ctx.golden("A")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     app = ctx.target("A")
     for order in ("together", "modifiers-held"):
@@ -34,16 +34,17 @@ def h2_release_order(ctx):
         ctx.sleep(1.5)
         if ctx.murmur.overlay_state() == "listening":
             raise Fail(f"Release order {order}: dictation restarted")
-        ctx.expect(expected, text, f"release order {order}")
+        ctx.artifact(f"release-{order}-target.json").write_text(
+            json.dumps(app.state(), ensure_ascii=False, indent=2), encoding="utf-8")
+        ctx.expect_delivery(text, f"release order {order}")
 
 
 def h3_shift_held(ctx):
-    expected = ctx.golden("A", hotkey=SHIFT_HOTKEY)
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"general": {"hotkey": SHIFT_HOTKEY}})
     app = ctx.target("A")
     app.focus()
     released = ctx.dictate("A", hotkey=SHIFT_HOTKEY, order="key-first")
-    ctx.expect(expected, app.wait_text(), "clean release")
+    ctx.expect_delivery(app.wait_text(), "clean release")
     clean_latency = app.first_key_time() - released
     ctx.settle()
     app.clear()
@@ -60,7 +61,7 @@ def h3_shift_held(ctx):
         raise Fail("TargetApp recorded no key state for the first character")
     if first["state"] & 0x1:
         raise Fail(f"First character {first.get('char')!r} arrived while Shift was still held (B8)")
-    ctx.expect(expected, text, "Shift held 300 ms")
+    ctx.expect_delivery(text, "Shift held 300 ms")
     after_shift = app.first_key_time() - shift_up
     after_key = after_shift + 0.3
     ctx.note(f"first character {after_shift:.2f} s after Shift up; clean release latency {clean_latency:.2f} s")
@@ -72,14 +73,13 @@ def h3_shift_held(ctx):
 
 
 def h4_toggle(ctx):
-    expected = ctx.golden("A", mode="toggle")
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"general": {"hotkey_mode": "toggle"}})
     app = ctx.target("A")
     app.focus()
     ctx.dictate("A", mode="toggle")
     text = app.wait_text()
     ctx.settle()
-    ctx.expect(expected, text, "second toggle dictation")
+    ctx.expect_delivery(text, "second toggle dictation")
 
 
 def h5_escape(ctx):
@@ -107,7 +107,6 @@ def h6_conflict(ctx):
     the combination into Settings' capture field: Windows delivers a RegisterHotKey-owned
     combination only to its owner as WM_HOTKEY, so the capture field never sees it (true for a
     person pressing Win+E too). The harness owns the combination itself, so nothing else opens."""
-    expected = ctx.golden("A")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     blocker = win32.HotkeyBlocker(BLOCKED_HOTKEY).start()
     ctx.restorer.push("release the blocking hotkey", blocker.stop)
@@ -115,15 +114,28 @@ def h6_conflict(ctx):
     log_before = len(ctx.murmur.log())
     ctx.murmur.write_config({"general": {"hotkey": BLOCKED_HOTKEY}})
     needle = "is unavailable"
+    names_seen = []
 
     def refused():
-        state = ctx.murmur.overlay_state()
-        if state.startswith("error:") and needle in state:
-            return state
+        names = ctx.murmur.overlay_names()
+        if not names_seen or names != names_seen[-1]:
+            names_seen.append(names)
+        message = next((name for name in names if "shortcut" in name.lower() and needle in name), None)
+        if message:
+            return message
         tail = ctx.murmur.log()[log_before:]
-        return next((line for line in tail.splitlines() if needle in line), None)
+        return next((line for line in tail.splitlines()
+                     if "shortcut" in line.lower() and needle in line), None)
 
     evidence = win32.wait_for(refused, 10, 0.2, sleep=ctx.sleep)
+    tail = ctx.murmur.log()[log_before:]
+    diagnostic = [f"registered blocker: {BLOCKED_HOTKEY}",
+                  f"config contains blocker: {BLOCKED_HOTKEY in ctx.murmur.config_path.read_text(encoding='utf-8')}",
+                  f"process running: {ctx.murmur.running()}", "overlay accessible-name snapshots:",
+                  *[f"  {names!r}" for names in names_seen], "reload/rebind log lines:",
+                  *[line for line in tail.splitlines() if any(term in line.lower() for term in
+                    ("config", "reload", "shortcut", "rebind", "unavailable"))]]
+    ctx.artifact("rebind-diagnostic.txt").write_text("\n".join(diagnostic) + "\n", encoding="utf-8")
     ctx.screenshot(ctx.murmur.overlay_hwnd(), "overlay.png")
     # Put the file back to the running config (reload compares and finds nothing to change).
     ctx.murmur.write_config({})
@@ -131,14 +143,17 @@ def h6_conflict(ctx):
     blocker.stop()
     ctx.note("conflict driven through the config file with a combination the harness registered "
              "(RegisterHotKey); pressing it into the capture field cannot work on Windows, see docstring")
-    if not evidence:
-        raise Fail(f"No 'Shortcut ... {needle}' error after configuring a shortcut another app owns "
-                   f"(overlay: {ctx.murmur.overlay_state()})")
-    ctx.note(f"error: {evidence.strip()[:200]!r}")
     app = ctx.target("A")
     app.focus()
     ctx.dictate("A")
-    ctx.expect(expected, app.wait_text(), "previous hotkey after the conflict")
+    text = app.wait_text()
+    ctx.settle()
+    if not evidence:
+        raise Fail(f"No 'Shortcut ... {needle}' error after configuring a shortcut another app owns "
+                   f"(overlay: {names_seen[-1][:6] if names_seen else []!r}; "
+                   f"previous hotkey delivered: {bool(text)})")
+    ctx.note(f"error: {evidence.strip()[:200]!r}")
+    ctx.expect_delivery(text, "previous hotkey after the conflict")
 
 
 def _words(text):
@@ -147,14 +162,13 @@ def _words(text):
 
 def h7_code(ctx):
     prose = ctx.golden("A")
-    expected = ctx.golden("A", hotkey=CODE_HOTKEY, style="code")
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"general": {"hotkey_code": CODE_HOTKEY}})
     app = ctx.target("editor", role="editor")
     app.focus()
     ctx.dictate("A", hotkey=CODE_HOTKEY)
     text = app.wait_text()
     ctx.settle()
-    ctx.expect(expected, text, "code hotkey")
+    ctx.expect_delivery(text, "code hotkey")
     if _words(text) != _words(prose):
         raise Fail(f"Code-style text has different words than prose: {text!r} vs {prose!r}")
     ctx.note(f"prose {prose!r}; code {text!r}")
