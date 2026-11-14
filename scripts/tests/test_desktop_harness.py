@@ -428,7 +428,9 @@ class RunnerTests(unittest.TestCase):
                 behaviours[check.id](ctx)
             return function
 
-        results, aborted = run.run_checks(self.ctx, catalog.select(ids), repeat, lookup, log=lambda _: None)
+        with mock.patch.object(win32, "release_all") as release_all:
+            results, aborted = run.run_checks(self.ctx, catalog.select(ids), repeat, lookup, log=lambda _: None)
+        release_all.assert_called()
         return results, aborted, undone
 
     def test_statuses_and_per_check_restore(self):
@@ -478,7 +480,8 @@ class RunnerTests(unittest.TestCase):
             raise murmur.StartupError("Murmur exited before its Settings window appeared (exit code 101)", session)
 
         with mock.patch.object(murmur.win32, "enum_windows", return_value=[(12, 42, "Murmur Overlay", "WebView")]), \
-             mock.patch.object(murmur.win32, "user32", SimpleNamespace(IsWindowVisible=lambda _: False)):
+             mock.patch.object(murmur.win32, "user32", SimpleNamespace(IsWindowVisible=lambda _: False)), \
+             mock.patch.object(win32, "IS_WINDOWS", True):
             results, blocked, undone = self.run_with({"P3": startup}, "P3,P4,S1")
         self.assertEqual([r.status for r in results], [report.FAIL, report.ABORTED, report.ABORTED])
         self.assertIn("P3 startup failure", blocked)
