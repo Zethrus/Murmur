@@ -1081,6 +1081,20 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "preflight_refused")
         self.assertIn("idle for 60", "\n".join(result["problems"]))
 
+    def test_guard_diagnostic_report_includes_bounded_python_identity_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "guard-diagnostic.json"
+            with mock.patch.object(guard_diagnostic, "diagnose", return_value={"status": "preflight_refused"}) as diagnose:
+                exit_code = guard_diagnostic.main(["--out", str(output), "--seconds", "1"])
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(exit_code, 1)
+        diagnose.assert_called_once_with(1)
+        self.assertEqual(payload["python"], {
+            "executable": sys.executable,
+            "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "prefix": sys.prefix,
+        })
+
 
 class ManualTests(unittest.TestCase):
     def test_answers_items_and_results(self):

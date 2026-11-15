@@ -261,29 +261,38 @@ unlocked, 60 s without input, no other `murmur.exe`, Notepad closed), shows a
 copy> --out <dir> [--only H1,F2] [--group focus] [--repeat 3]`.
 
 For an input-guard failure before the checks, dispatch the same workflow with
-`-f guard_diagnostic=true` and the matching `sha`. This branch skips the build,
-venv and app launch. It requires the owner's session to be unlocked and idle for
-60 seconds with no Murmur running, then runs the isolated guard for a 30-second
-probe window. It does not close any app. Run it locally in the owner-controlled,
-unlocked session without a build:
+`-f guard_diagnostic=true` and the matching `sha`. This branch creates the same
+hash-locked harness venv as the full suite, but skips build handoff and app launch.
+It requires the owner's unlocked session with no Murmur running, then waits for
+the owned diagnostic window to take focus and for 60 seconds without input before
+running the isolated guard for 30 seconds. It does not close any app. To reproduce
+locally in the owner-controlled, unlocked session without a build, create a fresh
+venv with the same requirements:
 
 ```powershell
-py -3.12 scripts\windows\desktop\guard_diagnostic.py --seconds 30 --out C:\murmur-desktop-reports\guard-diagnostic.json
+$Venv = Join-Path $env:TEMP "murmur-guard-$PID"
+py -3.12 -m venv $Venv
+$Python = Join-Path $Venv 'Scripts\python.exe'
+& $Python -m pip install --disable-pip-version-check --no-input --require-hashes --only-binary=:all: `
+  -r scripts\windows\desktop\requirements.txt
+& $Python scripts\windows\desktop\guard_diagnostic.py --seconds 30 --out C:\murmur-desktop-reports\guard-diagnostic.json
 ```
 
 The diagnostic opens a small window owned by its own process, verifies that
-Windows gave that window foreground focus, and sends a tagged Unicode packet
+Windows gave that window foreground focus (allowing up to 180 seconds for the
+owner to click it if automatic focus fails), and sends a tagged Unicode packet
 key-down/key-up pair to it. The foreground owner is checked again immediately
 before injection, and the window removes messages without calling
 `TranslateMessage`. The packet is a Unicode noncharacter, not a functional
-shortcut. If Windows refuses focus, it sends no controlled key and reports
+shortcut. If focus never arrives, it sends no controlled key and reports
 `probe_window_unavailable`. On exit it tries to restore the previous foreground
 window only while its own window is still foreground; it never steals focus back
 after another window has taken it. The local `guard-diagnostic.json` reports
-hook and message-pump state, ctypes structure sizes, SendInput result, callback
-counts, and up to eight recent **injected probe candidates** with their tag
-comparison. It never records real key fields. A missing or mismatched probe is
-still a failure; the diagnostic does not relax the guard.
+Python executable/version/prefix, hook and message-pump state, ctypes structure
+sizes, SendInput result, callback counts, and up to eight recent **injected probe
+candidates** with their tag comparison. It never records real key fields. A
+missing or mismatched probe is still a failure; the diagnostic does not relax the
+guard.
 
 The observer creates its message queue before reporting ready. Diagnostic
 `heartbeat_posted` and `heartbeat_received` count private messages through that

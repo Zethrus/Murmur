@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded native input-guard probe; requires only Python's standard library.
+"""Bounded native input-guard probe run with the desktop harness Python environment.
 
-Run only on the owner-controlled, idle, unlocked desktop. The hook records counts for all
-callbacks, but event fields only for injected probe candidates; no real key fields are written.
+Its imports use only the standard library and local harness modules. Run only on the
+owner-controlled, idle, unlocked desktop. The hook records counts for all callbacks,
+but event fields only for injected probe candidates; no real key fields are written.
 """
 import argparse
 import ctypes
@@ -10,6 +11,7 @@ from ctypes import wintypes
 import json
 from pathlib import Path
 import os
+import sys
 import threading
 import time
 
@@ -218,6 +220,11 @@ def main(argv=None):
     if not 1 <= args.seconds <= 60:
         parser.error("--seconds must be 1-60")
     result = diagnose(args.seconds)
+    result["python"] = {
+        "executable": sys.executable,
+        "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "prefix": sys.prefix,
+    }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(f"Input guard diagnostic: {result['status']}; report: {args.out}")

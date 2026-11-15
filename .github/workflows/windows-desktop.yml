@@ -31,7 +31,7 @@ on:
         type: string
         default: '1'
       guard_diagnostic:
-        description: Probe the input guard only (no app build or harness dependencies)
+        description: Probe the input guard in the harness environment (no app build)
         required: false
         type: boolean
         default: false
@@ -72,7 +72,6 @@ jobs:
           persist-credentials: false
 
       - name: Harness virtual environment (hash-locked dependencies)
-        if: ${{ !inputs.guard_diagnostic }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -128,14 +127,14 @@ jobs:
           & $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/run.py @RunArgs
           if ($LASTEXITCODE -ne 0) { throw "Desktop checks failed or were aborted; report in $env:MURMUR_DESKTOP_OUT" }
 
-      - name: Diagnose the input guard (stdlib only; no app launch)
+      - name: Diagnose the input guard (harness Python; no app launch)
         if: ${{ inputs.guard_diagnostic }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $Out = "C:\murmur-desktop-reports\$env:GITHUB_SHA\$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           "MURMUR_DESKTOP_OUT=$Out" | Out-File -FilePath $env:GITHUB_ENV -Append
-          & py -3.12 scripts/windows/desktop/guard_diagnostic.py --out (Join-Path $Out 'guard-diagnostic.json')
+          & $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/guard_diagnostic.py --out (Join-Path $Out 'guard-diagnostic.json')
           if ($LASTEXITCODE -ne 0) { throw "Input guard diagnostic stopped; report in $Out" }
 
       - name: Report to the job summary
