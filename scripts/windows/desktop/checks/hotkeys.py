@@ -82,7 +82,7 @@ def _notepad_focus_trial(ctx, spec, name, phases):
         ctx.settle()
         sample("after delivery wait")
         difference = golden.compare(expected, actual)
-        return pad, difference
+        return pad, difference, expected
     finally:
         # The run's fail-closed guard handles user input. This only releases keys owned by
         # the harness if sampling or dictation fails before the normal key-up sequence.
@@ -95,12 +95,29 @@ def h8_focus_phases(ctx):
     artifact = ctx.artifact("focus-phases.json")
     try:
         for name, spec in (("alt", "Ctrl+Alt+Shift+F9"), ("no-alt", SHIFT_HOTKEY)):
-            results[name] = {"hotkey": spec, "phases": [], "difference": None}
-            pad, difference = _notepad_focus_trial(ctx, spec, name, results[name]["phases"])
+            results[name] = {"hotkey": spec, "phases": [], "difference": None,
+                             "saved_file_difference": None, "saved_file_updated": None,
+                             "saved_file_error": None}
+            pad, difference, expected = _notepad_focus_trial(ctx, spec, name, results[name]["phases"])
             results[name]["difference"] = difference
+            # Preserve the input-free UIA verdict, then capture independent visual evidence
+            # before close() changes focus or sends Ctrl+S. The saved file is a second readback
+            # of this disposable fixture document, not a replacement for the exact UIA oracle.
+            ctx.screenshot(pad.hwnd, f"{name}-notepad.png")
             # Windows 11 Notepad may reuse the same top-level window for another tab.
             # Close this harness-owned document before starting the comparison trial.
+            try:
+                before_save = pad.path.stat().st_mtime_ns
+            except OSError:
+                before_save = None
             pad.close()
+            try:
+                after_save = pad.path.stat().st_mtime_ns
+                results[name]["saved_file_updated"] = before_save != after_save
+                saved = pad.path.read_text(encoding="utf-8-sig")
+                results[name]["saved_file_difference"] = golden.compare(expected, saved)
+            except (OSError, UnicodeError) as error:
+                results[name]["saved_file_error"] = f"{type(error).__name__}: {error}"
     finally:
         artifact.write_text(json.dumps(results, indent=2), encoding="utf-8")
     differences = [f"{name}: {result['difference']}" for name, result in results.items() if result["difference"]]

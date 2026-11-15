@@ -139,9 +139,11 @@ class ImportTests(unittest.TestCase):
              mock.patch.object(win32, "key_down") as down, \
              mock.patch.object(win32, "key_up") as up, \
              mock.patch.object(win32, "release_all") as release:
-            returned_pad, difference = hotkey_checks._notepad_focus_trial(ctx, "Ctrl+Alt+Shift+F9", "alt", phases)
+            returned_pad, difference, expected = hotkey_checks._notepad_focus_trial(
+                ctx, "Ctrl+Alt+Shift+F9", "alt", phases)
         self.assertIs(returned_pad, pad)
         self.assertTrue(difference)
+        self.assertEqual(expected, "full")
         self.assertEqual([phase["stage"] for phase in phases],
                          ["before modifiers", "before F9 down", "F9 held", "listening", "before F9 up",
                           "after F9 up", "after shift up", "after alt up", "after ctrl up", "before delivery wait",
@@ -163,17 +165,29 @@ class ImportTests(unittest.TestCase):
 
     def test_hotkey_probe_records_both_trials_even_when_alt_fails(self):
         with tempfile.TemporaryDirectory() as directory:
-            pads = [SimpleNamespace(close=mock.Mock()), SimpleNamespace(close=mock.Mock())]
-            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix)
+            paths = [Path(directory) / f"{name}.txt" for name in ("alt", "no-alt")]
+            pads = [SimpleNamespace(hwnd=number, path=path,
+                                    close=mock.Mock(side_effect=lambda path=path, number=number:
+                                                    path.write_text("partial" if number == 1 else "full")))
+                    for number, path in enumerate(paths, 1)]
+            screenshot = mock.Mock(return_value=Path(directory) / "screenshot.png")
+            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix, screenshot=screenshot)
             with mock.patch.object(hotkey_checks, "_notepad_focus_trial",
-                                   side_effect=[(pads[0], "wrong text"), (pads[1], None)]) as trial:
+                                   side_effect=[(pads[0], "wrong text", "full"),
+                                                (pads[1], None, "full")]) as trial:
                 with self.assertRaisesRegex(Fail, "alt: wrong text"):
                     hotkey_checks.h8_focus_phases(ctx)
             self.assertEqual(trial.call_count, 2)
             self.assertEqual([pad.close.call_count for pad in pads], [1, 1])
+            self.assertEqual(screenshot.call_args_list,
+                             [mock.call(1, "alt-notepad.png"), mock.call(2, "no-alt-notepad.png")])
             evidence = json.loads((Path(directory) / "focus-phases.json").read_text())
             self.assertEqual(evidence["alt"]["difference"], "wrong text")
             self.assertIsNone(evidence["no-alt"]["difference"])
+            self.assertIn("differs at character", evidence["alt"]["saved_file_difference"])
+            self.assertIsNone(evidence["no-alt"]["saved_file_difference"])
+            self.assertTrue(evidence["alt"]["saved_file_updated"])
+            self.assertTrue(evidence["no-alt"]["saved_file_updated"])
 
     def test_overlay_focus_check_refuses_to_blame_click_when_editor_already_lost_focus(self):
         from checks import overlay as checks_overlay
