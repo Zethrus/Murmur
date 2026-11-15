@@ -1,5 +1,7 @@
 use crate::{config::Injection, postproc::Style};
-use anyhow::{bail, Context, Result};
+#[cfg(target_os = "linux")]
+use anyhow::bail;
+use anyhow::{Context, Result};
 #[cfg(not(any(target_os = "linux", windows)))]
 use enigo::{Direction, Key};
 #[cfg(not(windows))]
@@ -25,7 +27,123 @@ impl std::fmt::Display for TargetChanged {
 }
 impl std::error::Error for TargetChanged {}
 
+/// Delivery was refused because the hotkey's physical modifiers stayed down through the wait.
+#[derive(Debug)]
+pub struct ModifiersHeld;
+impl std::fmt::Display for ModifiersHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Modifier keys are still held; release them and choose Insert here to retry")
+    }
+}
+impl std::error::Error for ModifiersHeld {}
+
 #[cfg(any(windows, test))]
+mod keyboard_batch {
+    use anyhow::{bail, Result};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Key {
+        Control,
+        Shift,
+        V,
+        Return,
+        Tab,
+        Unicode(u16),
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct Stroke {
+        pub key: Key,
+        pub up: bool,
+    }
+
+    fn pair(key: Key) -> [Stroke; 2] {
+        [Stroke { key, up: false }, Stroke { key, up: true }]
+    }
+
+    pub(super) fn character(ch: char) -> Result<Vec<Stroke>> {
+        if ch == '\0' {
+            bail!("Transcript contains a NUL character");
+        }
+        let mut events = Vec::with_capacity(4);
+        match ch {
+            '\n' => events.extend(pair(Key::Return)),
+            '\t' => events.extend(pair(Key::Tab)),
+            _ => {
+                let mut units = [0; 2];
+                for &unit in ch.encode_utf16(&mut units).iter() {
+                    events.extend(pair(Key::Unicode(unit)));
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    pub(super) fn paste(shift: bool) -> Vec<Stroke> {
+        let mut events = vec![Stroke {
+            key: Key::Control,
+            up: false,
+        }];
+        if shift {
+            events.push(Stroke {
+                key: Key::Shift,
+                up: false,
+            });
+        }
+        events.extend(pair(Key::V));
+        if shift {
+            events.push(Stroke {
+                key: Key::Shift,
+                up: true,
+            });
+        }
+        events.push(Stroke {
+            key: Key::Control,
+            up: true,
+        });
+        events
+    }
+
+    /// Only releases downs inserted by this call and not balanced within its inserted prefix.
+    /// A cleanup failure is logged, but the original short-submission error remains authoritative.
+    pub(super) fn send(events: &[Stroke], mut submit: impl FnMut(&[Stroke]) -> u32) -> Result<()> {
+        let sent = submit(events) as usize;
+        if sent == events.len() {
+            return Ok(());
+        }
+        let mut down = Vec::new();
+        for event in events.iter().take(sent) {
+            if event.up {
+                if let Some(index) = down.iter().rposition(|key| key == &event.key) {
+                    down.remove(index);
+                }
+            } else {
+                down.push(event.key);
+            }
+        }
+        let cleanup: Vec<_> = down
+            .into_iter()
+            .rev()
+            .map(|key| Stroke { key, up: true })
+            .collect();
+        if !cleanup.is_empty() {
+            let released = submit(&cleanup);
+            if released != cleanup.len() as u32 {
+                tracing::warn!(
+                    released,
+                    requested = cleanup.len(),
+                    "SendInput key-up cleanup incomplete"
+                );
+            }
+        }
+        bail!(
+            "SendInput submitted {sent} of {} keyboard events",
+            events.len()
+        )
+    }
+}
+
+#[cfg(test)]
 fn utf16_pairs(ch: char) -> Vec<(u16, u16)> {
     let mut units = [0; 2];
     ch.encode_utf16(&mut units)
@@ -53,6 +171,7 @@ fn guarded_chars(
 
 #[cfg(windows)]
 mod win_input {
+    use super::keyboard_batch::{Key, Stroke};
     use super::*;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
@@ -73,53 +192,40 @@ mod win_input {
             },
         }
     }
-    fn send(events: &[INPUT]) -> Result<()> {
-        let sent = unsafe {
-            SendInput(
-                events.len() as u32,
-                events.as_ptr(),
-                std::mem::size_of::<INPUT>() as i32,
-            )
-        };
-        if sent != events.len() as u32 {
-            bail!(
-                "SendInput submitted {sent} of {} keyboard events",
-                events.len()
-            );
-        }
-        Ok(())
+    fn send(events: &[Stroke]) -> Result<()> {
+        keyboard_batch::send(events, |strokes| {
+            let input: Vec<_> = strokes
+                .iter()
+                .map(|stroke| {
+                    let (vk, scan, flags) = match stroke.key {
+                        Key::Control => (VK_CONTROL, 0, 0),
+                        Key::Shift => (VK_SHIFT, 0, 0),
+                        Key::V => (VK_V, 0, 0),
+                        Key::Return => (VK_RETURN, 0, 0),
+                        Key::Tab => (VK_TAB, 0, 0),
+                        Key::Unicode(unit) => (0, unit, KEYEVENTF_UNICODE),
+                    };
+                    key(
+                        vk,
+                        scan,
+                        flags | if stroke.up { KEYEVENTF_KEYUP } else { 0 },
+                    )
+                })
+                .collect();
+            unsafe {
+                SendInput(
+                    input.len() as u32,
+                    input.as_ptr(),
+                    std::mem::size_of::<INPUT>() as i32,
+                )
+            }
+        })
     }
     pub fn character(ch: char) -> Result<()> {
-        if ch == '\0' {
-            bail!("Transcript contains a NUL character");
-        }
-        let mut events = Vec::with_capacity(4);
-        if let Some(vk) = match ch {
-            '\n' => Some(VK_RETURN),
-            '\t' => Some(VK_TAB),
-            _ => None,
-        } {
-            events.push(key(vk, 0, 0));
-            events.push(key(vk, 0, KEYEVENTF_KEYUP));
-        } else {
-            for (down, up) in utf16_pairs(ch) {
-                events.push(key(0, down, KEYEVENTF_UNICODE));
-                events.push(key(0, up, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-            }
-        }
-        send(&events)
+        send(&keyboard_batch::character(ch)?)
     }
     pub fn paste(shift: bool) -> Result<()> {
-        let mut events = vec![key(VK_CONTROL, 0, 0)];
-        if shift {
-            events.push(key(VK_SHIFT, 0, 0));
-        }
-        events.extend([key(VK_V, 0, 0), key(VK_V, 0, KEYEVENTF_KEYUP)]);
-        if shift {
-            events.push(key(VK_SHIFT, 0, KEYEVENTF_KEYUP));
-        }
-        events.push(key(VK_CONTROL, 0, KEYEVENTF_KEYUP));
-        send(&events)
+        send(&keyboard_batch::paste(shift))
     }
 }
 
@@ -610,7 +716,10 @@ impl Injector {
         let sent = xdotool_chord(is_terminal(focused));
         #[cfg(windows)]
         let sent = (|| {
-            if !wait_for_modifiers_released() || !still_target().unwrap_or(false) {
+            if !wait_for_modifiers_released() {
+                return Err(ModifiersHeld.into());
+            }
+            if !still_target().unwrap_or(false) {
                 return Err(TargetChanged { sent_chars: 0 }.into());
             }
             win_input::paste(is_terminal(focused))
@@ -647,7 +756,7 @@ impl Injector {
         #[cfg(windows)]
         {
             if !wait_for_modifiers_released() {
-                return Err(TargetChanged { sent_chars: 0 }.into());
+                return Err(ModifiersHeld.into());
             }
             guarded_chars(text, &mut still_target, win_input::character, || {
                 thread::sleep(Duration::from_millis(12))
@@ -710,6 +819,163 @@ mod tests {
     fn unicode_key_pairs_keep_each_key_up_with_its_own_unit() {
         assert_eq!(utf16_pairs('é'), vec![(0x00e9, 0x00e9)]);
         assert_eq!(utf16_pairs('😀'), vec![(0xd83d, 0xd83d), (0xde00, 0xde00)]);
+    }
+
+    #[test]
+    fn short_send_releases_only_unmatched_downs_from_its_own_prefix() {
+        use keyboard_batch::{Key, Stroke};
+        let up = |key| Stroke { key, up: true };
+        let cases = [
+            (
+                "paste",
+                keyboard_batch::paste(false),
+                vec![
+                    vec![],
+                    vec![up(Key::Control)],
+                    vec![up(Key::V), up(Key::Control)],
+                    vec![up(Key::Control)],
+                ],
+            ),
+            (
+                "terminal paste",
+                keyboard_batch::paste(true),
+                vec![
+                    vec![],
+                    vec![up(Key::Control)],
+                    vec![up(Key::Shift), up(Key::Control)],
+                    vec![up(Key::V), up(Key::Shift), up(Key::Control)],
+                    vec![up(Key::Shift), up(Key::Control)],
+                    vec![up(Key::Control)],
+                ],
+            ),
+            (
+                "return",
+                keyboard_batch::character('\n').unwrap(),
+                vec![vec![], vec![up(Key::Return)]],
+            ),
+            (
+                "tab",
+                keyboard_batch::character('\t').unwrap(),
+                vec![vec![], vec![up(Key::Tab)]],
+            ),
+            (
+                "unicode",
+                keyboard_batch::character('é').unwrap(),
+                vec![vec![], vec![up(Key::Unicode(0xe9))]],
+            ),
+            (
+                "surrogates",
+                keyboard_batch::character('😀').unwrap(),
+                vec![
+                    vec![],
+                    vec![up(Key::Unicode(0xd83d))],
+                    vec![],
+                    vec![up(Key::Unicode(0xde00))],
+                ],
+            ),
+        ];
+        for (name, events, expected) in cases {
+            assert_eq!(expected.len(), events.len(), "{name}");
+            for (prefix, cleanup) in expected.into_iter().enumerate() {
+                let mut calls = Vec::new();
+                let error = keyboard_batch::send(&events, |batch| {
+                    calls.push(batch.to_vec());
+                    if calls.len() == 1 {
+                        prefix as u32
+                    } else {
+                        batch.len() as u32
+                    }
+                })
+                .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "SendInput submitted {prefix} of {} keyboard events",
+                        events.len()
+                    ),
+                    "{name}"
+                );
+                assert_eq!(
+                    calls,
+                    if cleanup.is_empty() {
+                        vec![events.clone()]
+                    } else {
+                        vec![events.clone(), cleanup.clone()]
+                    },
+                    "{name} prefix {prefix}"
+                );
+                if name == "paste" && calls.len() == 2 {
+                    // A held Shift was never in this submission, so cleanup must not release it.
+                    assert!(calls[1].iter().all(|event| event.key != Key::Shift));
+                }
+                if !cleanup.is_empty() {
+                    let mut attempts = 0;
+                    let original = keyboard_batch::send(&events, |_| {
+                        attempts += 1;
+                        if attempts == 1 {
+                            prefix as u32
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_err();
+                    assert_eq!(
+                        original.to_string(),
+                        error.to_string(),
+                        "{name} prefix {prefix}"
+                    );
+                    assert_eq!(
+                        attempts, 2,
+                        "cleanup failure is never retried: {name} prefix {prefix}"
+                    );
+                }
+            }
+            let mut calls = 0;
+            keyboard_batch::send(&events, |batch| {
+                calls += 1;
+                batch.len() as u32
+            })
+            .unwrap();
+            assert_eq!(calls, 1, "full send never needs cleanup: {name}");
+        }
+    }
+
+    #[test]
+    fn failed_cleanup_keeps_original_short_send_error_and_does_not_retry_text() {
+        let events = keyboard_batch::paste(true);
+        let mut calls = Vec::new();
+        let error = keyboard_batch::send(&events, |batch| {
+            calls.push(batch.to_vec());
+            if calls.len() == 1 {
+                3
+            } else {
+                0
+            }
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "SendInput submitted 3 of 6 keyboard events"
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[1],
+            vec![
+                keyboard_batch::Stroke {
+                    key: keyboard_batch::Key::V,
+                    up: true
+                },
+                keyboard_batch::Stroke {
+                    key: keyboard_batch::Key::Shift,
+                    up: true
+                },
+                keyboard_batch::Stroke {
+                    key: keyboard_batch::Key::Control,
+                    up: true
+                },
+            ]
+        );
+        assert!(calls[1].iter().all(|event| event.up));
     }
     #[test]
     fn guarded_typing_stops_before_destination_changes() {

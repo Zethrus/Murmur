@@ -496,16 +496,9 @@ impl Controller {
             start,
         ) {
             Err(error) => {
-                let sent = error
-                    .downcast_ref::<inject::TargetChanged>()
-                    .map(|e| e.sent_chars);
                 *held = self.hold(state, raw, duration);
                 if *held {
-                    let message = match sent {
-                        Some(0) => "Delivery stopped before typing because the selected destination changed.".to_owned(),
-                        Some(count) => format!("Delivery stopped after {count} characters were submitted. Some text may be present; review it before inserting or copying the full transcript."),
-                        None => "Delivery failed. Some text may be present; review it before inserting or copying the full transcript.".to_owned(),
-                    };
+                    let message = delivery_error_message(&error);
                     if let Some(id) = state.held.current_id() {
                         state.held.set_message(id, &message);
                         state.enhance.refresh_overlay(state);
@@ -698,7 +691,12 @@ impl Controller {
             Ok(delivered) => delivered,
             Err(error) => {
                 tracing::warn!(%error, "Deliver held transcript");
-                self.held_message(state, held.id, &format!("Could not deliver: {error:#}"));
+                let message = if error.downcast_ref::<inject::ModifiersHeld>().is_some() {
+                    delivery_error_message(&error)
+                } else {
+                    format!("Could not deliver: {error:#}")
+                };
+                self.held_message(state, held.id, &message);
                 return Ok(());
             }
         };
@@ -1009,6 +1007,17 @@ fn hold_reason(current: &Result<Focus>) -> Option<String> {
     }
 }
 
+fn delivery_error_message(error: &anyhow::Error) -> String {
+    if error.downcast_ref::<inject::ModifiersHeld>().is_some() {
+        return "Delivery paused: release Ctrl, Alt, Shift or Windows, then choose Insert here to retry.".to_owned();
+    }
+    match error.downcast_ref::<inject::TargetChanged>().map(|e| e.sent_chars) {
+        Some(0) => "Delivery stopped before typing because the selected destination changed.".to_owned(),
+        Some(count) => format!("Delivery stopped after {count} characters were submitted. Some text may be present; review it before inserting or copying the full transcript."),
+        None => "Delivery failed. Some text may be present; review it before inserting or copying the full transcript.".to_owned(),
+    }
+}
+
 fn set_delivery_busy(state: &AppState, busy: bool) -> Result<()> {
     let result = overlay::set_busy(&state.app, busy);
     state.enhance.publish(state);
@@ -1062,6 +1071,19 @@ mod tests {
     use super::{preview_due, preview_valid, remote_action, Controller, Policy, RemoteAction};
     use crate::{audio::AudioCapture, config::Config};
     use std::time::Duration;
+
+    #[test]
+    fn modifier_timeout_has_a_retry_reason_distinct_from_focus_change() {
+        let timeout = anyhow::Error::new(crate::inject::ModifiersHeld)
+            .context("Type transcript into selected application");
+        assert_eq!(super::delivery_error_message(&timeout),
+            "Delivery paused: release Ctrl, Alt, Shift or Windows, then choose Insert here to retry.");
+        let changed = anyhow::Error::new(crate::inject::TargetChanged { sent_chars: 0 });
+        assert_eq!(
+            super::delivery_error_message(&changed),
+            "Delivery stopped before typing because the selected destination changed."
+        );
+    }
 
     #[test]
     fn held_text_says_why_when_focus_is_unreadable_or_blocked() {

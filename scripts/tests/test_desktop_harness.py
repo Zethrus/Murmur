@@ -19,6 +19,7 @@ sys.path.insert(0, str(HARNESS))
 
 import catalog  # noqa: E402
 from checks import setup as setup_checks  # noqa: E402
+from checks import focus as focus_checks  # noqa: E402
 from checks import insertion as insertion_checks  # noqa: E402
 from checks import hotkeys as hotkey_checks  # noqa: E402
 from checks import microphone as microphone_checks  # noqa: E402
@@ -1595,3 +1596,55 @@ class DeliveredKeysTests(unittest.TestCase):
         delivered = targets.delivered_keys(keys)
         self.assertEqual([k["char"] for k in delivered], ["T", "h"])
         self.assertEqual(delivered[0]["t"], 5.0)
+
+
+class F13Tests(unittest.TestCase):
+    def test_held_modifier_phase_requires_full_transcript_reason_zero_input_and_no_history(self):
+        names = ["Not inserted: focus changed", "Daniel delivered the old wooden desk today.",
+                 "Delivery paused: release Ctrl, Alt, Shift or Windows, then choose Insert here to retry."]
+        session = SimpleNamespace(overlay_state=lambda: "held", overlay_names=lambda: names,
+                                  history_after=lambda _: [])
+        app = SimpleNamespace(delivered=lambda: [], text=lambda: "")
+        ctx = SimpleNamespace(murmur=session, _delivery_cursor=7, note=mock.Mock())
+        focus_checks._assert_f13_held(ctx, app)
+        ctx.note.assert_called_once()
+        session.overlay_names = lambda: [names[0], "Daniel delivered", names[2]]
+        with self.assertRaisesRegex(Fail, "full D transcript"):
+            focus_checks._assert_f13_held(ctx, app)
+        session.overlay_names = lambda: names
+        session.history_after = lambda _: [(8, names[1])]
+        with self.assertRaisesRegex(Fail, "successful delivery"):
+            focus_checks._assert_f13_held(ctx, app)
+        session.history_after = lambda _: []
+        app.delivered = lambda: [{"char": "D"}]
+        with self.assertRaisesRegex(Fail, "Target received input"):
+            focus_checks._assert_f13_held(ctx, app)
+
+    def test_f13_recovers_then_runs_exact_insert_here_type_and_clipboard_paths(self):
+        apps = {name: SimpleNamespace(hwnd=index + 1, focus=mock.Mock(), wait_text=lambda: "D text")
+                for index, name in enumerate(("direct", "A0", "B0", "A1", "B1"))}
+        configs = []
+        session = SimpleNamespace(ensure=lambda _, config: configs.append(config),
+                                  overlay_state=lambda: "held")
+        ctx = SimpleNamespace(murmur=session, fixtures={"D": SimpleNamespace(path="d.wav")},
+                              clipboard_guard=mock.Mock(), target=lambda name: apps[name],
+                              dictate=mock.Mock(), expect_delivery=mock.Mock(), settle=mock.Mock(),
+                              sleep=lambda _: None)
+        with mock.patch.object(focus_checks, "_assert_modifier_hold_refuses_delivery") as held, \
+             mock.patch.object(focus_checks, "click_overlay") as click, \
+             mock.patch.object(focus_checks, "wait_held") as wait_held, \
+             mock.patch.object(focus_checks, "wait_not_held", return_value=True), \
+             mock.patch.object(focus_checks, "require_empty"), \
+             mock.patch.object(win32, "wait_for", return_value=False), \
+             mock.patch.object(win32, "set_clipboard_text") as set_clipboard, \
+             mock.patch.object(win32, "clipboard_text", return_value="F13 clipboard sentinel"):
+            focus_checks.f13_no_retrigger(ctx)
+        held.assert_called_once_with(ctx, apps["direct"])
+        self.assertEqual(click.call_count, 3)
+        self.assertEqual([call.kwargs["expect_foreground"] for call in click.call_args_list],
+                         [apps["direct"].hwnd, apps["B0"].hwnd, apps["B1"].hwnd])
+        self.assertEqual(ctx.expect_delivery.call_count, 3)
+        self.assertEqual(ctx.dictate.call_count, 2)
+        self.assertEqual([config["injection"]["method"] for config in configs[1:]],
+                         ["type", "clipboard"])
+        set_clipboard.assert_called_once_with("F13 clipboard sentinel")

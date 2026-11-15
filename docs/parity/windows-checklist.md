@@ -14,7 +14,7 @@ window. Every item below is tagged:
   a harness-owned hotkey instead of Win+E in H6, set through the config file
   because Windows never delivers an owned combination to the capture field, so
   the Settings capture half of H6 stays a manual observation; an extra F13 pass
-  that keeps Ctrl+Alt held while the text is typed; the harness's TargetApp window
+  that verifies Ctrl+Alt blocks submission and retains the transcript; the harness's TargetApp window
   instead of a second Notepad in the focus items, the held transcript's buttons
   instead of Enhance's Accept in O3), the report says so.
 - *manual*: run once per release with
@@ -109,7 +109,7 @@ again at 150 % scaling (Settings → Display). It saves
 | F10 *manual* | **B9.** Run Notepad as administrator; dictate into it (Murmur not elevated), in hold and insert modes | Held with either "the window runs as administrator…" or "Murmur could not confirm it may type into this window…" (a medium-integrity Murmur often cannot open an elevated process's token, which also counts as blocked); Copy works; nothing claims "delivered" | `F10-elevated-notepad.mp4` |
 | F11 *auto* | Drag the overlay while a transcript is ready, release over Notepad | Delivery waits for the release, then follows rules above | `F11-drag-delivery.mp4` |
 | F12 *auto* | Check `%LOCALAPPDATA%\Murmur\murmur.log` after F2–F10 | No transcript text in the log | `F12-log-excerpt.txt` |
-| F13 *auto* | Hotkey Ctrl+Alt+D, text containing "d" held (F2). Click Notepad, then **Insert here**; also repeat with Prefer paste on | Text typed once; dictation does **not** start while it is typed (enigo's Unicode/`VK_PACKET` input must not match the registered hotkey); overlay returns to idle | `F13-insert-here-no-retrigger.mp4` |
+| F13 *auto* | Keep Ctrl+Alt down after releasing D; then release them and choose **Insert here**. Separately hold the D transcript by changing focus and choose **Insert here** with explicit type and clipboard methods. | While Ctrl+Alt is held: zero text submitted, full transcript retained with a release-and-retry message, no successful history or retrigger. After release and in both separate Insert here paths: exact same-utterance text once, no retrigger, held panel cleared; clipboard restored. | `F13-insert-here-no-retrigger.mp4`, `delivery-timing.txt` |
 
 ## 6. Tray, autostart, single instance
 

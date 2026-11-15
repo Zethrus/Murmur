@@ -1,7 +1,7 @@
 """F1-F8, F11-F13: the focus contract (docs/focus-contract.md) with TargetApp windows."""
 import time
 
-import targets
+import golden
 import win32
 from checks.common import (D_HOTKEY, HOLD_FOR_SECONDS, click_overlay, focus_change_dictation,
                            overlay_drag_point, produce_held, require_empty, wait_held, wait_not_held)
@@ -186,9 +186,8 @@ def f12_log_privacy(ctx):
     ctx.note(f"{len(texts)} observed outputs searched in {len(log.splitlines())} log lines")
 
 
-def _hold_modifiers_through_delivery(ctx, app):
-    """Direct delivery with Ctrl+Alt still physically held while the transcript is typed: the
-    path where a typed 'd' could fire WM_HOTKEY again (hotkey.rs ignore_dictation_press)."""
+def _assert_modifier_hold_refuses_delivery(ctx, app):
+    """Held Ctrl+Alt must refuse delivery and retain the transcript without retriggering."""
     modifiers, key = win32.parse_combo(D_HOTKEY)
     app.focus()
     ctx.observe_delivery("D")
@@ -215,16 +214,19 @@ def _hold_modifiers_through_delivery(ctx, app):
     win32.key_up(key)
     record("D up; Ctrl+Alt held")
     restarted = False
+    left_listening = False
     deadline = time.monotonic() + 20
-    # Keep Ctrl+Alt down past Murmur's 600 ms modifier wait, until typing has finished.
+    # Keep Ctrl+Alt down past Murmur's 600 ms modifier wait until the transcript is held.
     while time.monotonic() < deadline:
         state = record("Ctrl+Alt held")
-        restarted = restarted or (state == "listening" and bool(app.delivered()))
-        typed = app.delivered()
-        if typed and time.monotonic() - typed[-1]["t"] > 1.5:
+        restarted = restarted or (left_listening and state == "listening")
+        left_listening = left_listening or state != "listening"
+        if state == "held":
             break
         ctx.sleep(0.05)
-    typed_while_held = bool(app.delivered())
+    held_while_pressed = ctx.murmur.overlay_state() == "held"
+    keys_while_pressed = app.delivered()
+    text_while_pressed = app.text()
     win32.key_up(*reversed(modifiers))
     record("modifiers up")
     restarted = restarted or win32.wait_for(lambda: ctx.murmur.overlay_state() == "listening", 2.0, 0.05,
@@ -239,25 +241,48 @@ def _hold_modifiers_through_delivery(ctx, app):
              f"new history outputs: {len(ctx.murmur.history_after(ctx._delivery_cursor))}"]
     ctx.artifact("delivery-timing.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     if restarted:
-        raise Fail("Typing a 'd' with Ctrl+Alt held restarted dictation")
-    if not typed_while_held:
-        ctx.note("no character-producing key events while Ctrl+Alt were held (20 s)")
-        raise Fail("Delivery did not start while the modifiers were held, so the retrigger path was not tested")
-    observed = ctx.observed_text()
-    keys = targets.delivered_characters(app.keys())
-    if keys != observed:
-        raise Fail(f"Target key events with Ctrl+Alt held differ from this utterance's output: {keys!r} vs {observed!r}")
-    ctx.note(f"exact target key events with Ctrl+Alt held; widget text {app.text()!r}")
-    if "d" not in observed.lower():
-        raise Fail("The D fixture output did not contain a retrigger key")
+        raise Fail("Dictation restarted while Ctrl+Alt was held")
+    if not held_while_pressed:
+        raise Fail("Transcript was not held while Ctrl+Alt remained pressed")
+    if keys_while_pressed or text_while_pressed:
+        raise Fail(f"Input was submitted while Ctrl+Alt remained pressed: {keys_while_pressed!r}, {text_while_pressed!r}")
+    _assert_f13_held(ctx, app)
+
+
+def _assert_f13_held(ctx, app):
+    if ctx.murmur.overlay_state() != "held":
+        raise Fail("Modifier timeout did not retain a held transcript")
+    names = ctx.murmur.overlay_names()
+    previews = [name for name in names if golden.fixture_fidelity("D", name) is None]
+    if len(previews) != 1 or "d" not in previews[0].lower():
+        raise Fail(f"Held panel did not retain the full D transcript: {names!r}")
+    if not any("release" in name.lower() and "insert here" in name.lower() for name in names):
+        raise Fail(f"Held panel did not explain modifier release and retry: {names!r}")
+    if app.delivered() or app.text():
+        raise Fail("Target received input despite held modifiers")
+    if ctx.murmur.history_after(ctx._delivery_cursor):
+        raise Fail("Modifier timeout recorded a successful delivery")
+    ctx.note("Ctrl+Alt hold refused submission, retained the full transcript, and recorded no delivery")
 
 
 def f13_no_retrigger(ctx):
     ctx.murmur.ensure(ctx.fixtures["D"].path, {"general": {"hotkey": D_HOTKEY}})
     ctx.clipboard_guard()  # the Prefer paste pass goes through the clipboard
-    _hold_modifiers_through_delivery(ctx, ctx.target("direct"))
+    direct = ctx.target("direct")
+    _assert_modifier_hold_refuses_delivery(ctx, direct)
+    direct.focus()
+    click_overlay(ctx, "Insert here", expect_foreground=direct.hwnd)
+    recovered = direct.wait_text()
+    restarted = win32.wait_for(lambda: ctx.murmur.overlay_state() == "listening", 2.0, 0.05,
+                               sleep=ctx.sleep)
+    ctx.expect_delivery(recovered, "Insert here after modifier release")
+    if restarted or not wait_not_held(ctx):
+        raise Fail("Modifier release recovery retriggered dictation or retained the held transcript")
+    win32.set_clipboard_text("F13 clipboard sentinel")
     for prefer_paste in (False, True):
-        config = {"general": {"hotkey": D_HOTKEY}, "injection": {"prefer_paste": prefer_paste}}
+        config = {"general": {"hotkey": D_HOTKEY},
+                  "injection": {"method": "clipboard" if prefer_paste else "type",
+                                "prefer_paste": prefer_paste}}
         a, b = ctx.target(f"A{int(prefer_paste)}"), ctx.target(f"B{int(prefer_paste)}")
         ctx.murmur.ensure(ctx.fixtures["D"].path, config)
         a.focus()
@@ -272,4 +297,7 @@ def f13_no_retrigger(ctx):
             raise Fail(f"Typing the transcript restarted dictation (prefer paste {prefer_paste})")
         ctx.expect_delivery(text, f"Insert here (prefer paste {prefer_paste})")
         require_empty(a)
-        wait_not_held(ctx)
+        if not wait_not_held(ctx):
+            raise Fail(f"Insert here did not clear held transcript (prefer paste {prefer_paste})")
+        if win32.clipboard_text() != "F13 clipboard sentinel":
+            raise Fail(f"Insert here changed the clipboard (prefer paste {prefer_paste})")
