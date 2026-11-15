@@ -6,7 +6,11 @@ import time
 import golden
 import win32
 from checks.common import BLOCKED_HOTKEY, CODE_HOTKEY, SHIFT_HOTKEY
-from context import Fail
+from context import Fail, OutputCount
+
+
+# Three copies take longer than the guard's one-second liveness interval at 12 ms/character.
+DIRECT_CONTROL = "The quick brown fox jumps over the lazy dog. " * 3
 
 
 def h1_hold(ctx):
@@ -44,6 +48,9 @@ def _focus_phase(pad, stage):
     return {"stage": stage, "time": time.time(), "foreground": hex(foreground),
             "foreground_title": win32.window_text(foreground),
             "focus": pad.uia.describe(focused),
+            "native_focus": win32.gui_thread_focus(pad.hwnd),
+            "editor_mode_label": pad.editor_mode_label() if stage in
+            ("before direct input", "before modifiers", "before delivery wait", "after delivery wait") else None,
             "editor_focused": editor_focused, "editor_focus_error": editor_focus_error,
             "target_chars": target_chars,
             "menu_focused": bool(focused) and pad.uia.control_type(focused) in
@@ -77,50 +84,95 @@ def _notepad_focus_trial(ctx, spec, name, phases):
             win32.key_up(modifier)
             sample(f"after {modifier} up")
         sample("before delivery wait")
-        expected = ctx.observed_text()
+        try:
+            expected = ctx.observed_text()
+            output_error = None
+        except OutputCount as error:
+            expected = None
+            output_error = error
         actual = pad.wait_text(timeout=8, stable=1.2, sleep=ctx.sleep)
         ctx.settle()
         sample("after delivery wait")
-        difference = golden.compare(expected, actual)
-        return pad, difference, expected
+        overlay = ctx.murmur.overlay_state()
+        status = ("held_refused" if output_error and output_error.count == 0 and overlay == "held"
+                  else "no_output" if output_error and output_error.count == 0
+                  else "multiple_outputs" if output_error else "output")
+        observation = {"status": status, "output_error": str(output_error) if output_error else None,
+                       "overlay": overlay, "target_chars": len(actual)}
+        return pad, golden.compare(expected, actual) if expected is not None else None, expected, observation
     finally:
         # The run's fail-closed guard handles user input. This only releases keys owned by
         # the harness if sampling or dictation fails before the normal key-up sequence.
         win32.release_all()
 
 
+def _notepad_direct_control(ctx, phases):
+    """Same guarded Unicode sender into a fresh plain document, without hotkey or inference."""
+    pad = ctx.notepad("control")
+    pad.focus()
+    ctx.guard.check()
+    if win32.keys_down():
+        raise Fail("direct control started with a modifier held")
+    probes_before = ctx.guard.diagnostics()["probes_seen"]
+    phases.append(_focus_phase(pad, "before direct input"))
+    win32.type_unicode(DIRECT_CONTROL, delay=0.012)
+    ctx.guard.check()
+    probes_after = ctx.guard.diagnostics()["probes_seen"]
+    phases.append(_focus_phase(pad, "after direct input"))
+    actual = pad.wait_text(timeout=8, stable=1.2, sleep=ctx.sleep)
+    phases.append(_focus_phase(pad, "after direct readback"))
+    return pad, golden.compare(DIRECT_CONTROL, actual), DIRECT_CONTROL, {
+        "probes_during_input": probes_after - probes_before, "target_chars": len(actual)}
+
+
+def _capture_notepad_trial(ctx, name, result, pad, expected):
+    """Capture the untouched UIA verdict, then save and copy this owned fixture file."""
+    ctx.screenshot(pad.hwnd, f"{name}-notepad.png")
+    try:
+        before_save = pad.path.stat().st_mtime_ns
+    except OSError:
+        before_save = None
+    pad.close()
+    try:
+        after_save = pad.path.stat().st_mtime_ns
+        result["saved_file_updated"] = before_save != after_save
+        saved_bytes = pad.path.read_bytes()
+        saved_artifact = ctx.artifact(f"{name}-saved.txt")
+        saved_artifact.write_bytes(saved_bytes)
+        result["saved_file_artifact"] = saved_artifact.name
+        saved = saved_bytes.decode("utf-8-sig")
+        result["saved_file_difference"] = golden.compare(expected, saved) if expected is not None else None
+        result["saved_file_chars"] = len(saved)
+    except (OSError, UnicodeError) as error:
+        result["saved_file_error"] = f"{type(error).__name__}: {error}"
+
+
 def h8_focus_phases(ctx):
-    """Opt-in native probe for Notepad's Alt-menu failure; keeps the exact history oracle."""
+    """Opt-in direct-input and Alt/non-Alt comparison with exact history and file oracles."""
     results = {}
     artifact = ctx.artifact("focus-phases.json")
     try:
-        for name, spec in (("alt", "Ctrl+Alt+Shift+F9"), ("no-alt", SHIFT_HOTKEY)):
+        for name, spec in (("control", None), ("alt", "Ctrl+Alt+Shift+F9"),
+                           ("no-alt", SHIFT_HOTKEY)):
             results[name] = {"hotkey": spec, "phases": [], "difference": None,
                              "saved_file_difference": None, "saved_file_updated": None,
-                             "saved_file_error": None}
-            pad, difference, expected = _notepad_focus_trial(ctx, spec, name, results[name]["phases"])
+                             "saved_file_error": None, "saved_file_artifact": None}
+            if name == "control":
+                pad, difference, expected, observation = _notepad_direct_control(
+                    ctx, results[name]["phases"])
+                results[name]["observation"] = observation
+            else:
+                pad, difference, expected, observation = _notepad_focus_trial(
+                    ctx, spec, name, results[name]["phases"])
+                results[name]["observation"] = observation
             results[name]["difference"] = difference
-            # Preserve the input-free UIA verdict, then capture independent visual evidence
-            # before close() changes focus or sends Ctrl+S. The saved file is a second readback
-            # of this disposable fixture document, not a replacement for the exact UIA oracle.
-            ctx.screenshot(pad.hwnd, f"{name}-notepad.png")
-            # Windows 11 Notepad may reuse the same top-level window for another tab.
-            # Close this harness-owned document before starting the comparison trial.
-            try:
-                before_save = pad.path.stat().st_mtime_ns
-            except OSError:
-                before_save = None
-            pad.close()
-            try:
-                after_save = pad.path.stat().st_mtime_ns
-                results[name]["saved_file_updated"] = before_save != after_save
-                saved = pad.path.read_text(encoding="utf-8-sig")
-                results[name]["saved_file_difference"] = golden.compare(expected, saved)
-            except (OSError, UnicodeError) as error:
-                results[name]["saved_file_error"] = f"{type(error).__name__}: {error}"
+            _capture_notepad_trial(ctx, name, results[name], pad, expected)
     finally:
         artifact.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    differences = [f"{name}: {result['difference']}" for name, result in results.items() if result["difference"]]
+    differences = [f"{name}: {reason}" for name, result in results.items()
+                   for reason in (result.get("observation", {}).get("output_error"), result["difference"],
+                                  result["saved_file_difference"], result["saved_file_error"])
+                   if reason]
     if differences:
         raise Fail("; ".join(differences))
 

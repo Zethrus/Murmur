@@ -16,6 +16,14 @@ class Fail(Exception):
     pass
 
 
+class OutputCount(Fail):
+    """The per-utterance history did not contain exactly one output."""
+
+    def __init__(self, count):
+        self.count = count
+        super().__init__(f"Expected one output for this utterance, found {count}")
+
+
 class Skip(Exception):
     pass
 
@@ -177,7 +185,7 @@ class Context:
         rows = win32.wait_for(lambda: self.murmur.history_after(self._delivery_cursor), 5, 0.1,
                               sleep=self.sleep) or []
         if len(rows) != 1:
-            raise Fail(f"Expected one output for this utterance, found {len(rows)}")
+            raise OutputCount(len(rows))
         text = rows[0][1]
         fidelity = golden.fixture_fidelity(self._delivery_fixture, text)
         if fidelity:

@@ -81,6 +81,14 @@ class RECT(ctypes.Structure):
         return (self.left, self.top, self.right, self.bottom)
 
 
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                ("rcCaret", RECT)]
+
+
 class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
@@ -124,6 +132,7 @@ def _declare():
         ("GetWindowTextLengthW", (wintypes.HWND,), ctypes.c_int),
         ("GetClassNameW", (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int), ctypes.c_int),
         ("GetWindowThreadProcessId", (wintypes.HWND, ctypes.POINTER(wintypes.DWORD)), wintypes.DWORD),
+        ("GetGUIThreadInfo", (wintypes.DWORD, ctypes.POINTER(GUITHREADINFO)), wintypes.BOOL),
         ("GetWindowRect", (wintypes.HWND, ctypes.POINTER(RECT)), wintypes.BOOL),
         ("WindowFromPoint", (POINT,), wintypes.HWND),
         ("GetAncestor", (wintypes.HWND, wintypes.UINT), wintypes.HWND),
@@ -375,6 +384,19 @@ def release_all():
 
 def foreground():
     return user32.GetForegroundWindow() or 0
+
+
+def gui_thread_focus(hwnd):
+    """Read another window's native keyboard focus and menu mode without changing either."""
+    thread = user32.GetWindowThreadProcessId(hwnd, None)
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if not thread or not user32.GetGUIThreadInfo(thread, ctypes.byref(info)):
+        return {"error": ctypes.get_last_error()}
+    focus = info.hwndFocus or 0
+    return {"focus_hwnd": hex(focus), "focus_class": class_name(focus) if focus else "",
+            "menu_owner_hwnd": hex(info.hwndMenuOwner or 0),
+            "menu_mode": bool(info.flags & 0x4), "popup_menu_mode": bool(info.flags & 0x10)}
 
 
 def window_text(hwnd):

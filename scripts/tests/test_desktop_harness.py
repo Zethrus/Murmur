@@ -37,7 +37,7 @@ import tomlconfig  # noqa: E402
 import targets  # noqa: E402
 import uia  # noqa: E402
 import win32  # noqa: E402
-from context import Context, Fail, Skip  # noqa: E402
+from context import Context, Fail, OutputCount, Skip  # noqa: E402
 
 SHA = "a" * 40
 OTHER = "b" * 40
@@ -127,12 +127,42 @@ class ImportTests(unittest.TestCase):
         document.SetFocus.assert_called_once_with()
         pad.win32.click.assert_not_called()
 
+    def test_notepad_mode_label_reports_visible_plain_or_formatted_state(self):
+        pad = targets.Notepad.__new__(targets.Notepad)
+        pad.hwnd = 42
+        window = object()
+        labels = {"Plain text": [], "Formatted": [object()]}
+        pad.uia = SimpleNamespace(from_handle=lambda _: window,
+                                  find_all=lambda _window, name_: labels[name_])
+        self.assertEqual(pad.editor_mode_label(), "Formatted")
+        labels["Plain text"] = [object()]
+        self.assertEqual(pad.editor_mode_label(), "Plain text")
+
+    def test_native_focus_snapshot_reports_menu_mode_without_input(self):
+        def gui_info(_thread, pointer):
+            info = win32.ctypes.cast(pointer, win32.ctypes.POINTER(win32.GUITHREADINFO)).contents
+            self.assertEqual(info.cbSize, win32.ctypes.sizeof(win32.GUITHREADINFO))
+            info.flags = 0x14  # menu and popup-menu modes
+            info.hwndFocus = 77
+            info.hwndMenuOwner = 42
+            return 1
+
+        fake = SimpleNamespace(GetWindowThreadProcessId=lambda _hwnd, _pid: 9,
+                               GetGUIThreadInfo=gui_info)
+        with mock.patch.object(win32, "user32", fake), mock.patch.object(win32, "class_name",
+                                                                          return_value="NotepadEditor"):
+            state = win32.gui_thread_focus(42)
+        self.assertEqual(state, {"focus_hwnd": "0x4d", "focus_class": "NotepadEditor",
+                                 "menu_owner_hwnd": "0x2a", "menu_mode": True,
+                                 "popup_menu_mode": True})
+
     def test_opt_in_hotkey_probe_samples_releases_and_preserves_exact_oracle(self):
         self.assertNotIn("H8", [check.id for check in catalog.select()])
         self.assertEqual([check.id for check in catalog.select("H8")], ["H8"])
         phases = []
         pad = SimpleNamespace(focus=mock.Mock(), wait_text=mock.Mock(return_value="partial"))
-        session = SimpleNamespace(ensure=mock.Mock(), wait_state=mock.Mock(return_value=True))
+        session = SimpleNamespace(ensure=mock.Mock(), wait_state=mock.Mock(return_value=True),
+                                  overlay_state=lambda: "done")
         ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
                               notepad=lambda _: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
                               observed_text=lambda: "full", settle=mock.Mock())
@@ -140,11 +170,12 @@ class ImportTests(unittest.TestCase):
              mock.patch.object(win32, "key_down") as down, \
              mock.patch.object(win32, "key_up") as up, \
              mock.patch.object(win32, "release_all") as release:
-            returned_pad, difference, expected = hotkey_checks._notepad_focus_trial(
+            returned_pad, difference, expected, observation = hotkey_checks._notepad_focus_trial(
                 ctx, "Ctrl+Alt+Shift+F9", "alt", phases)
         self.assertIs(returned_pad, pad)
         self.assertTrue(difference)
         self.assertEqual(expected, "full")
+        self.assertEqual(observation["status"], "output")
         self.assertEqual([phase["stage"] for phase in phases],
                          ["before modifiers", "before F9 down", "F9 held", "listening", "before F9 up",
                           "after F9 up", "after shift up", "after alt up", "after ctrl up", "before delivery wait",
@@ -153,6 +184,46 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(up.call_args_list, [mock.call("f9"), mock.call("shift"), mock.call("alt"),
                                               mock.call("ctrl")])
         release.assert_called_once_with()
+
+    def test_notepad_direct_control_keeps_guard_and_exact_readback(self):
+        pad = SimpleNamespace(focus=mock.Mock(), wait_text=mock.Mock(return_value="corrupt"))
+        guard_check = mock.Mock()
+        guard_state = mock.Mock(side_effect=[{"probes_seen": 3}, {"probes_seen": 5}])
+        ctx = SimpleNamespace(notepad=lambda _: pad,
+                              guard=SimpleNamespace(check=guard_check, diagnostics=guard_state),
+                              sleep=lambda _: None)
+        phases = []
+        with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
+             mock.patch.object(win32, "keys_down", return_value=[]), \
+             mock.patch.object(win32, "type_unicode") as send:
+            returned_pad, difference, expected, observation = hotkey_checks._notepad_direct_control(ctx, phases)
+        self.assertIs(returned_pad, pad)
+        self.assertEqual(expected, hotkey_checks.DIRECT_CONTROL)
+        self.assertIn("differs at character", difference)
+        send.assert_called_once_with(expected, delay=0.012)
+        self.assertEqual(guard_check.call_count, 2)
+        self.assertEqual(observation, {"probes_during_input": 2, "target_chars": 7})
+        self.assertEqual([phase["stage"] for phase in phases],
+                         ["before direct input", "after direct input", "after direct readback"])
+
+    def test_hotkey_trial_records_no_output_as_held_refusal(self):
+        phases = []
+        pad = SimpleNamespace(focus=mock.Mock(), wait_text=mock.Mock(return_value=""))
+        session = SimpleNamespace(ensure=mock.Mock(), wait_state=mock.Mock(return_value=True),
+                                  overlay_state=lambda: "held")
+        ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
+                              notepad=lambda _: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
+                              observed_text=mock.Mock(side_effect=OutputCount(0)), settle=mock.Mock())
+        with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
+             mock.patch.object(win32, "key_down"), mock.patch.object(win32, "key_up"), \
+             mock.patch.object(win32, "release_all"):
+            _, difference, expected, observation = hotkey_checks._notepad_focus_trial(
+                ctx, "Ctrl+Alt+Shift+F9", "alt", phases)
+        self.assertIsNone(expected)
+        self.assertIsNone(difference)
+        self.assertEqual(observation["status"], "held_refused")
+        self.assertEqual(observation["output_error"], "Expected one output for this utterance, found 0")
+        self.assertEqual(phases[-1]["stage"], "after delivery wait")
 
     def test_drag_sampling_keeps_held_geometry_assertion(self):
         samples = []
@@ -166,22 +237,25 @@ class ImportTests(unittest.TestCase):
 
     def test_hotkey_probe_records_both_trials_even_when_alt_fails(self):
         with tempfile.TemporaryDirectory() as directory:
-            paths = [Path(directory) / f"{name}.txt" for name in ("alt", "no-alt")]
+            paths = [Path(directory) / f"{name}.txt" for name in ("control", "alt", "no-alt")]
             pads = [SimpleNamespace(hwnd=number, path=path,
                                     close=mock.Mock(side_effect=lambda path=path, number=number:
-                                                    path.write_text("partial" if number == 1 else "full")))
+                                                    path.write_text("partial" if number == 2 else "full")))
                     for number, path in enumerate(paths, 1)]
             screenshot = mock.Mock(return_value=Path(directory) / "screenshot.png")
             ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix, screenshot=screenshot)
-            with mock.patch.object(hotkey_checks, "_notepad_focus_trial",
-                                   side_effect=[(pads[0], "wrong text", "full"),
-                                                (pads[1], None, "full")]) as trial:
+            with mock.patch.object(hotkey_checks, "_notepad_direct_control",
+                                   return_value=(pads[0], None, "full", {"probes_during_input": 1})), \
+                 mock.patch.object(hotkey_checks, "_notepad_focus_trial",
+                                   side_effect=[(pads[1], "wrong text", "full", {"output_error": None}),
+                                                (pads[2], None, "full", {"output_error": None})]) as trial:
                 with self.assertRaisesRegex(Fail, "alt: wrong text"):
                     hotkey_checks.h8_focus_phases(ctx)
             self.assertEqual(trial.call_count, 2)
-            self.assertEqual([pad.close.call_count for pad in pads], [1, 1])
+            self.assertEqual([pad.close.call_count for pad in pads], [1, 1, 1])
             self.assertEqual(screenshot.call_args_list,
-                             [mock.call(1, "alt-notepad.png"), mock.call(2, "no-alt-notepad.png")])
+                             [mock.call(1, "control-notepad.png"), mock.call(2, "alt-notepad.png"),
+                              mock.call(3, "no-alt-notepad.png")])
             evidence = json.loads((Path(directory) / "focus-phases.json").read_text())
             self.assertEqual(evidence["alt"]["difference"], "wrong text")
             self.assertIsNone(evidence["no-alt"]["difference"])
@@ -189,6 +263,46 @@ class ImportTests(unittest.TestCase):
             self.assertIsNone(evidence["no-alt"]["saved_file_difference"])
             self.assertTrue(evidence["alt"]["saved_file_updated"])
             self.assertTrue(evidence["no-alt"]["saved_file_updated"])
+            self.assertEqual((Path(directory) / "control-saved.txt").read_text(), "full")
+
+    def test_hotkey_probe_copies_exact_saved_file_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "notepad.txt"
+            path.write_bytes(b"")
+            saved_bytes = b"\xef\xbb\xbfcaf\xc3\xa9\r\n"
+            pad = SimpleNamespace(hwnd=42, path=path,
+                                  close=mock.Mock(side_effect=lambda: path.write_bytes(saved_bytes)))
+            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix,
+                                  screenshot=mock.Mock())
+            result = {"saved_file_difference": None, "saved_file_error": None}
+            hotkey_checks._capture_notepad_trial(ctx, "control", result, pad, "café\r\n")
+            self.assertEqual((Path(directory) / "control-saved.txt").read_bytes(), saved_bytes)
+            self.assertIsNone(result["saved_file_difference"])
+            self.assertTrue(result["saved_file_updated"])
+            ctx.screenshot.assert_called_once_with(42, "control-notepad.png")
+
+    def test_hotkey_probe_records_held_refusal_and_still_runs_non_alt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / f"{name}.txt" for name in ("control", "alt", "no-alt")]
+            pads = [SimpleNamespace(hwnd=i, path=path, close=mock.Mock(side_effect=lambda p=path, i=i:
+                                     p.write_text("" if i == 2 else "full")))
+                    for i, path in enumerate(paths, 1)]
+            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix,
+                                  screenshot=mock.Mock())
+            with mock.patch.object(hotkey_checks, "_notepad_direct_control",
+                                   return_value=(pads[0], None, "full", {"probes_during_input": 1})), \
+                 mock.patch.object(hotkey_checks, "_notepad_focus_trial",
+                                   side_effect=[(pads[1], None, None,
+                                                 {"status": "held_refused", "output_error":
+                                                  "Expected one output for this utterance, found 0"}),
+                                                (pads[2], None, "full",
+                                                 {"status": "output", "output_error": None})]) as trial:
+                with self.assertRaisesRegex(Fail, "alt: Expected one output"):
+                    hotkey_checks.h8_focus_phases(ctx)
+            self.assertEqual(trial.call_count, 2)
+            evidence = json.loads((Path(directory) / "focus-phases.json").read_text())
+            self.assertEqual(evidence["alt"]["observation"]["status"], "held_refused")
+            self.assertIn("no-alt", evidence)
 
     def test_overlay_focus_check_refuses_to_blame_click_when_editor_already_lost_focus(self):
         from checks import overlay as checks_overlay

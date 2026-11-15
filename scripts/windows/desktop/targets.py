@@ -291,8 +291,21 @@ class Notepad:
                 f"Notepad hwnd: {hex(self.hwnd)}; foreground: {hex(self.win32.foreground())} "
                 f"{self.win32.window_text(self.win32.foreground())!r}\n"
                 f"UIA focus: {self.uia.describe(focused)}\n"
+                f"native focus: {self.win32.gui_thread_focus(self.hwnd)}\n"
+                f"editor mode label: {self.editor_mode_label()}\n"
                 f"menu open: {self.menu_open()}\n"
                 f"file bytes: {self.path.stat().st_size if self.path.exists() else 'missing'}\n")
+
+    def editor_mode_label(self):
+        """Read Notepad's visible status label if UIA exposes Plain text or Formatted."""
+        try:
+            window = self.uia.from_handle(self.hwnd)
+            for label in ("Plain text", "Formatted"):
+                if self.uia.find_all(window, name_=label):
+                    return label
+        except Exception:  # noqa: BLE001 - status is diagnostic only
+            pass
+        return "unknown"
 
     def text(self):
         """Read the editor without sending input or changing focus during delivery."""
