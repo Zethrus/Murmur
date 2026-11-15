@@ -25,6 +25,7 @@ PM_REMOVE = 1
 FOCUS_WAIT_SECONDS = 180
 IDLE_WAIT_SECONDS = 65
 IDLE_SECONDS = 60
+TEARDOWN_DEADLINE_SECONDS = 12
 
 
 class _OwnedProbeWindow:
@@ -40,6 +41,9 @@ class _OwnedProbeWindow:
         self._ready = threading.Event()
         self._stop = threading.Event()
         self._thread = None
+        self._clear_focus = threading.Event()
+        self._clear_done = threading.Event()
+        self._restore_on_close = True
 
     def open(self):
         self._thread = threading.Thread(target=self._run, name="guard-probe-window", daemon=True)
@@ -72,6 +76,16 @@ class _OwnedProbeWindow:
             if self.hwnd:
                 while not self._stop.wait(0.01):
                     self._drain_messages(user32)
+                    if self._clear_focus.is_set() and not self._clear_done.is_set():
+                        if user32.GetForegroundWindow() == self.hwnd:
+                            user32.SetFocus(None)  # only this owning GUI thread may clear its focus
+                            self.status = ("focus_cleared" if not user32.GetFocus()
+                                           else "clear_focus_failed")
+                        else:
+                            self.status = "focus_lost"
+                        self._clear_done.set()
+                    if self._clear_focus.is_set():
+                        continue
                     if self.status == "focus_lost":
                         continue
                     if user32.GetForegroundWindow() == self.hwnd:
@@ -92,6 +106,8 @@ class _OwnedProbeWindow:
                 try:
                     if user32.GetForegroundWindow() != self.hwnd:
                         self.restoration = "skipped_focus_changed"
+                    elif not self._restore_on_close:
+                        self.restoration = "skipped_teardown_stage"
                     elif self._previous and user32.IsWindow(self._previous):
                         self.restoration = ("restored" if user32.SetForegroundWindow(self._previous)
                                             else "restore_denied")
@@ -108,16 +124,22 @@ class _OwnedProbeWindow:
         while user32.PeekMessageW(ctypes.byref(message), self.hwnd, 0, 0, PM_REMOVE):
             extra = ctypes.c_size_t(user32.GetMessageExtraInfo()).value
             if (extra & 0xFFFFFFFF == guard.PROBE_TAG and
-                    message.message in (guard.WM_KEYDOWN, guard.WM_KEYUP) and
+                    message.message in (guard.WM_KEYDOWN, guard.WM_KEYUP,
+                                        guard.WM_SYSKEYDOWN, guard.WM_SYSKEYUP) and
                     message.wParam in (guard.VK_PACKET, guard.PROBE_VK)):
-                if len(self.received_events) == 8:
+                if len(self.received_events) == 16:
                     self.received_events.pop(0)
                 self.received_events.append({"message": int(message.message),
                                              "vk": int(message.wParam),
                                              "extra_info": f"0x{extra:016x}"})
             user32.DispatchMessageW(ctypes.byref(message))
 
-    def close(self):
+    def clear_focus(self):
+        self._clear_focus.set()
+        return self._clear_done.wait(2) and self.status == "focus_cleared"
+
+    def close(self, restore=True):
+        self._restore_on_close = restore
         self._stop.set()
         if self._thread:
             self._thread.join(3)
@@ -212,14 +234,134 @@ def diagnose(seconds):
             "input_guard": observer.diagnostics()}
 
 
+def diagnose_teardown():
+    """One A/B experiment; a missed hook remains latched through the B probe."""
+    win32.require_windows()
+    problems = run.preflight_desktop(win32, idle_needed=0)
+    if problems:
+        return {"status": "preflight_refused", "problems": problems}
+    result = {"status": "inconclusive", "reason": "", "stages": [],
+              "parent_desktop_context": win32.desktop_context()}
+    a, b = _OwnedProbeWindow(), None
+    observer = None
+    if not a.open():
+        return {**result, "status": "probe_window_unavailable", "window_a": a.diagnostics()}
+    try:
+        print("Focus the owned diagnostic window if needed; then leave input untouched for 60 s.", flush=True)
+        state, problems = _wait_for_safe_desktop(a)
+        if state != "ready":
+            result.update(status=state, problems=problems)
+            return result
+        if not a.focused():
+            result["status"] = "focus_lost"
+            return result
+        observer = guard.TeardownDiagnosticObserver().start()
+        started = time.monotonic()
+        deadline = started + TEARDOWN_DEADLINE_SECONDS
+
+        def snapshot(stage):
+            hook = observer.diagnostics()["hook_state"]
+            return {"stage": stage, "context": win32.foreground_context(),
+                    "hook_desktop": win32.desktop_context(observer._thread_id),
+                    "hook_thread_id": observer._thread_id,
+                    "keyboard_callbacks": hook["keyboard_callbacks"],
+                    "heartbeat_received": hook["heartbeat_received"],
+                    "elapsed_s": round(time.monotonic() - started, 3)}
+
+        def probe(window, stage, expected_focus, kind, recovery=False):
+            if time.monotonic() >= deadline:
+                return "deadline"
+            entry = observer.probe_once(window.hwnd, os.getpid(), kind, expected_focus,
+                                        recovery=recovery)
+            entry["stage"] = stage
+            result["stages"].append(entry)
+            return entry["status"]
+
+        def probe_pair(window, stage, expected_focus):
+            for kind in ("unicode_up", "reserved_vk_up"):
+                state = probe(window, stage, expected_focus, kind)
+                if state != "observed":
+                    return state
+            return "observed"
+
+        state = probe_pair(a, "a_focused", "window")
+        if state == "observed":
+            if not a.clear_focus():
+                state = "focus_lost"
+            else:
+                result["stages"].append(snapshot("a_set_focus_null"))
+                state = probe_pair(a, "a_focus_null", "none")
+
+        if state == "observed":
+            result["stages"].append(snapshot("a_before_teardown"))
+            a.close(restore=False)
+            result["stages"].append({**snapshot("a_after_teardown"), "window": a.diagnostics()})
+            if a._thread and a._thread.is_alive():
+                state = "window_thread_stop_timeout"
+            elif "destroy_failed" in a.restoration:
+                state = "window_teardown_failed"
+
+        if state in ("observed", "missed") and time.monotonic() >= deadline:
+            state = "deadline"
+        if state in ("observed", "missed") and not observer.real_input_detected.is_set():
+            # A missed callback leaves the registration installed. B is the only
+            # subsequent target and receives at most one recovery probe.
+            b = _OwnedProbeWindow()
+            if not b.open():
+                state = "probe_window_unavailable"
+            else:
+                focus_deadline = min(deadline, time.monotonic() + 2)
+                while not b.focused() and time.monotonic() < focus_deadline:
+                    if observer.real_input_detected.wait(0.025):
+                        break
+                if observer.real_input_detected.is_set():
+                    state = "real_input"
+                elif not b.focused():
+                    state = "focus_lost"
+                elif state == "missed":
+                    if a._thread and a._thread.is_alive():
+                        a.close(restore=False)
+                    state = probe(b, "b_recovery", "window", "unicode_up", recovery=True)
+                    result["status"] = ({"observed": "miss_recovered", "missed": "miss_persisted"}
+                                        .get(state, state))
+                else:
+                    state = probe_pair(b, "b_after_teardown", "window")
+                    if state == "missed" and not observer.real_input_detected.is_set():
+                        # The handoff already happened. One additional B probe
+                        # tests whether the same registration resumes delivery.
+                        recovery = probe(b, "b_recovery", "window", "unicode_up", recovery=True)
+                        result["status"] = ({"observed": "miss_recovered", "missed": "miss_persisted"}
+                                            .get(recovery, recovery))
+        if observer.real_input_detected.is_set() or state == "real_input":
+            result.update(status="real_input", reason="real input detected; stopped")
+        elif result["status"] == "inconclusive" and state != "observed":
+            result["status"] = state
+        result["latched_failure"] = observer.tripped.is_set()
+        return result
+    except Exception as error:  # noqa: BLE001 - retain a bounded report on native failure
+        result.update(status="error", reason=type(error).__name__)
+        return result
+    finally:
+        if observer:
+            result["registration_before_stop"] = observer.diagnostics()
+            observer.stop()
+            result["registration_after_stop"] = observer.diagnostics()
+        if b:
+            b.close()
+            result["window_b"] = b.diagnostics()
+        a.close(restore=False)
+        result["window_a"] = a.diagnostics()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--seconds", type=int, default=30)
+    parser.add_argument("--teardown", action="store_true", help="one bounded owned-window A/B teardown probe")
     args = parser.parse_args(argv)
     if not 1 <= args.seconds <= 60:
         parser.error("--seconds must be 1-60")
-    result = diagnose(args.seconds)
+    result = diagnose_teardown() if args.teardown else diagnose(args.seconds)
     result["python"] = {
         "executable": sys.executable,
         "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",

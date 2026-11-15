@@ -386,6 +386,32 @@ def foreground():
     return user32.GetForegroundWindow() or 0
 
 
+def foreground_context():
+    """Read foreground ownership and GUI focus without changing either."""
+    hwnd = foreground()
+    pid = wintypes.DWORD()
+    thread = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) if hwnd else 0
+    result = {"hwnd": hwnd, "thread_id": thread, "process_id": pid.value if thread else 0,
+              "input_desktop": input_desktop(), "gui_status": "no_foreground"}
+    if thread:
+        info = GUITHREADINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if user32.GetGUIThreadInfo(thread, ctypes.byref(info)):
+            result.update(gui_status="ok", active_hwnd=info.hwndActive or 0,
+                          focus_hwnd=info.hwndFocus or 0, gui_flags=int(info.flags))
+        else:
+            result.update(gui_status="error", gui_error=ctypes.get_last_error())
+    return result
+
+
+def owned_foreground(context, hwnd, owner_pid, expected_focus):
+    """A null focus is allowed only during the explicit SetFocus(NULL) stage."""
+    return (context["input_desktop"] == "Default" and context["hwnd"] == hwnd and
+            context["process_id"] == owner_pid and
+            context["gui_status"] == "ok" and context["active_hwnd"] == hwnd and
+            context["focus_hwnd"] == (hwnd if expected_focus == "window" else 0))
+
+
 def gui_thread_focus(hwnd):
     """Read another window's native keyboard focus and menu mode without changing either."""
     thread = user32.GetWindowThreadProcessId(hwnd, None)
@@ -686,10 +712,17 @@ def set_clipboard_text(text):
 def idle_seconds():
     """Seconds since the last input event in this session (GetLastInputInfo)."""
     require_windows()
+    last = last_input_tick()
+    return ((kernel32.GetTickCount() - last) & 0xFFFFFFFF) / 1000
+
+
+def last_input_tick():
+    """Last session input tick, including injected input (GetLastInputInfo)."""
+    require_windows()
     info = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
     if not user32.GetLastInputInfo(ctypes.byref(info)):
         raise ctypes.WinError(ctypes.get_last_error())
-    return ((kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000
+    return int(info.dwTime)
 
 
 def input_desktop():

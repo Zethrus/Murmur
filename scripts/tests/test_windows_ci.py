@@ -226,6 +226,7 @@ class DesktopWorkflowTests(unittest.TestCase):
     def test_guard_diagnostic_uses_same_owner_only_runner_without_build(self):
         trigger = self.text.split("\npermissions:")[0].split("\non:\n", 1)[1]
         self.assertIn("      guard_diagnostic:\n", trigger)
+        self.assertIn("      guard_teardown_diagnostic:\n", trigger)
         self.assertIn("        type: boolean\n", trigger)
         harness = step("windows-desktop.yml", "Harness virtual environment (hash-locked dependencies)")
         self.assertIsNone(condition(harness))
@@ -234,10 +235,12 @@ class DesktopWorkflowTests(unittest.TestCase):
         for name in ("Verify the handed-over build (SHA256SUMS and the build's own job log)",
                      "Preflight (unlocked session, idle 60 s, no other Murmur or Notepad)",
                      "Run the desktop checks (takes the keyboard and mouse; real input aborts)"):
-            self.assertIn("if: ${{ !inputs.guard_diagnostic }}", step("windows-desktop.yml", name))
+            self.assertIn("if: ${{ !inputs.guard_diagnostic && !inputs.guard_teardown_diagnostic }}",
+                          step("windows-desktop.yml", name))
         diagnostic = step("windows-desktop.yml", "Diagnose the input guard (harness Python; no app launch)")
-        self.assertEqual(condition(diagnostic), "${{ inputs.guard_diagnostic }}")
+        self.assertEqual(condition(diagnostic), "${{ inputs.guard_diagnostic || inputs.guard_teardown_diagnostic }}")
         self.assertIn("& $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/guard_diagnostic.py", diagnostic)
+        self.assertIn("$ProbeArgs += '--teardown'", diagnostic)
         self.assertNotIn("pip install", diagnostic)
 
     def test_build_workflows_never_target_the_desktop_runner(self):

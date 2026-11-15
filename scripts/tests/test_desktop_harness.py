@@ -1971,3 +1971,209 @@ class F13Tests(unittest.TestCase):
         self.assertEqual([config["injection"]["method"] for config in configs[1:]],
                          ["type", "clipboard"])
         set_clipboard.assert_called_once_with("F13 clipboard sentinel")
+
+
+class TeardownDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        self.observer = guard.TeardownDiagnosticObserver()
+        self.observer._thread_id = 91
+        self.observer._installed_hooks = 2
+        self.observer._thread = SimpleNamespace(is_alive=lambda: True)
+        self.context = {"hwnd": 55, "thread_id": 12, "process_id": 123,
+                        "active_hwnd": 55, "focus_hwnd": 55, "gui_status": "ok",
+                        "input_desktop": "Default"}
+
+    def _patched(self, send):
+        return (mock.patch.object(win32, "user32", SimpleNamespace(SendInput=send)),
+                mock.patch.object(win32, "foreground_context", return_value=self.context),
+                mock.patch.object(win32, "desktop_context", return_value={"thread_desktop": "Default"}),
+                mock.patch.object(win32, "last_input_tick", return_value=100))
+
+    def test_keyup_only_probe_and_registration_continuity_across_miss_and_recovery(self):
+        calls = []
+
+        def send(count, events, size):
+            calls.append((count, events[0].ki.dwFlags, events[0].ki.wVk, size))
+            if len(calls) == 2:
+                tag = events[0].ki.dwExtraInfo
+                self.observer._record_injected_key(guard.WM_SYSKEYUP, SimpleNamespace(
+                    vkCode=guard.VK_PACKET, scanCode=guard.OWNED_PROBE_CHAR,
+                    flags=guard.LLKHF_INJECTED | guard.LLKHF_UP, dwExtraInfo=tag))
+            return 1
+
+        user, context, desktop, last_input = self._patched(send)
+        with user, context, desktop, last_input, mock.patch.object(guard, "PROBE_TIMEOUT", 0.005), \
+             mock.patch.object(self.observer, "_post_heartbeat"):
+            missed = self.observer.probe_once(55, 123, "unicode_up", "window")
+            recovered = self.observer.probe_once(55, 123, "unicode_up", "window", recovery=True)
+        self.assertEqual((missed["status"], recovered["status"]), ("missed", "observed"))
+        self.assertEqual(missed["registration"], recovered["registration"])
+        self.assertEqual(recovered["hook_messages"], [guard.WM_SYSKEYUP])
+        self.assertTrue(self.observer.tripped.is_set())
+        self.assertTrue(self.observer.unavailable)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(row == (1, win32.KEYEVENTF_UNICODE | win32.KEYEVENTF_KEYUP,
+                                    0, guard.ctypes.sizeof(win32.INPUT)) for row in calls))
+        with self.assertRaises(RuntimeError):
+            self.observer.probe_once(55, 123, "unicode_up", "window", recovery=True)
+
+    def test_owner_and_null_focus_are_required_before_send(self):
+        send = mock.Mock(return_value=1)
+        user, context, desktop, last_input = self._patched(send)
+        with user, context, desktop, last_input:
+            self.assertEqual(self.observer.probe_once(55, 123, "unicode_up", "none")["status"],
+                             "owner_or_focus_lost")
+            self.context["focus_hwnd"] = 0
+            self.context["process_id"] = 999
+            self.assertEqual(self.observer.probe_once(55, 123, "unicode_up", "none")["status"],
+                             "owner_or_focus_lost")
+        send.assert_not_called()
+
+    def test_foreground_context_reads_gui_focus_and_owner(self):
+        def owner(_hwnd, out):
+            guard.ctypes.cast(out, guard.ctypes.POINTER(guard.wintypes.DWORD)).contents.value = 123
+            return 12
+
+        def gui(_thread, out):
+            info = guard.ctypes.cast(out, guard.ctypes.POINTER(win32.GUITHREADINFO)).contents
+            info.hwndActive, info.hwndFocus = 55, 0
+            return 1
+
+        native = SimpleNamespace(GetForegroundWindow=lambda: 55, GetWindowThreadProcessId=owner,
+                                 GetGUIThreadInfo=gui)
+        with mock.patch.object(win32, "user32", native), \
+             mock.patch.object(win32, "input_desktop", return_value="Default"):
+            context = win32.foreground_context()
+        self.assertTrue(win32.owned_foreground(context, 55, 123, "none"))
+        self.assertFalse(win32.owned_foreground(context, 55, 123, "window"))
+        self.assertEqual((context["thread_id"], context["input_desktop"]), (12, "Default"))
+
+    def test_real_input_after_miss_blocks_recovery_without_clearing_latch(self):
+        self.observer._trip("teardown diagnostic probe missed", unavailable=True)
+        self.observer._trip("real keyboard input")
+        send = mock.Mock()
+        user, context, desktop, last_input = self._patched(send)
+        with user, context, desktop, last_input:
+            result = self.observer.probe_once(55, 123, "unicode_up", "window", recovery=True)
+        self.assertEqual(result["status"], "real_input")
+        self.assertEqual(self.observer.reason, "teardown diagnostic probe missed")
+        send.assert_not_called()
+
+    def test_new_session_input_tick_after_miss_blocks_recovery(self):
+        send = mock.Mock(return_value=1)
+        user, context, desktop, last_input = self._patched(send)
+        with user, context, desktop, last_input as last_input_mock, \
+             mock.patch.object(self.observer, "_post_heartbeat"), \
+             mock.patch.object(guard, "PROBE_TIMEOUT", 0.005):
+            self.assertEqual(self.observer.probe_once(55, 123, "unicode_up", "window")["status"],
+                             "missed")
+            last_input_mock.return_value = 101
+            self.assertEqual(self.observer.probe_once(55, 123, "unicode_up", "window",
+                                                      recovery=True)["status"], "input_since_miss")
+        send.assert_called_once()
+
+    def test_teardown_cli_is_opt_in_and_reports_inconclusive_as_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "guard.json"
+            with mock.patch.object(guard_diagnostic, "diagnose_teardown",
+                                   return_value={"status": "inconclusive"}) as diagnose:
+                code = guard_diagnostic.main(["--teardown", "--out", str(path)])
+            self.assertEqual(code, 1)
+            diagnose.assert_called_once_with()
+            self.assertEqual(json.loads(path.read_text())["status"], "inconclusive")
+
+    def test_teardown_deadline_is_fixed_and_does_not_change_normal_probe_timeout(self):
+        self.assertEqual(guard_diagnostic.TEARDOWN_DEADLINE_SECONDS, 12)
+        self.assertEqual(guard.PROBE_TIMEOUT, 0.5)
+
+    def test_one_a_miss_allows_only_one_b_recovery_and_preserves_latch(self):
+        a = mock.Mock(hwnd=55, restoration="skipped_teardown_stage")
+        b = mock.Mock(hwnd=66, restoration="skipped_teardown_stage")
+        for window in (a, b):
+            window.open.return_value = True
+            window.focused.return_value = True
+            window._thread = SimpleNamespace(is_alive=lambda: True)
+            window.diagnostics.return_value = {"status": "ready"}
+        observed = guard.TeardownDiagnosticObserver()
+
+        def probe(_hwnd, _pid, _kind, _focus, recovery=False):
+            if recovery:
+                return {"status": "observed"}
+            observed.tripped.set()
+            return {"status": "missed"}
+
+        observed.probe_once = mock.Mock(side_effect=probe)
+        observed.start = mock.Mock(return_value=observed)
+        observed.stop = mock.Mock()
+        observed.diagnostics = mock.Mock(return_value={"hook_state": {"thread_id": 91}})
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.win32, "foreground_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])), \
+             mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", side_effect=[a, b]), \
+             mock.patch.object(guard_diagnostic.guard, "TeardownDiagnosticObserver", return_value=observed):
+            result = guard_diagnostic.diagnose_teardown()
+        self.assertEqual(result["status"], "miss_recovered")
+        self.assertTrue(result["latched_failure"])
+        self.assertEqual(observed.probe_once.call_count, 2)
+        self.assertEqual(observed.probe_once.call_args_list[0].args[0], 55)
+        self.assertEqual(observed.probe_once.call_args_list[1].args[0], 66)
+        self.assertTrue(observed.probe_once.call_args_list[1].kwargs["recovery"])
+        a.clear_focus.assert_not_called()
+        observed.start.assert_called_once()
+        observed.stop.assert_called_once()
+
+    def test_expired_teardown_deadline_sends_nothing(self):
+        a = mock.Mock(hwnd=55)
+        a.open.return_value = True
+        a.focused.return_value = True
+        a.diagnostics.return_value = {}
+        observed = guard.TeardownDiagnosticObserver()
+        observed.start = mock.Mock(return_value=observed)
+        observed.stop = mock.Mock()
+        observed.diagnostics = mock.Mock(return_value={})
+        observed.probe_once = mock.Mock()
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])), \
+             mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", return_value=a), \
+             mock.patch.object(guard_diagnostic.guard, "TeardownDiagnosticObserver", return_value=observed), \
+             mock.patch.object(guard_diagnostic, "TEARDOWN_DEADLINE_SECONDS", 0):
+            result = guard_diagnostic.diagnose_teardown()
+        self.assertEqual(result["status"], "deadline")
+        observed.probe_once.assert_not_called()
+
+    def test_nonreproduction_runs_focus_null_then_teardown_then_b_and_is_inconclusive(self):
+        a = mock.Mock(hwnd=55, restoration="skipped_teardown_stage")
+        b = mock.Mock(hwnd=66, restoration="skipped_teardown_stage")
+        for window in (a, b):
+            window.open.return_value = True
+            window.focused.return_value = True
+            window._thread = SimpleNamespace(is_alive=lambda: False)
+            window.diagnostics.return_value = {"status": "ready"}
+        a.clear_focus.return_value = True
+        observed = guard.TeardownDiagnosticObserver()
+        observed._thread_id = 91
+        observed.start = mock.Mock(return_value=observed)
+        observed.stop = mock.Mock()
+        observed.diagnostics = mock.Mock(return_value={"hook_state": {
+            "keyboard_callbacks": 6, "heartbeat_received": 6}})
+        observed.probe_once = mock.Mock(return_value={"status": "observed"})
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.win32, "foreground_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])), \
+             mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", side_effect=[a, b]), \
+             mock.patch.object(guard_diagnostic.guard, "TeardownDiagnosticObserver", return_value=observed):
+            result = guard_diagnostic.diagnose_teardown()
+        self.assertEqual(result["status"], "inconclusive")
+        self.assertFalse(result["latched_failure"])
+        self.assertEqual(observed.probe_once.call_count, 6)
+        self.assertEqual([call.args[0] for call in observed.probe_once.call_args_list],
+                         [55, 55, 55, 55, 66, 66])
+        a.clear_focus.assert_called_once()
+        a.close.assert_any_call(restore=False)
+        self.assertIn("a_after_teardown", [row["stage"] for row in result["stages"]])

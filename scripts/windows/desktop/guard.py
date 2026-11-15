@@ -34,6 +34,7 @@ WM_USER = 0x0400
 WM_GUARD_HEARTBEAT = WM_USER + 1
 WM_MOUSEMOVE = 0x0200
 WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
 # A real mouse that only drifts by a pixel or two (desk vibration) is not treated as a person.
 MOVE_TOLERANCE = 3
 # Liveness probe: key-up of a reserved virtual key, tagged so it is recognised exactly.
@@ -129,6 +130,7 @@ class _HookObserver:
         self._owned_probe_release_result = None
         self._key_trace = None
         self._key_trace_overflow = False
+        self.real_input_detected = threading.Event()
 
     def start_key_trace(self):
         """Opt-in H8 trace of injected events only; real input still trips the guard."""
@@ -173,6 +175,8 @@ class _HookObserver:
 
     # ------------------------------------------------------------ hook thread
     def _trip(self, reason, unavailable=False):
+        if not unavailable:
+            self.real_input_detected.set()
         if not self.tripped.is_set():
             self.reason = reason
             self.unavailable = unavailable
@@ -692,6 +696,138 @@ class Guard:
             if remaining <= 0:
                 return
             self.tripped.wait(min(0.05, remaining))
+
+
+class TeardownDiagnosticObserver(_HookObserver):
+    """One diagnostic-only registration, driven one owned key-up at a time.
+
+    The ordinary watchdog cannot run across A's destruction: it could inject while
+    an unrelated window becomes foreground. This observer uses the same hook pump
+    and callback, but only sends after checking the current owned target. A miss
+    latches permanently; the sole recovery probe is permitted by this class only.
+    """
+
+    def __init__(self):
+        super().__init__(diagnostic=True)
+        self._manual_tag = None
+        self._manual_kind = None
+        self._manual_seen = threading.Event()
+        self._manual_messages = []
+        self._manual_sequence = 0
+        self._recovery_used = False
+        self._last_miss_input_tick = None
+
+    def start(self):
+        win32.require_windows()
+        self._thread = threading.Thread(target=self._run, name="input-guard", daemon=True)
+        self._thread.start()
+        if not self._ready.wait(5) or self.error or self._installed_hooks != 2:
+            self.stop()
+            raise RuntimeError(f"Could not install diagnostic hooks: {self.error or 'observer not ready'}")
+        return self
+
+    def _record_injected_key(self, message, event):
+        super()._record_injected_key(message, event)
+        if (message in (WM_KEYUP, WM_SYSKEYUP) and event.flags & LLKHF_UP and
+                event.dwExtraInfo == self._manual_tag and
+                event.vkCode == (VK_PACKET if self._manual_kind == "unicode_up" else PROBE_VK)):
+            self._manual_messages.append(int(message))
+            self._manual_seen.set()
+
+    def probe_once(self, hwnd, owner_pid, kind, expected_focus, *, recovery=False):
+        """Return one bounded observation; never clear a failed guard latch."""
+        if kind not in ("unicode_up", "reserved_vk_up") or expected_focus not in ("window", "none"):
+            raise ValueError("invalid teardown diagnostic probe")
+        if recovery:
+            if (self._recovery_used or not self.tripped.is_set() or not self.unavailable or
+                    not self.reason.startswith("teardown diagnostic probe missed")):
+                raise RuntimeError("recovery requires one latched probe miss")
+            self._recovery_used = True
+        elif self.tripped.is_set():
+            raise RuntimeError("diagnostic guard already tripped")
+        observation = {"kind": kind, "recovery": recovery, "timeout_s": PROBE_TIMEOUT,
+                       "registration": {"process_id": os.getpid(), "thread_id": self._thread_id,
+                                        "installed_hooks": self._installed_hooks}}
+        before = win32.foreground_context()
+        observation["before"] = before
+        if self.real_input_detected.is_set():
+            observation["status"] = "real_input"
+            return observation
+        input_tick = win32.last_input_tick()
+        observation["last_input_tick_before"] = input_tick
+        if recovery and input_tick != self._last_miss_input_tick:
+            observation["status"] = "input_since_miss"
+            return observation
+        if not win32.owned_foreground(before, hwnd, owner_pid, expected_focus):
+            observation["status"] = "owner_or_focus_lost"
+            return observation
+        self._manual_sequence += 1
+        tag = PROBE_TAG | (self._manual_sequence << 32)
+        self._manual_tag, self._manual_kind = tag, kind
+        self._expected_probe_tag = tag if kind == "reserved_vk_up" else None
+        self._manual_messages = []
+        self._manual_seen.clear()
+        event = win32.INPUT(type=win32.INPUT_KEYBOARD)
+        if kind == "unicode_up":
+            event.ki = win32.KEYBDINPUT(wVk=0, wScan=OWNED_PROBE_CHAR,
+                                        dwFlags=win32.KEYEVENTF_UNICODE | win32.KEYEVENTF_KEYUP,
+                                        time=0, dwExtraInfo=tag)
+        else:
+            event.ki = win32.KEYBDINPUT(wVk=PROBE_VK, wScan=0, dwFlags=win32.KEYEVENTF_KEYUP,
+                                        time=0, dwExtraInfo=tag)
+        observation["tag"] = f"0x{tag:016x}"
+        observation["heartbeat_before"] = self._heartbeat_received
+        observation["keyboard_callbacks_before"] = self._keyboard_callbacks
+        self._probe_started = time.monotonic()
+        sent = win32.user32.SendInput(1, (win32.INPUT * 1)(event), ctypes.sizeof(win32.INPUT))
+        self._post_heartbeat()
+        observation["send_result"] = sent
+        observation["send_error"] = ctypes.get_last_error() if sent != 1 else None
+        observation["after_send"] = win32.foreground_context()
+        if self.real_input_detected.is_set():
+            observation["status"] = "real_input"
+        elif not win32.owned_foreground(observation["after_send"], hwnd, owner_pid, expected_focus):
+            observation["status"] = "owner_or_focus_lost"
+        elif sent != 1:
+            observation["status"] = "send_failed"
+            if not recovery:
+                self._trip("teardown diagnostic probe send failed", unavailable=True)
+        else:
+            deadline = self._probe_started + PROBE_TIMEOUT
+            while not self._manual_seen.wait(min(0.01, max(0, deadline - time.monotonic()))):
+                if self.real_input_detected.is_set():
+                    observation["status"] = "real_input"
+                    break
+                if not win32.owned_foreground(win32.foreground_context(), hwnd, owner_pid,
+                                              expected_focus):
+                    observation["status"] = "owner_or_focus_lost"
+                    break
+                if time.monotonic() >= deadline:
+                    observation["status"] = "missed"
+                    if not recovery:
+                        self._last_miss_input_tick = win32.last_input_tick()
+                        self._trip("teardown diagnostic probe missed", unavailable=True)
+                    break
+            else:
+                observation["status"] = "observed"
+            if self.real_input_detected.is_set():
+                observation["status"] = "real_input"
+        observation["at_result"] = win32.foreground_context()
+        if (observation["status"] == "observed" and
+                not win32.owned_foreground(observation["at_result"], hwnd, owner_pid, expected_focus)):
+            observation["status"] = "owner_or_focus_lost"
+        observation["desktop_context"] = win32.desktop_context(self._thread_id)
+        observation["hook_messages"] = list(self._manual_messages)
+        observation["keyboard_callbacks"] = self._keyboard_callbacks
+        observation["last_keyboard_callback_age_ms"] = (
+            round((time.monotonic() - self._last_keyboard_callback_at) * 1000)
+            if self._last_keyboard_callback_at is not None else None)
+        observation["heartbeat_posted"] = self._heartbeat_posted
+        observation["heartbeat_received"] = self._heartbeat_received
+        observation["heartbeat_post_error"] = self._heartbeat_post_error
+        observation["heartbeat_pump_alive"] = self._thread.is_alive() if self._thread else False
+        observation["elapsed_ms"] = round((time.monotonic() - self._probe_started) * 1000)
+        return observation
 
 
 class NoGuard:

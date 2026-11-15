@@ -294,6 +294,52 @@ candidates** with their tag comparison. It never records real key fields. A
 missing or mismatched probe is still a failure; the diagnostic does not relax the
 guard.
 
+For the single teardown-sensitivity experiment, dispatch with
+`-f guard_teardown_diagnostic=true` (leave `guard_diagnostic` false) and the
+matching `sha`, or add `--teardown` to the local command above. This is a
+separate opt-in path in the same hash-locked venv, with no build handoff or app
+launch. It keeps one keyboard/mouse hook registration in this diagnostic process
+and starts no stage after a 12-second deadline following the 60-second idle
+prerequisite; final cleanup can take longer. The test sends
+tagged **key-up only** Unicode `VK_PACKET` and reserved-VK controls to focused
+owned window A, calls `SetFocus(NULL)` on A's owning GUI thread and repeats the
+controls while A remains active, then destroys A normally. It creates owned
+window B and probes again. The owned window does not call `TranslateMessage`,
+and the controlled probes send no key-down. The
+diagnostic does not close any user app or send while an external window is
+foreground. If B cannot take focus automatically, it stops; an owner click after
+hooks start aborts when detected by the hook, and any change in the session's
+last-input tick after a miss blocks recovery. That tick includes injected input
+and is only a conservative change detector, not proof of human input. A missed
+callback latches failure;
+the same registration gets at most one controlled Unicode key-up probe on B for
+recovery evidence. If the miss happens on B's initial probe, that one recovery
+probe is on B after the handoff. The normal guard worker, its cleanup, and the
+0.5-second probe deadline are unchanged.
+
+`stages` records foreground HWND/TID/PID, `GetGUIThreadInfo` active/focus/status,
+input desktop, callback message types (`WM_KEYDOWN`, `WM_KEYUP`,
+`WM_SYSKEYDOWN`, `WM_SYSKEYUP`), SendInput result, and the hook process/thread
+identity and posted/received pump heartbeat around each send and timeout. A
+received heartbeat shows the message pump ran, not that the hooks ran. Compare
+tags with `window_a` and
+`window_b` received messages. `miss_recovered` means the same registration
+delivered B's recovery callback after a latched miss; it refutes permanent
+removal for that episode and does **not** pass the desktop suite. `miss_persisted`
+means no recovery callback arrived. `inconclusive` means this one A/B run did
+not reproduce a miss. The hook runs in the diagnostic process instead of the
+product guard's isolated worker, so process-specific effects remain unresolved.
+This is one bounded experiment, not a repeated sampling or release gate.
+
+The focus-clear step follows [SetFocus(NULL)](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setfocus),
+and its state is read through [GetGUIThreadInfo](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getguithreadinfo).
+The [KEYEVENTF_UNICODE key-up](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput)
+is documented to produce a `VK_PACKET` key message without a translated
+character when the window does not call `TranslateMessage`. The
+[GetLastInputInfo](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getlastinputinfo)
+tick is session-specific and may not be monotonic, so any change stops the
+recovery probe without labeling it real input.
+
 The observer creates its message queue before reporting ready. Diagnostic
 `heartbeat_posted` and `heartbeat_received` count private messages through that
 queue; a received heartbeat shows the pump ran but does not prove either hook
