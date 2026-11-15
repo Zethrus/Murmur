@@ -26,6 +26,8 @@ import win32
 
 WH_KEYBOARD_LL, WH_MOUSE_LL = 13, 14
 LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED = 0x10, 0x02
+# KBDLLHOOKSTRUCT bit 5 is Alt context; bit 7 is key-up transition.
+LLKHF_ALTDOWN, LLKHF_UP = 0x20, 0x80
 LLMHF_INJECTED, LLMHF_LOWER_IL_INJECTED = 0x01, 0x02
 WM_QUIT = 0x0012
 WM_USER = 0x0400
@@ -122,12 +124,30 @@ class _HookObserver:
         self._owned_probe_send_result = None
         self._owned_probe_send_error = None
         self._owned_probe_release_result = None
+        self._key_trace = None
+        self._key_trace_overflow = False
+
+    def start_key_trace(self):
+        """Opt-in H8 trace of injected events only; real input still trips the guard."""
+        self._key_trace = []
+        self._key_trace_overflow = False
+
+    def stop_key_trace(self):
+        events, overflow = self._key_trace or [], self._key_trace_overflow
+        self._key_trace = None
+        return {"events": events, "overflow": overflow}
 
     def _record_injected_key(self, message, event):
         """Keep only our probe candidates; never retain a person's keystrokes."""
         if not self._diagnostic or not is_injected_key(event.flags):
             return
         self._injected_key_events += 1
+        if self._key_trace is not None:
+            if len(self._key_trace) < 512:
+                self._key_trace.append([time.time_ns(), int(message), int(event.vkCode),
+                                        int(event.scanCode), int(event.flags)])
+            else:
+                self._key_trace_overflow = True
         if event.vkCode != PROBE_VK and event.dwExtraInfo & 0xFFFFFFFF != PROBE_TAG:
             return
         owned_match = (self._owned_probe_target is not None and event.vkCode == VK_PACKET
@@ -437,8 +457,15 @@ def _guard_worker(connection, diagnostic=False, owned_probe_target=None):
         connection.send(("ready", observer.diagnostics()))
         last_count = 0
         while not observer.tripped.is_set():
-            if connection.poll(0.025) and connection.recv() == "stop":
-                return
+            if connection.poll(0.025):
+                command = connection.recv()
+                if command == "stop":
+                    return
+                if command == "trace_start":
+                    observer.start_key_trace()
+                    connection.send(("key_trace", {"started": True}))
+                elif command == "trace_stop":
+                    connection.send(("key_trace", observer.stop_key_trace()))
             if observer.probes_seen != last_count:
                 last_count = observer.probes_seen
                 connection.send(("diagnostics", observer.diagnostics()))
@@ -482,6 +509,8 @@ class Guard:
                              "unhook_errors": []}
         self._started_at = None
         self._timeline = []
+        self._trace_ready = threading.Event()
+        self._trace_result = None
 
     def _trip(self, reason, unavailable=False):
         if not self.tripped.is_set():
@@ -500,6 +529,9 @@ class Guard:
                         self._ready.set()
                     elif kind == "diagnostics":
                         self._diagnostics = value
+                    elif kind == "key_trace":
+                        self._trace_result = value
+                        self._trace_ready.set()
                     elif kind == "user_input":
                         self._trip(value)
                         self._ready.set()
@@ -580,6 +612,32 @@ class Guard:
         if self._diagnostic:
             result["timeline"] = list(self._timeline)
         return result
+
+    def _trace_command(self, command):
+        if not self._diagnostic or self._connection is None:
+            raise RuntimeError("Key trace requires a running diagnostic guard")
+        self.check()
+        self._trace_result = None
+        self._trace_ready.clear()
+        try:
+            self._connection.send(command)
+        except (BrokenPipeError, EOFError, OSError):
+            self._trip("input guard observer connection closed", unavailable=True)
+            self.check()
+        deadline = time.monotonic() + 2
+        while not self._trace_ready.wait(0.05):
+            self.check()
+            if time.monotonic() >= deadline:
+                self._trip(f"input guard did not acknowledge {command}", unavailable=True)
+                self.check()
+        self.check()
+        return self._trace_result
+
+    def start_key_trace(self):
+        self._trace_command("trace_start")
+
+    def stop_key_trace(self):
+        return self._trace_command("trace_stop")
 
     def mark(self, stage):
         """Correlate a suite action with the observer's last reported probe and hook state."""

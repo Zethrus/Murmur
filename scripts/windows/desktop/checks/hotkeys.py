@@ -4,6 +4,7 @@ import re
 import time
 
 import golden
+import guard
 import win32
 from checks.common import BLOCKED_HOTKEY, CODE_HOTKEY, SHIFT_HOTKEY
 from context import Fail, OutputCount
@@ -11,6 +12,26 @@ from context import Fail, OutputCount
 
 # Three copies take longer than the guard's one-second liveness interval at 12 ms/character.
 DIRECT_CONTROL = "The quick brown fox jumps over the lazy dog. " * 3
+
+
+def _key_trace_summary(trace, expected=None):
+    """Compare the hook's injected VK_PACKET stream with the target and history oracles."""
+    packets = [(scan, bool(flags & guard.LLKHF_UP)) for _, _, vk, scan, flags in trace["events"]
+               if vk == guard.VK_PACKET]
+    downs = [unit for unit, up in packets if not up]
+    packet_text = b"".join(unit.to_bytes(2, "little") for unit in downs).decode("utf-16-le", "replace")
+    return {"columns": ["time_ns", "message", "vk", "scan", "flags"],
+            "events": trace["events"], "overflow": trace["overflow"],
+            "packet_text": packet_text,
+            "packet_pairs_match": (len(packets) % 2 == 0 and all(
+                packets[i] == (packets[i + 1][0], False)
+                and packets[i + 1] == (packets[i][0], True)
+                for i in range(0, len(packets), 2))),
+            "packet_difference": golden.compare(expected, packet_text) if expected is not None else None,
+            "packet_alt_flag_events": sum(bool(flags & guard.LLKHF_ALTDOWN)
+                                          for _, _, vk, _, flags in trace["events"]
+                                          if vk == guard.VK_PACKET),
+            "probe_events": sum(vk == guard.PROBE_VK for _, _, vk, _, _ in trace["events"])}
 
 
 def h1_hold(ctx):
@@ -66,6 +87,8 @@ def _notepad_focus_trial(ctx, spec, name, phases):
     sample = lambda stage: phases.append(_focus_phase(pad, stage))
     modifiers, key = win32.parse_combo(spec)
     ctx.observe_delivery("A")
+    ctx.guard.start_key_trace()
+    observation = None
     try:
         sample("before modifiers")
         win32.key_down(*modifiers)
@@ -104,6 +127,9 @@ def _notepad_focus_trial(ctx, spec, name, phases):
         # The run's fail-closed guard handles user input. This only releases keys owned by
         # the harness if sampling or dictation fails before the normal key-up sequence.
         win32.release_all()
+        trace = ctx.guard.stop_key_trace()
+        if observation is not None:
+            observation["key_trace"] = _key_trace_summary(trace, expected)
 
 
 def _notepad_direct_control(ctx, phases):
@@ -115,14 +141,19 @@ def _notepad_direct_control(ctx, phases):
         raise Fail("direct control started with a modifier held")
     probes_before = ctx.guard.diagnostics()["probes_seen"]
     phases.append(_focus_phase(pad, "before direct input"))
-    win32.type_unicode(DIRECT_CONTROL, delay=0.012)
+    ctx.guard.start_key_trace()
+    try:
+        win32.type_unicode(DIRECT_CONTROL, delay=0.012)
+    finally:
+        trace = ctx.guard.stop_key_trace()
     ctx.guard.check()
     probes_after = ctx.guard.diagnostics()["probes_seen"]
     phases.append(_focus_phase(pad, "after direct input"))
     actual = pad.wait_text(timeout=8, stable=1.2, sleep=ctx.sleep)
     phases.append(_focus_phase(pad, "after direct readback"))
     return pad, golden.compare(DIRECT_CONTROL, actual), DIRECT_CONTROL, {
-        "probes_during_input": probes_after - probes_before, "target_chars": len(actual)}
+        "probes_during_input": probes_after - probes_before, "target_chars": len(actual),
+        "key_trace": _key_trace_summary(trace, DIRECT_CONTROL)}
 
 
 def _capture_notepad_trial(ctx, name, result, pad, expected):
@@ -154,18 +185,24 @@ def h8_focus_phases(ctx):
     try:
         for name, spec in (("control", None), ("alt", "Ctrl+Alt+Shift+F9"),
                            ("no-alt", SHIFT_HOTKEY)):
+            log_start = len(ctx.murmur.log()) if name != "control" else 0
             results[name] = {"hotkey": spec, "phases": [], "difference": None,
                              "saved_file_difference": None, "saved_file_updated": None,
                              "saved_file_error": None, "saved_file_artifact": None}
-            if name == "control":
-                pad, difference, expected, observation = _notepad_direct_control(
-                    ctx, results[name]["phases"])
+            try:
+                if name == "control":
+                    pad, difference, expected, observation = _notepad_direct_control(
+                        ctx, results[name]["phases"])
+                else:
+                    pad, difference, expected, observation = _notepad_focus_trial(
+                        ctx, spec, name, results[name]["phases"])
                 results[name]["observation"] = observation
-            else:
-                pad, difference, expected, observation = _notepad_focus_trial(
-                    ctx, spec, name, results[name]["phases"])
-                results[name]["observation"] = observation
-            results[name]["difference"] = difference
+                results[name]["difference"] = difference
+            finally:
+                if name != "control":
+                    log_artifact = ctx.artifact(f"{name}-app-log.txt")
+                    log_artifact.write_text(ctx.murmur.log()[log_start:], encoding="utf-8")
+                    results[name]["app_log_artifact"] = log_artifact.name
             _capture_notepad_trial(ctx, name, results[name], pad, expected)
     finally:
         artifact.write_text(json.dumps(results, indent=2), encoding="utf-8")

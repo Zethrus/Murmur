@@ -165,7 +165,9 @@ class ImportTests(unittest.TestCase):
                                   overlay_state=lambda: "done")
         ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
                               notepad=lambda _: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
-                              observed_text=lambda: "full", settle=mock.Mock())
+                              observed_text=lambda: "full", settle=mock.Mock(),
+                              guard=SimpleNamespace(start_key_trace=mock.Mock(),
+                                                    stop_key_trace=lambda: {"events": [], "overflow": False}))
         with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
              mock.patch.object(win32, "key_down") as down, \
              mock.patch.object(win32, "key_up") as up, \
@@ -190,7 +192,9 @@ class ImportTests(unittest.TestCase):
         guard_check = mock.Mock()
         guard_state = mock.Mock(side_effect=[{"probes_seen": 3}, {"probes_seen": 5}])
         ctx = SimpleNamespace(notepad=lambda _: pad,
-                              guard=SimpleNamespace(check=guard_check, diagnostics=guard_state),
+                              guard=SimpleNamespace(check=guard_check, diagnostics=guard_state,
+                                                    start_key_trace=mock.Mock(),
+                                                    stop_key_trace=lambda: {"events": [], "overflow": False}),
                               sleep=lambda _: None)
         phases = []
         with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
@@ -202,7 +206,8 @@ class ImportTests(unittest.TestCase):
         self.assertIn("differs at character", difference)
         send.assert_called_once_with(expected, delay=0.012)
         self.assertEqual(guard_check.call_count, 2)
-        self.assertEqual(observation, {"probes_during_input": 2, "target_chars": 7})
+        self.assertEqual((observation["probes_during_input"], observation["target_chars"]), (2, 7))
+        self.assertEqual(observation["key_trace"]["packet_text"], "")
         self.assertEqual([phase["stage"] for phase in phases],
                          ["before direct input", "after direct input", "after direct readback"])
 
@@ -213,7 +218,9 @@ class ImportTests(unittest.TestCase):
                                   overlay_state=lambda: "held")
         ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
                               notepad=lambda _: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
-                              observed_text=mock.Mock(side_effect=OutputCount(0)), settle=mock.Mock())
+                              observed_text=mock.Mock(side_effect=OutputCount(0)), settle=mock.Mock(),
+                              guard=SimpleNamespace(start_key_trace=mock.Mock(),
+                                                    stop_key_trace=lambda: {"events": [], "overflow": False}))
         with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
              mock.patch.object(win32, "key_down"), mock.patch.object(win32, "key_up"), \
              mock.patch.object(win32, "release_all"):
@@ -223,6 +230,7 @@ class ImportTests(unittest.TestCase):
         self.assertIsNone(difference)
         self.assertEqual(observation["status"], "held_refused")
         self.assertEqual(observation["output_error"], "Expected one output for this utterance, found 0")
+        self.assertEqual(observation["key_trace"]["packet_text"], "")
         self.assertEqual(phases[-1]["stage"], "after delivery wait")
 
     def test_drag_sampling_keeps_held_geometry_assertion(self):
@@ -243,7 +251,10 @@ class ImportTests(unittest.TestCase):
                                                     path.write_text("partial" if number == 2 else "full")))
                     for number, path in enumerate(paths, 1)]
             screenshot = mock.Mock(return_value=Path(directory) / "screenshot.png")
-            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix, screenshot=screenshot)
+            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix, screenshot=screenshot,
+                                  murmur=SimpleNamespace(log=mock.Mock(side_effect=[
+                                      "before", "before\nalt\n", "before\nalt\n",
+                                      "before\nalt\nno-alt\n"])))
             with mock.patch.object(hotkey_checks, "_notepad_direct_control",
                                    return_value=(pads[0], None, "full", {"probes_during_input": 1})), \
                  mock.patch.object(hotkey_checks, "_notepad_focus_trial",
@@ -264,6 +275,8 @@ class ImportTests(unittest.TestCase):
             self.assertTrue(evidence["alt"]["saved_file_updated"])
             self.assertTrue(evidence["no-alt"]["saved_file_updated"])
             self.assertEqual((Path(directory) / "control-saved.txt").read_text(), "full")
+            self.assertEqual((Path(directory) / "alt-app-log.txt").read_text(), "\nalt\n")
+            self.assertEqual((Path(directory) / "no-alt-app-log.txt").read_text(), "no-alt\n")
 
     def test_hotkey_probe_copies_exact_saved_file_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -273,7 +286,7 @@ class ImportTests(unittest.TestCase):
             pad = SimpleNamespace(hwnd=42, path=path,
                                   close=mock.Mock(side_effect=lambda: path.write_bytes(saved_bytes)))
             ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix,
-                                  screenshot=mock.Mock())
+                                  screenshot=mock.Mock(), murmur=SimpleNamespace(log=lambda: ""))
             result = {"saved_file_difference": None, "saved_file_error": None}
             hotkey_checks._capture_notepad_trial(ctx, "control", result, pad, "café\r\n")
             self.assertEqual((Path(directory) / "control-saved.txt").read_bytes(), saved_bytes)
@@ -288,7 +301,7 @@ class ImportTests(unittest.TestCase):
                                      p.write_text("" if i == 2 else "full")))
                     for i, path in enumerate(paths, 1)]
             ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix,
-                                  screenshot=mock.Mock())
+                                  screenshot=mock.Mock(), murmur=SimpleNamespace(log=lambda: ""))
             with mock.patch.object(hotkey_checks, "_notepad_direct_control",
                                    return_value=(pads[0], None, "full", {"probes_during_input": 1})), \
                  mock.patch.object(hotkey_checks, "_notepad_focus_trial",
@@ -1188,6 +1201,30 @@ class GuardMouseTests(unittest.TestCase):
         self.assertEqual([item["matches_expected"] for item in watcher._probe_events], [False, True])
         self.assertNotIn("0x41", str(watcher._probe_events))
 
+    def test_h8_trace_records_injected_events_only_and_stops_cleanly(self):
+        watcher = guard._HookObserver(diagnostic=True)
+        event = lambda flags: SimpleNamespace(vkCode=guard.VK_PACKET, scanCode=ord("b"),
+                                              flags=flags, dwExtraInfo=0)
+        watcher._record_injected_key(guard.WM_KEYDOWN, event(guard.LLKHF_INJECTED))
+        watcher.start_key_trace()
+        watcher._record_injected_key(guard.WM_KEYDOWN, event(0))
+        watcher._record_injected_key(guard.WM_KEYDOWN, event(guard.LLKHF_INJECTED))
+        watcher._record_injected_key(guard.WM_KEYUP, event(guard.LLKHF_INJECTED | guard.LLKHF_UP))
+        trace = watcher.stop_key_trace()
+        self.assertEqual(len(trace["events"]), 2)
+        summary = hotkey_checks._key_trace_summary(trace, "b")
+        self.assertEqual(summary["packet_text"], "b")
+        self.assertTrue(summary["packet_pairs_match"])
+        self.assertIsNone(summary["packet_difference"])
+        watcher._record_injected_key(guard.WM_KEYDOWN, event(guard.LLKHF_INJECTED))
+        self.assertEqual(len(trace["events"]), 2)
+        watcher.start_key_trace()
+        for _ in range(513):
+            watcher._record_injected_key(guard.WM_KEYDOWN, event(guard.LLKHF_INJECTED))
+        capped = watcher.stop_key_trace()
+        self.assertEqual(len(capped["events"]), 512)
+        self.assertTrue(capped["overflow"])
+
     def test_diagnostic_mouse_probe_has_no_displacement_or_button_action(self):
         watcher = guard._HookObserver(diagnostic=True)
         tag = guard.PROBE_TAG | (1 << 32)
@@ -1485,6 +1522,31 @@ class GuardProcessTests(unittest.TestCase):
         self.child.close()
         with self.assertRaisesRegex(guard.GuardUnavailable, "connection closed"):
             self.guard.check()
+
+    def test_h8_trace_commands_wait_for_observer_acknowledgement(self):
+        self.guard._diagnostic = True
+        events = [[1, guard.WM_KEYDOWN, guard.VK_PACKET, ord("b"), guard.LLKHF_INJECTED]]
+
+        def observer():
+            self.assertEqual(self.child.recv(), "trace_start")
+            self.child.send(("key_trace", {"started": True}))
+            self.assertEqual(self.child.recv(), "trace_stop")
+            self.child.send(("key_trace", {"events": events, "overflow": False}))
+
+        peer = guard.threading.Thread(target=observer)
+        peer.start()
+        self.guard.start_key_trace()
+        self.assertEqual(self.guard.stop_key_trace()["events"], events)
+        peer.join(1)
+        self.assertFalse(peer.is_alive())
+
+    def test_h8_trace_ack_timeout_aborts_guard(self):
+        self.guard._diagnostic = True
+        with mock.patch.object(self.guard._trace_ready, "wait", return_value=False), \
+             mock.patch.object(guard, "time", SimpleNamespace(monotonic=mock.Mock(side_effect=[0, 3]))):
+            with self.assertRaisesRegex(guard.GuardUnavailable, "did not acknowledge"):
+                self.guard.start_key_trace()
+        self.assertTrue(self.guard.unavailable)
 
     def test_spawn_handshake_and_clean_stop(self):
         spawned = guard.Guard()
