@@ -22,6 +22,7 @@ import win32
 WS_EX_TOOLWINDOW, WS_EX_TOPMOST = 0x80, 0x08
 WS_OVERLAPPEDWINDOW, WS_VISIBLE, ES_READONLY = 0x00CF0000, 0x10000000, 0x0800
 PM_REMOVE = 1
+SWP_SHOW_NO_ACTIVATE = 0x40 | 0x10 | 0x04 | 0x02 | 0x01
 FOCUS_WAIT_SECONDS = 180
 IDLE_WAIT_SECONDS = 65
 IDLE_SECONDS = 60
@@ -44,36 +45,58 @@ class _OwnedProbeWindow:
         self._clear_focus = threading.Event()
         self._clear_done = threading.Event()
         self._restore_on_close = True
+        self._handoff_window = False
+        self._destroyed = False
 
-    def open(self):
-        self._thread = threading.Thread(target=self._run, name="guard-probe-window", daemon=True)
+    def open(self, activation_gate=None):
+        self._handoff_window = activation_gate is not None
+        self._thread = threading.Thread(target=self._run, args=(activation_gate,),
+                                        name="guard-probe-window", daemon=True)
         self._thread.start()
         ready = self._ready.wait(3)
         if not ready:
             self.status = "window_thread_timeout"
-        if not ready or self.status.startswith(("create_failed", "window_error")):
+        if not ready or self.status.startswith(("create_failed", "window_error", "handoff_unsafe",
+                                                 "show_failed")):
             self.close()
             return False
         return True
 
-    def _run(self):
+    def _run(self, activation_gate=None):
         user32 = win32.user32
         try:
             self._previous = user32.GetForegroundWindow()
+            if activation_gate:
+                self._handoff_window = True
+                self._restore_on_close = False
+            if activation_gate and not activation_gate(None):
+                self.status = "handoff_unsafe"
+                return
             # EDIT is keyboard-capable. The caption and read-only content tell the owner what to do.
             instructions = ("Murmur guard diagnostic: If this window is not focused, click it; "
                             "then leave the mouse and keyboard untouched for 60 seconds")
             self.hwnd = user32.CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, "EDIT", instructions,
-                                                WS_OVERLAPPEDWINDOW | WS_VISIBLE | ES_READONLY,
+                                                WS_OVERLAPPEDWINDOW |
+                                                (0 if activation_gate else WS_VISIBLE) | ES_READONLY,
                                                 80, 80, 600, 140, None, None,
                                                 win32.kernel32.GetModuleHandleW(None), None)
             if not self.hwnd:
                 self.status = f"create_failed:{ctypes.get_last_error()}"
             else:
-                self.initial_focus = ("granted" if user32.SetForegroundWindow(self.hwnd) else "denied")
-                self.status = "waiting_for_focus"
+                if activation_gate and not activation_gate(self.hwnd):
+                    self.status = "handoff_unsafe"
+                else:
+                    if activation_gate and not user32.SetWindowPos(
+                            self.hwnd, None, 0, 0, 0, 0, SWP_SHOW_NO_ACTIVATE):
+                        self.status = f"show_failed:{ctypes.get_last_error()}"
+                    elif activation_gate and not activation_gate(self.hwnd):
+                        self.status = "handoff_unsafe"
+                    else:
+                        self.initial_focus = ("granted" if user32.SetForegroundWindow(self.hwnd)
+                                              else "denied")
+                        self.status = "waiting_for_focus"
             self._ready.set()
-            if self.hwnd:
+            if self.hwnd and not self.status.startswith(("handoff_unsafe", "show_failed")):
                 while not self._stop.wait(0.01):
                     self._drain_messages(user32)
                     if self._clear_focus.is_set() and not self._clear_done.is_set():
@@ -116,7 +139,8 @@ class _OwnedProbeWindow:
                 except Exception as error:  # noqa: BLE001 - still destroy our window
                     self.restoration = f"restore_error:{type(error).__name__}"
                 finally:
-                    if not user32.DestroyWindow(self.hwnd):
+                    self._destroyed = bool(user32.DestroyWindow(self.hwnd))
+                    if not self._destroyed:
                         self.restoration += f";destroy_failed:{ctypes.get_last_error()}"
 
     def _drain_messages(self, user32):
@@ -139,12 +163,14 @@ class _OwnedProbeWindow:
         return self._clear_done.wait(2) and self.status == "focus_cleared"
 
     def close(self, restore=True):
-        self._restore_on_close = restore
+        self._restore_on_close = restore and not self._handoff_window
         self._stop.set()
         if self._thread:
             self._thread.join(3)
             if self._thread.is_alive():
                 self.restoration = "window_thread_stop_timeout"
+        return bool(self._thread and not self._thread.is_alive() and self._destroyed and
+                    not win32.user32.IsWindow(self.hwnd))
 
     def diagnostics(self):
         return {"status": self.status, "initial_focus": self.initial_focus,
@@ -187,6 +213,18 @@ def _wait_for_safe_desktop(window):
     if problems:
         return "preflight_refused", problems
     return ("ready", []) if window.focused() else ("focus_lost", [])
+
+
+def _safe_handoff_foreground(context, owned_hwnd=None):
+    """Only a null foreground or this verified B window may precede B activation."""
+    if context.get("input_desktop") != "Default":
+        return False
+    if (context.get("hwnd") == 0 and context.get("process_id") == 0 and
+            context.get("gui_status") == "no_foreground"):
+        return True
+    return bool(owned_hwnd and
+                (win32.owned_foreground(context, owned_hwnd, os.getpid(), "window") or
+                 win32.owned_foreground(context, owned_hwnd, os.getpid(), "none")))
 
 
 def diagnose(seconds):
@@ -258,6 +296,9 @@ def diagnose_teardown():
         observer = guard.TeardownDiagnosticObserver().start()
         started = time.monotonic()
         deadline = started + TEARDOWN_DEADLINE_SECONDS
+        handoff_gate = None
+        handoff_input_tick = [None]
+        handoff_reason = [""]
 
         def snapshot(stage):
             hook = observer.diagnostics()["hook_state"]
@@ -271,10 +312,14 @@ def diagnose_teardown():
         def probe(window, stage, expected_focus, kind, recovery=False):
             if time.monotonic() >= deadline:
                 return "deadline"
+            if window is b and handoff_gate and not handoff_gate(b.hwnd):
+                return handoff_reason[0]
             entry = observer.probe_once(window.hwnd, os.getpid(), kind, expected_focus,
                                         recovery=recovery)
             entry["stage"] = stage
             result["stages"].append(entry)
+            if window is b:
+                handoff_input_tick[0] = win32.last_input_tick()
             return entry["status"]
 
         def probe_pair(window, stage, expected_focus):
@@ -292,23 +337,43 @@ def diagnose_teardown():
                 result["stages"].append(snapshot("a_set_focus_null"))
                 state = probe_pair(a, "a_focus_null", "none")
 
-        if state == "observed":
+        if state in ("observed", "missed"):
+            handoff_input_tick[0] = win32.last_input_tick()
             result["stages"].append(snapshot("a_before_teardown"))
-            a.close(restore=False)
+            teardown_complete = a.close(restore=False)
             result["stages"].append({**snapshot("a_after_teardown"), "window": a.diagnostics()})
-            if a._thread and a._thread.is_alive():
-                state = "window_thread_stop_timeout"
-            elif "destroy_failed" in a.restoration:
-                state = "window_teardown_failed"
+            if not teardown_complete:
+                state = ("window_thread_stop_timeout" if a._thread and a._thread.is_alive()
+                         else "window_teardown_failed")
 
         if state in ("observed", "missed") and time.monotonic() >= deadline:
             state = "deadline"
-        if state in ("observed", "missed") and not observer.real_input_detected.is_set():
+        if state in ("observed", "missed"):
+            def handoff_gate(owned_hwnd=None):
+                if time.monotonic() >= deadline:
+                    handoff_reason[0] = "deadline"
+                elif observer.real_input_detected.is_set():
+                    handoff_reason[0] = "real_input"
+                elif win32.last_input_tick() != handoff_input_tick[0]:
+                    handoff_reason[0] = "input_since_last_probe"
+                elif not _safe_handoff_foreground(win32.foreground_context(), owned_hwnd):
+                    handoff_reason[0] = "owner_or_focus_lost"
+                else:
+                    return True
+                return False
+
+            # This check runs before B is constructed. Its window thread repeats
+            # the check before creation, display, and SetForegroundWindow.
+            if not handoff_gate():
+                state = handoff_reason[0]
+
+        if state in ("observed", "missed"):
             # A missed callback leaves the registration installed. B is the only
             # subsequent target and receives at most one recovery probe.
             b = _OwnedProbeWindow()
-            if not b.open():
-                state = "probe_window_unavailable"
+            if not b.open(activation_gate=handoff_gate):
+                state = (handoff_reason[0] if b.status == "handoff_unsafe"
+                         else "probe_window_unavailable")
             else:
                 focus_deadline = min(deadline, time.monotonic() + 2)
                 while not b.focused() and time.monotonic() < focus_deadline:
@@ -319,8 +384,6 @@ def diagnose_teardown():
                 elif not b.focused():
                     state = "focus_lost"
                 elif state == "missed":
-                    if a._thread and a._thread.is_alive():
-                        a.close(restore=False)
                     state = probe(b, "b_recovery", "window", "unicode_up", recovery=True)
                     result["status"] = ({"observed": "miss_recovered", "missed": "miss_persisted"}
                                         .get(state, state))

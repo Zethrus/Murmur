@@ -302,17 +302,30 @@ launch. It keeps one keyboard/mouse hook registration in this diagnostic process
 and starts no stage after a 12-second deadline following the 60-second idle
 prerequisite; final cleanup can take longer. The test sends
 tagged **key-up only** Unicode `VK_PACKET` and reserved-VK controls to focused
-owned window A, calls `SetFocus(NULL)` on A's owning GUI thread and repeats the
-controls while A remains active, then destroys A normally. It creates owned
-window B and probes again. The owned window does not call `TranslateMessage`,
-and the controlled probes send no key-down. The
-diagnostic does not close any user app or send while an external window is
-foreground. If B cannot take focus automatically, it stops; an owner click after
-hooks start aborts when detected by the hook, and any change in the session's
-last-input tick after a miss blocks recovery. That tick includes injected input
-and is only a conservative change detector, not proof of human input. A missed
-callback latches failure;
-the same registration gets at most one controlled Unicode key-up probe on B for
+owned window A. If both callbacks arrive, it calls `SetFocus(NULL)` on A's
+owning GUI thread and repeats the controls while A remains active. Whether an
+A probe is observed or missed, it
+records before/after teardown snapshots, closes A, and requires both a successful
+`DestroyWindow` result and termination of A's window thread before considering B.
+It creates owned window B and probes again. The owned window does not call
+`TranslateMessage`, and the controlled probes send no key-down. The diagnostic
+does not close any user app or intentionally send while an external window is
+foreground. Before B is constructed, the foreground must be null on the Default
+desktop and the session last-input tick must match the tick after the last A probe.
+B is created hidden; its thread repeats those checks before creation, before
+showing B with `SetWindowPos(SWP_NOACTIVATE)`, and before requesting foreground.
+Once B exists, only null foreground or verified ownership of B is allowed. The
+same checks run
+again before each B probe, and the observer checks ownership and input before
+`SendInput`. An arbitrary previous foreground app is never a permitted handoff.
+If B cannot take focus automatically, it stops; an owner click after hooks start
+aborts when detected by the hook. Any last-input tick change during the handoff
+stops B creation/activation, and any change after a miss blocks recovery. That
+tick includes injected input and is only a conservative change detector, not
+proof of human input. Foreground and input checks are separate reads, not an
+atomic lock on the desktop; a change between the last check and native activation
+or `SendInput` remains possible. A missed callback latches failure; the same
+registration gets at most one controlled Unicode key-up probe on B for
 recovery evidence. If the miss happens on B's initial probe, that one recovery
 probe is on B after the handoff. The normal guard worker, its cleanup, and the
 0.5-second probe deadline are unchanged.
@@ -327,12 +340,16 @@ tags with `window_a` and
 delivered B's recovery callback after a latched miss; it refutes permanent
 removal for that episode and does **not** pass the desktop suite. `miss_persisted`
 means no recovery callback arrived. `inconclusive` means this one A/B run did
-not reproduce a miss. The hook runs in the diagnostic process instead of the
+not reproduce a miss. No probe is sent after A's destruction and before B owns
+foreground, so a negative A/B result cannot exclude a hook failure specific to
+that no-target gap. The hook runs in the diagnostic process instead of the
 product guard's isolated worker, so process-specific effects remain unresolved.
 This is one bounded experiment, not a repeated sampling or release gate.
 
 The focus-clear step follows [SetFocus(NULL)](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setfocus),
 and its state is read through [GetGUIThreadInfo](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getguithreadinfo).
+[SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)
+documents `SWP_NOACTIVATE` for B's initial display.
 The [KEYEVENTF_UNICODE key-up](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput)
 is documented to produce a `VK_PACKET` key message without a translated
 character when the window does not call `TranslateMessage`. The

@@ -1989,6 +1989,163 @@ class TeardownDiagnosticTests(unittest.TestCase):
                 mock.patch.object(win32, "desktop_context", return_value={"thread_desktop": "Default"}),
                 mock.patch.object(win32, "last_input_tick", return_value=100))
 
+    def _run_a_miss(self, *, foreground=None, ticks=None, close_ok=True, thread_alive=False):
+        operations = []
+        a = mock.Mock(hwnd=55, restoration="skipped_teardown_stage")
+        b = mock.Mock(hwnd=66, restoration="skipped_teardown_stage")
+        for window in (a, b):
+            window.open.return_value = True
+            window.focused.return_value = True
+            window.diagnostics.return_value = {"status": "ready"}
+        a._thread = SimpleNamespace(is_alive=lambda: thread_alive)
+
+        def close_a(*, restore):
+            if a.close.call_count == 1:
+                operations.append("close_a")
+            self.assertFalse(restore)
+            return close_ok
+
+        a.close.side_effect = close_a
+        observed = guard.TeardownDiagnosticObserver()
+        observed._thread_id = 91
+        observed.start = mock.Mock(return_value=observed)
+        observed.stop = mock.Mock()
+        observed.diagnostics = mock.Mock(return_value={"hook_state": {
+            "keyboard_callbacks": 1, "heartbeat_received": 1}})
+
+        def probe(hwnd, *_args, recovery=False):
+            operations.append("probe_b" if recovery else "probe_a")
+            if recovery:
+                return {"status": "observed"}
+            self.assertEqual(hwnd, 55)
+            observed.tripped.set()
+            return {"status": "missed"}
+
+        observed.probe_once = mock.Mock(side_effect=probe)
+
+        # Mock increments call_count before invoking side_effect.
+        def make_window():
+            operations.append("construct_a" if factory.call_count == 1 else "construct_b")
+            return a if factory.call_count == 1 else b
+
+        def open_b(*, activation_gate):
+            operations.append("open_b")
+            return True
+
+        b.open.side_effect = open_b
+        null_context = {"hwnd": 0, "process_id": 0, "gui_status": "no_foreground",
+                        "input_desktop": "Default"}
+        with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
+             mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.win32, "foreground_context",
+                               return_value=foreground or null_context), \
+             mock.patch.object(guard_diagnostic.win32, "last_input_tick",
+                               side_effect=ticks or (lambda: 100)), \
+             mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
+             mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])), \
+             mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", side_effect=make_window) as factory, \
+             mock.patch.object(guard_diagnostic.guard, "TeardownDiagnosticObserver",
+                               return_value=observed):
+            result = guard_diagnostic.diagnose_teardown()
+        return result, a, b, observed, operations
+
+    def test_a_miss_closes_and_snapshots_a_before_constructing_b(self):
+        result, a, b, observed, operations = self._run_a_miss()
+        self.assertEqual(result["status"], "miss_recovered")
+        self.assertEqual(operations[:5],
+                         ["construct_a", "probe_a", "close_a", "construct_b", "open_b"])
+        self.assertEqual(operations[5], "probe_b")
+        self.assertEqual([row["stage"] for row in result["stages"]],
+                         ["a_focused", "a_before_teardown", "a_after_teardown", "b_recovery"])
+        a.close.assert_any_call(restore=False)
+        self.assertEqual(observed.probe_once.call_count, 2)
+        self.assertTrue(observed.probe_once.call_args_list[-1].kwargs["recovery"])
+        b.open.assert_called_once()
+
+    def test_external_foreground_after_a_destroyed_prevents_b_and_input(self):
+        external = {"hwnd": 77, "process_id": 999, "active_hwnd": 77,
+                    "focus_hwnd": 77, "gui_status": "ok", "input_desktop": "Default"}
+        result, a, b, observed, operations = self._run_a_miss(foreground=external)
+        self.assertEqual(result["status"], "owner_or_focus_lost")
+        self.assertEqual(operations, ["construct_a", "probe_a", "close_a"])
+        observed.probe_once.assert_called_once()
+        b.open.assert_not_called()
+
+    def test_handoff_permits_only_null_or_verified_b_foreground(self):
+        null = {"hwnd": 0, "process_id": 0, "gui_status": "no_foreground",
+                "input_desktop": "Default"}
+        owned = {"hwnd": 66, "process_id": os.getpid(), "active_hwnd": 66,
+                 "focus_hwnd": 0, "gui_status": "ok", "input_desktop": "Default"}
+        self.assertTrue(guard_diagnostic._safe_handoff_foreground(null))
+        self.assertTrue(guard_diagnostic._safe_handoff_foreground(owned, 66))
+        self.assertFalse(guard_diagnostic._safe_handoff_foreground(owned))
+        self.assertFalse(guard_diagnostic._safe_handoff_foreground({**owned, "hwnd": 77,
+                                                                    "active_hwnd": 77}, 66))
+        self.assertFalse(guard_diagnostic._safe_handoff_foreground({**null,
+                                                                    "input_desktop": "Winlogon"}))
+
+    def test_input_since_a_probe_prevents_b_activation(self):
+        result, _a, b, observed, operations = self._run_a_miss(ticks=iter([100, 101]))
+        self.assertEqual(result["status"], "input_since_last_probe")
+        self.assertEqual(operations, ["construct_a", "probe_a", "close_a"])
+        observed.probe_once.assert_called_once()
+        b.open.assert_not_called()
+
+    def test_failed_a_destruction_or_thread_join_prevents_b_and_recovery(self):
+        for alive, expected in ((False, "window_teardown_failed"),
+                                (True, "window_thread_stop_timeout")):
+            with self.subTest(alive=alive):
+                result, _a, b, observed, operations = self._run_a_miss(
+                    close_ok=False, thread_alive=alive)
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(operations, ["construct_a", "probe_a", "close_a"])
+                observed.probe_once.assert_called_once()
+                b.open.assert_not_called()
+
+    def test_b_window_checks_gate_before_create_show_and_activation(self):
+        for verdicts, shown in (([False], False), ([True, False], False),
+                                ([True, True, False], True)):
+            with self.subTest(verdicts=verdicts):
+                window = guard_diagnostic._OwnedProbeWindow()
+                user32 = SimpleNamespace(
+                    GetForegroundWindow=mock.Mock(return_value=0),
+                    CreateWindowExW=mock.Mock(return_value=66),
+                    SetWindowPos=mock.Mock(return_value=True), SetForegroundWindow=mock.Mock(),
+                    DestroyWindow=mock.Mock(return_value=True))
+                kernel32 = SimpleNamespace(GetModuleHandleW=mock.Mock(return_value=1))
+                with mock.patch.object(win32, "user32", user32), \
+                     mock.patch.object(win32, "kernel32", kernel32):
+                    window._run(activation_gate=lambda _hwnd: verdicts.pop(0))
+                self.assertEqual(window.status, "handoff_unsafe")
+                self.assertEqual(user32.CreateWindowExW.call_count, int(window.hwnd is not None))
+                self.assertEqual(user32.SetWindowPos.called, shown)
+                if shown:
+                    self.assertEqual(user32.SetWindowPos.call_args.args[-1],
+                                     guard_diagnostic.SWP_SHOW_NO_ACTIVATE)
+                user32.SetForegroundWindow.assert_not_called()
+
+    def test_a_close_requires_destroy_success_thread_exit_and_absent_hwnd(self):
+        for destroyed, alive, exists, expected in ((True, False, False, True),
+                                                   (False, False, False, False),
+                                                   (True, True, False, False),
+                                                   (True, False, True, False)):
+            with self.subTest(destroyed=destroyed, alive=alive, exists=exists):
+                window = guard_diagnostic._OwnedProbeWindow()
+                window.hwnd = 55
+                window._destroyed = destroyed
+                window._thread = mock.Mock()
+                window._thread.is_alive.return_value = alive
+                with mock.patch.object(win32, "user32", SimpleNamespace(
+                        IsWindow=mock.Mock(return_value=exists))):
+                    self.assertEqual(window.close(restore=False), expected)
+
+    def test_handoff_close_cannot_reenable_previous_foreground_restoration(self):
+        window = guard_diagnostic._OwnedProbeWindow()
+        window._handoff_window = True
+        window._restore_on_close = False
+        window.close()
+        self.assertFalse(window._restore_on_close)
+
     def test_keyup_only_probe_and_registration_continuity_across_miss_and_recovery(self):
         calls = []
 
@@ -2092,8 +2249,9 @@ class TeardownDiagnosticTests(unittest.TestCase):
         for window in (a, b):
             window.open.return_value = True
             window.focused.return_value = True
-            window._thread = SimpleNamespace(is_alive=lambda: True)
+            window._thread = SimpleNamespace(is_alive=lambda: False)
             window.diagnostics.return_value = {"status": "ready"}
+        a.close.return_value = True
         observed = guard.TeardownDiagnosticObserver()
 
         def probe(_hwnd, _pid, _kind, _focus, recovery=False):
@@ -2105,10 +2263,14 @@ class TeardownDiagnosticTests(unittest.TestCase):
         observed.probe_once = mock.Mock(side_effect=probe)
         observed.start = mock.Mock(return_value=observed)
         observed.stop = mock.Mock()
-        observed.diagnostics = mock.Mock(return_value={"hook_state": {"thread_id": 91}})
+        observed.diagnostics = mock.Mock(return_value={"hook_state": {
+            "keyboard_callbacks": 1, "heartbeat_received": 1}})
         with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
              mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
-             mock.patch.object(guard_diagnostic.win32, "foreground_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.win32, "foreground_context",
+                               return_value={"hwnd": 0, "process_id": 0,
+                                             "gui_status": "no_foreground", "input_desktop": "Default"}), \
+             mock.patch.object(guard_diagnostic.win32, "last_input_tick", return_value=100), \
              mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
              mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])), \
              mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", side_effect=[a, b]), \
@@ -2153,6 +2315,7 @@ class TeardownDiagnosticTests(unittest.TestCase):
             window.focused.return_value = True
             window._thread = SimpleNamespace(is_alive=lambda: False)
             window.diagnostics.return_value = {"status": "ready"}
+        a.close.return_value = True
         a.clear_focus.return_value = True
         observed = guard.TeardownDiagnosticObserver()
         observed._thread_id = 91
@@ -2163,7 +2326,10 @@ class TeardownDiagnosticTests(unittest.TestCase):
         observed.probe_once = mock.Mock(return_value={"status": "observed"})
         with mock.patch.object(guard_diagnostic.win32, "require_windows"), \
              mock.patch.object(guard_diagnostic.win32, "desktop_context", return_value={}), \
-             mock.patch.object(guard_diagnostic.win32, "foreground_context", return_value={}), \
+             mock.patch.object(guard_diagnostic.win32, "foreground_context",
+                               return_value={"hwnd": 0, "process_id": 0,
+                                             "gui_status": "no_foreground", "input_desktop": "Default"}), \
+             mock.patch.object(guard_diagnostic.win32, "last_input_tick", return_value=100), \
              mock.patch.object(guard_diagnostic.run, "preflight_desktop", return_value=[]), \
              mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])), \
              mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", side_effect=[a, b]), \
