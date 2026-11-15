@@ -86,6 +86,58 @@ def remove_tree(path, attempts=10):
     return False
 
 
+def start_input_guard(guard, selected, win32, meta):
+    """For H8, prove the first probe with a focused, message-pumped owned window."""
+    if not any(check.id == "H8" for check in selected):
+        guard.start()
+        return
+
+    from guard import GuardUnavailable
+    from guard_diagnostic import _OwnedProbeWindow, _wait_for_safe_desktop
+
+    startup = meta["guard_startup"]
+    startup["after_banner_desktop_context"] = win32.desktop_context()
+    startup["phase"] = "window_open"
+    window = _OwnedProbeWindow()
+    if not window.open():
+        startup["probe_window"] = window.diagnostics()
+        raise GuardUnavailable(f"H8 owned probe window unavailable: {window.status}")
+    try:
+        startup["phase"] = "focus_and_idle_wait"
+        focus_started = time.monotonic()
+        try:
+            state, problems = _wait_for_safe_desktop(window)
+        finally:
+            startup["focus_wait_elapsed_s"] = round(time.monotonic() - focus_started, 3)
+        startup["focus_wait_state"] = state
+        if state != "ready":
+            startup["focus_wait_problems"] = problems
+            raise GuardUnavailable(f"H8 owned probe window {state}: {'; '.join(problems)}")
+        if not window.focused():
+            raise GuardUnavailable("H8 owned probe window lost focus before guard startup")
+        startup["pre_guard_idle_seconds"] = round(win32.idle_seconds(), 2)
+        startup["pre_guard_desktop_context"] = win32.desktop_context()
+        startup["phase"] = "guard_start"
+        started = time.monotonic()
+        try:
+            guard.start(owned_probe_target=(window.hwnd, os.getpid()))
+        finally:
+            startup["guard_start_elapsed_s"] = round(time.monotonic() - started, 3)
+        diagnostic = guard.diagnostics()
+        hook = diagnostic.get("hook_state", {})
+        startup["first_probe"] = {"probes_seen": diagnostic.get("probes_seen", 0),
+                                  "owned_probe_status": hook.get("owned_probe_status"),
+                                  "owned_probe_messages": hook.get("owned_probe_messages")}
+        if not window.focused():
+            raise GuardUnavailable("H8 owned probe window lost focus during guard startup")
+    finally:
+        window.close()
+        startup["probe_window"] = window.diagnostics()
+    if "window_thread_stop_timeout" in window.restoration or "destroy_failed" in window.restoration:
+        raise GuardUnavailable(f"H8 owned probe window cleanup failed: {window.restoration}")
+    startup["phase"] = "ready"
+
+
 def run_checks(ctx, selected, repeat, lookup, log=print):
     """Run checks until complete, real input, guard loss, or shared startup failure."""
     from guard import GuardUnavailable, UserInput
@@ -224,6 +276,7 @@ def main(argv=None):
     results, aborted = [], ""
     # Include hook/pump state in the actual suite report, where P4 has lost the probe.
     guard = Guard(diagnostic=True)
+    h8_selected = any(check.id == "H8" for check in selected)
     session = None
     try:
         print("Preparing fixtures and the test profile (no input yet)...")
@@ -235,11 +288,17 @@ def main(argv=None):
         restorer.push("restore the clipboard text", lambda: win32.set_clipboard_text(clipboard_before))
         session.install_engine()
         session.install(fetch_model(build, cache / "models"))
+        if h8_selected:
+            meta["guard_startup"] = {"phase": "banner", "banner_shown": not args.no_banner,
+                                     "pre_banner_desktop_context": win32.desktop_context()}
+        banner_started = time.monotonic()
         if not args.no_banner:
             targets.show_banner(BANNER_SECONDS)
+        if h8_selected:
+            meta["guard_startup"]["banner_elapsed_s"] = round(time.monotonic() - banner_started, 3)
         if win32.idle_seconds() < BANNER_SECONDS:
             raise UserInput("input during the start countdown")
-        guard.start()
+        start_input_guard(guard, selected, win32, meta)
         meta["parent_desktop_context"] = win32.desktop_context()
         ctx = Context(build=build, session=session, fixtures=speech, goldens=golden.GoldenStore(), restorer=restorer,
                       guard=guard, out=out, work=work, hotkey=args.hotkey, cache=cache)

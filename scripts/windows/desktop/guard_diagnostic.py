@@ -57,8 +57,8 @@ class _OwnedProbeWindow:
         try:
             self._previous = user32.GetForegroundWindow()
             # EDIT is keyboard-capable. The caption and read-only content tell the owner what to do.
-            instructions = ("Murmur guard diagnostic: Click this window, then leave the mouse "
-                            "and keyboard untouched for 60 seconds")
+            instructions = ("Murmur guard diagnostic: If this window is not focused, click it; "
+                            "then leave the mouse and keyboard untouched for 60 seconds")
             self.hwnd = user32.CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, "EDIT", instructions,
                                                 WS_OVERLAPPEDWINDOW | WS_VISIBLE | ES_READONLY,
                                                 80, 80, 600, 140, None, None,
@@ -178,7 +178,7 @@ def diagnose(seconds):
     if not window.open():
         return {"status": "probe_window_unavailable", "parent_desktop_context": parent_desktop_context,
                 "probe_window": window.diagnostics()}
-    print("Click the Murmur guard diagnostic window, then leave mouse and keyboard untouched for 60 s.",
+    print("If the Murmur guard diagnostic window is not focused, click it; then leave input untouched for 60 s.",
           flush=True)
     state, problems = _wait_for_safe_desktop(window)
     if state != "ready":

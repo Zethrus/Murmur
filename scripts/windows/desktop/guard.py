@@ -554,8 +554,12 @@ class Guard:
                 return
             self.tripped.wait(0.025)
 
-    def start(self):
+    def start(self, owned_probe_target=None):
         win32.require_windows()
+        if owned_probe_target is not None:
+            if not self._diagnostic or self._process is not None:
+                raise ValueError("owned probe target requires a diagnostic guard before startup")
+            self._owned_probe_target = owned_probe_target
         self._started_at = time.monotonic()
         context = multiprocessing.get_context("spawn")
         self._connection, worker_connection = context.Pipe()

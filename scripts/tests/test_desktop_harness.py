@@ -1599,6 +1599,19 @@ class GuardProcessTests(unittest.TestCase):
             finally:
                 spawned.stop()
 
+    def test_owned_probe_target_can_be_set_at_guard_start_after_profile_preparation(self):
+        spawned = guard.Guard(diagnostic=True)
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(guard, "_guard_worker", fake_owned_probe_worker):
+            try:
+                spawned.start(owned_probe_target=(55, 123))
+                self.assertEqual(spawned.diagnostics()["target"], (55, 123))
+            finally:
+                spawned.stop()
+        with mock.patch.object(win32, "require_windows"), \
+             self.assertRaisesRegex(ValueError, "requires a diagnostic guard"):
+            guard.Guard().start(owned_probe_target=(55, 123))
+
     def test_real_input_before_first_probe_aborts_start(self):
         spawned = guard.Guard()
         with mock.patch.object(win32, "require_windows"), \
@@ -1629,6 +1642,70 @@ class GuardProcessTests(unittest.TestCase):
 
 
 class OwnedProbeWindowTests(unittest.TestCase):
+    def test_non_h8_start_uses_original_guard_without_owned_window(self):
+        observer = mock.Mock()
+        with mock.patch.object(guard_diagnostic, "_OwnedProbeWindow") as window_factory:
+            run.start_input_guard(observer, catalog.select("H1"), mock.Mock(), {})
+        observer.start.assert_called_once_with()
+        window_factory.assert_not_called()
+
+    def test_h8_guard_start_keeps_one_guard_through_owned_window_cleanup(self):
+        events = []
+        observer = mock.Mock()
+        observer.start.side_effect = lambda **_kwargs: events.append("guard_start")
+        observer.diagnostics.return_value = {"probes_seen": 1, "hook_state": {
+            "owned_probe_status": "both_hook_callbacks", "owned_probe_messages": [256, 257]}}
+        window = mock.Mock(hwnd=55, restoration="restored")
+        window.open.return_value = True
+        window.focused.return_value = True
+        window.close.side_effect = lambda: events.append("window_close")
+        window.diagnostics.return_value = {"status": "ready", "restoration": "restored"}
+        desktop = SimpleNamespace(desktop_context=lambda: {"thread_desktop": "Default"},
+                                  idle_seconds=lambda: 61.0)
+        meta = {"guard_startup": {"phase": "banner"}}
+        with mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", return_value=window), \
+             mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])) as wait, \
+             mock.patch.object(run.os, "getpid", return_value=123):
+            run.start_input_guard(observer, catalog.select("H8"), desktop, meta)
+        self.assertEqual(events, ["guard_start", "window_close"])
+        wait.assert_called_once_with(window)
+        observer.start.assert_called_once_with(owned_probe_target=(55, 123))
+        observer.stop.assert_not_called()
+        self.assertEqual(meta["guard_startup"]["phase"], "ready")
+        self.assertEqual(meta["guard_startup"]["first_probe"]["probes_seen"], 1)
+
+    def test_h8_guard_start_refuses_lost_focus_without_starting_observer(self):
+        observer = mock.Mock()
+        window = mock.Mock(hwnd=55, restoration="restored")
+        window.open.return_value = True
+        window.focused.return_value = False
+        window.diagnostics.return_value = {"status": "focus_lost"}
+        meta = {"guard_startup": {"phase": "banner"}}
+        with mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", return_value=window), \
+             mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("focus_lost", [])):
+            with self.assertRaisesRegex(guard.GuardUnavailable, "focus_lost"):
+                run.start_input_guard(observer, catalog.select("H8"), mock.Mock(), meta)
+        observer.start.assert_not_called()
+        window.close.assert_called_once_with()
+        self.assertEqual(meta["guard_startup"]["phase"], "focus_and_idle_wait")
+
+    def test_h8_guard_start_fails_closed_if_owned_window_does_not_close(self):
+        observer = mock.Mock()
+        observer.diagnostics.return_value = {"probes_seen": 1}
+        window = mock.Mock(hwnd=55, restoration="window_thread_stop_timeout")
+        window.open.return_value = True
+        window.focused.return_value = True
+        window.diagnostics.return_value = {"restoration": "window_thread_stop_timeout"}
+        meta = {"guard_startup": {"phase": "banner"}}
+        with mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", return_value=window), \
+             mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])):
+            with self.assertRaisesRegex(guard.GuardUnavailable, "cleanup failed"):
+                run.start_input_guard(observer, catalog.select("H8"),
+                                      SimpleNamespace(desktop_context=lambda: {}, idle_seconds=lambda: 61), meta)
+        observer.start.assert_called_once()
+        window.close.assert_called_once_with()
+        self.assertEqual(meta["guard_startup"]["phase"], "guard_start")
+
     def test_window_stays_visible_after_focus_denial_until_user_clicks(self):
         window = guard_diagnostic._OwnedProbeWindow()
         user32 = SimpleNamespace(
@@ -1645,7 +1722,7 @@ class OwnedProbeWindowTests(unittest.TestCase):
             window._run()
         self.assertEqual(window.initial_focus, "denied")
         self.assertEqual(window.status, "ready")
-        self.assertIn("Click this window", user32.CreateWindowExW.call_args.args[2])
+        self.assertIn("If this window is not focused, click it", user32.CreateWindowExW.call_args.args[2])
         self.assertEqual(user32.SetForegroundWindow.call_args_list, [mock.call(55), mock.call(40)])
         user32.DestroyWindow.assert_called_once_with(55)
 
