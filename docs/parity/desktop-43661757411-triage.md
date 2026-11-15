@@ -11,8 +11,9 @@ drag and restart persistence assertions passed; the activity is not an explanati
 | H8 no Alt | Editor UIA focus remained throughout. Before the delivery wait the document already reported 45 characters, but the exact output differed at character 16: `The quick brown ` was followed by spaces. | The focus failure is absent, but the source of text corruption is not yet proven. |
 
 On Windows, enigo 0.2.1 sends a whole string's Unicode key pairs through one `SendInput` call.
-The Windows type path now sends one character at a time, pausing briefly after every eight. This
-is a targeted hypothesis for the no Alt failure, not a native validation result. H8 now saves
+A proposed per-character pacing change was removed during review: separate input calls introduce
+interleaving opportunities before the corruption source is established. The production typing
+path remains unchanged. H8 now saves
 Notepad screenshots before closing either trial and compares the saved document with the exact
 same-utterance history text after close. These readbacks should distinguish a TextPattern artifact
 from visible or persisted corruption while retaining the exact UIA output oracle. No transcript

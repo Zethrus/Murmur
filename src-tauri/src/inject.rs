@@ -510,25 +510,8 @@ impl Injector {
         }
         #[cfg(windows)]
         wait_for_modifiers_released();
-        let mut keyboard =
-            Enigo::new(&Settings::default()).context("Connect keyboard injection")?;
-        #[cfg(windows)]
-        {
-            // enigo 0.2 sends the entire string in one SendInput call on Windows. Windows 11
-            // Notepad's UIA document reported the first 16 characters of a 45-character H8
-            // trial, then spaces. Give the target a chance to process each key pair; the
-            // native H8 screenshot and saved-file readback still decide whether this helps.
-            for (index, character) in text.chars().enumerate() {
-                keyboard
-                    .text(&character.to_string())
-                    .context("Type transcript into focused application")?;
-                if index % 8 == 7 {
-                    thread::sleep(Duration::from_millis(5));
-                }
-            }
-        }
-        #[cfg(not(windows))]
-        keyboard
+        Enigo::new(&Settings::default())
+            .context("Connect keyboard injection")?
             .text(text)
             .context("Type transcript into focused application")?;
         Ok(path)
