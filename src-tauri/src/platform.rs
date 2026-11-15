@@ -157,6 +157,8 @@ pub enum Blocked {
     Unreadable,
     /// Windows: the secure desktop (UAC prompt, lock screen, Ctrl+Alt+Del) has the input.
     SecureDesktop,
+    /// Windows: an Alt hotkey left the target in menu mode; typing would invoke commands.
+    Menu,
 }
 impl Blocked {
     /// Shown with the held transcript.
@@ -171,6 +173,7 @@ impl Blocked {
             Blocked::SecureDesktop => {
                 "Not typed: a Windows security prompt or the lock screen had focus. Copy the text instead."
             }
+            Blocked::Menu => "Not typed: the destination's menu has focus. Select an editor and use Insert here or Copy.",
         }
     }
 }
@@ -351,10 +354,11 @@ fn native_focus() -> Result<Native> {
         if window.is_null() {
             bail!("No foreground window");
         }
-        GetWindowThreadProcessId(window, &mut pid);
+        let thread = GetWindowThreadProcessId(window, &mut pid);
         if pid == 0 {
             bail!("Foreground window has no process");
         }
+        let menu_active = win::menu_active(thread).context("Read foreground menu state")?;
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if process.is_null() {
             return Err(io::Error::last_os_error()).context("Open foreground process");
@@ -381,7 +385,8 @@ fn native_focus() -> Result<Native> {
             pid: Some(pid),
             started,
             class: name,
-            blocked: integrity_block(target_level, own_level),
+            blocked: integrity_block(target_level, own_level)
+                .or(menu_active.then_some(Blocked::Menu)),
         })
     }
 }
@@ -400,7 +405,27 @@ mod win {
             },
             Threading::{GetProcessTimes, OpenProcessToken},
         },
+        UI::WindowsAndMessaging::{
+            GetGUIThreadInfo, GUITHREADINFO, GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
+        },
     };
+    pub fn menu_active(thread: u32) -> std::io::Result<bool> {
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            flags: 0,
+            hwndActive: std::ptr::null_mut(),
+            hwndFocus: std::ptr::null_mut(),
+            hwndCapture: std::ptr::null_mut(),
+            hwndMenuOwner: std::ptr::null_mut(),
+            hwndMoveSize: std::ptr::null_mut(),
+            hwndCaret: std::ptr::null_mut(),
+            rcCaret: unsafe { std::mem::zeroed() },
+        };
+        if unsafe { GetGUIThreadInfo(thread, &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE) != 0)
+    }
     /// Name of the desktop receiving input; `None` when it cannot be opened, which is what a
     /// normal process sees while the secure desktop is up.
     pub fn input_desktop_name() -> Option<String> {
@@ -715,9 +740,9 @@ pub fn init_logging(data: &Path) -> Result<()> {
 }
 fn payload_safe_for_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     let target = metadata.target();
-    // enigo's Windows debug event formats `text(text: <entire transcript>)`.
-    // Its target is outside Murmur, so our own metadata-only transcript logs
-    // cannot prevent this payload from reaching murmur.log.
+    // enigo's debug event can format `text(text: <entire transcript>)` on
+    // supported platforms. Its target is outside Murmur, so our own metadata-only
+    // transcript logs cannot prevent this payload from reaching murmur.log.
     if target == "enigo" || target.starts_with("enigo::") {
         false
     } else if target == "tungstenite"

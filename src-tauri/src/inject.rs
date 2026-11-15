@@ -1,9 +1,127 @@
 use crate::{config::Injection, postproc::Style};
 use anyhow::{bail, Context, Result};
-use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+#[cfg(not(any(target_os = "linux", windows)))]
+use enigo::{Direction, Key};
+#[cfg(not(windows))]
+use enigo::{Enigo, Keyboard, Settings};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 use std::{thread, time::Duration};
+
+/// The selected destination stopped accepting input. `sent_chars` is the number of characters
+/// submitted before the check failed; the target may have processed fewer of them.
+#[derive(Debug)]
+pub struct TargetChanged {
+    pub sent_chars: usize,
+}
+impl std::fmt::Display for TargetChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Delivery target changed after {} characters were submitted",
+            self.sent_chars
+        )
+    }
+}
+impl std::error::Error for TargetChanged {}
+
+#[cfg(any(windows, test))]
+fn utf16_pairs(ch: char) -> Vec<(u16, u16)> {
+    let mut units = [0; 2];
+    ch.encode_utf16(&mut units)
+        .iter()
+        .map(|&unit| (unit, unit))
+        .collect()
+}
+
+#[cfg(any(windows, test))]
+fn guarded_chars(
+    text: &str,
+    mut still_target: impl FnMut() -> Result<bool>,
+    mut send: impl FnMut(char) -> Result<()>,
+    mut pause: impl FnMut(),
+) -> Result<()> {
+    for (index, ch) in text.chars().enumerate() {
+        if !still_target().unwrap_or(false) {
+            return Err(TargetChanged { sent_chars: index }.into());
+        }
+        send(ch)?;
+        pause();
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+mod win_input {
+    use super::*;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+        VK_CONTROL, VK_RETURN, VK_SHIFT, VK_TAB, VK_V,
+    };
+
+    fn key(vk: u16, scan: u16, flags: u32) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+    fn send(events: &[INPUT]) -> Result<()> {
+        let sent = unsafe {
+            SendInput(
+                events.len() as u32,
+                events.as_ptr(),
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+        if sent != events.len() as u32 {
+            bail!(
+                "SendInput submitted {sent} of {} keyboard events",
+                events.len()
+            );
+        }
+        Ok(())
+    }
+    pub fn character(ch: char) -> Result<()> {
+        if ch == '\0' {
+            bail!("Transcript contains a NUL character");
+        }
+        let mut events = Vec::with_capacity(4);
+        if let Some(vk) = match ch {
+            '\n' => Some(VK_RETURN),
+            '\t' => Some(VK_TAB),
+            _ => None,
+        } {
+            events.push(key(vk, 0, 0));
+            events.push(key(vk, 0, KEYEVENTF_KEYUP));
+        } else {
+            for (down, up) in utf16_pairs(ch) {
+                events.push(key(0, down, KEYEVENTF_UNICODE));
+                events.push(key(0, up, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+            }
+        }
+        send(&events)
+    }
+    pub fn paste(shift: bool) -> Result<()> {
+        let mut events = vec![key(VK_CONTROL, 0, 0)];
+        if shift {
+            events.push(key(VK_SHIFT, 0, 0));
+        }
+        events.extend([key(VK_V, 0, 0), key(VK_V, 0, KEYEVENTF_KEYUP)]);
+        if shift {
+            events.push(key(VK_SHIFT, 0, KEYEVENTF_KEYUP));
+        }
+        events.push(key(VK_CONTROL, 0, KEYEVENTF_KEYUP));
+        send(&events)
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum InjectionPath {
@@ -99,7 +217,7 @@ fn modifiers_held() -> bool {
 #[cfg(target_os = "linux")]
 fn release_modifiers() {
     use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{ConnectionExt as _, KEY_RELEASE_EVENT};
+    use x11rb::protocol::xproto::KEY_RELEASE_EVENT;
     use x11rb::protocol::xtest::ConnectionExt as _;
     const CONTROL_L: u8 = 37;
     const ALT_L: u8 = 64;
@@ -145,15 +263,17 @@ fn wait_until_released(
 /// Ctrl+Alt is still physically down can even fire the dictation hotkey again. Bounded at 600 ms
 /// so a stuck modifier cannot stall typing.
 #[cfg(any(target_os = "linux", windows))]
-fn wait_for_modifiers_released() {
-    if !wait_until_released(
+fn wait_for_modifiers_released() -> bool {
+    let released = wait_until_released(
         modifiers_held,
         thread::sleep,
         MODIFIER_PROBES,
         MODIFIER_STEP,
-    ) {
-        tracing::info!("Modifier keys still held after 600 ms; typing anyway");
+    );
+    if !released {
+        tracing::info!("Modifier keys still held after 600 ms");
     }
+    released
 }
 /// Windows: Control, Alt, Shift or either Windows key physically down. GetAsyncKeyState reads the
 /// asynchronous key state (high bit = down now), the same source global-hotkey polls to report
@@ -458,6 +578,7 @@ impl Injector {
         cfg: &Injection,
         focused: &str,
         style: Style,
+        mut still_target: impl FnMut() -> Result<bool>,
     ) -> Result<InjectionPath> {
         let safe = safe_text(text, focused);
         let text = safe.as_str();
@@ -466,7 +587,7 @@ impl Injector {
             return Ok(path);
         }
         if path == InjectionPath::Type {
-            return self.type_text(text, path, focused);
+            return self.type_text(text, path, focused, &mut still_target);
         }
         if self.clipboard.is_none() {
             self.clipboard = Some(arboard::Clipboard::new().context("Open clipboard")?);
@@ -487,14 +608,29 @@ impl Injector {
         }
         #[cfg(target_os = "linux")]
         let sent = xdotool_chord(is_terminal(focused));
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        let sent = (|| {
+            if !wait_for_modifiers_released() || !still_target().unwrap_or(false) {
+                return Err(TargetChanged { sent_chars: 0 }.into());
+            }
+            win_input::paste(is_terminal(focused))
+        })();
+        #[cfg(not(any(target_os = "linux", windows)))]
         let sent = Self::paste_with_enigo(focused);
         thread::sleep(Duration::from_millis(350));
         Self::restore(clipboard, previous, text);
         sent?;
         Ok(path)
     }
-    fn type_text(&self, text: &str, path: InjectionPath, focused: &str) -> Result<InjectionPath> {
+    fn type_text(
+        &self,
+        text: &str,
+        path: InjectionPath,
+        focused: &str,
+        mut still_target: impl FnMut() -> Result<bool>,
+    ) -> Result<InjectionPath> {
+        #[cfg(windows)]
+        let _ = focused;
         #[cfg(target_os = "linux")]
         {
             match xdotool_type(text, focused) {
@@ -509,11 +645,23 @@ impl Injector {
             }
         }
         #[cfg(windows)]
-        wait_for_modifiers_released();
-        Enigo::new(&Settings::default())
-            .context("Connect keyboard injection")?
-            .text(text)
-            .context("Type transcript into focused application")?;
+        {
+            if !wait_for_modifiers_released() {
+                return Err(TargetChanged { sent_chars: 0 }.into());
+            }
+            guarded_chars(text, &mut still_target, win_input::character, || {
+                thread::sleep(Duration::from_millis(12))
+            })
+            .context("Type transcript into selected application")?;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = &mut still_target;
+            Enigo::new(&Settings::default())
+                .context("Connect keyboard injection")?
+                .text(text)
+                .context("Type transcript into focused application")?;
+        }
         Ok(path)
     }
     fn restore(clipboard: &mut arboard::Clipboard, previous: Option<String>, text: &str) {
@@ -526,10 +674,8 @@ impl Injector {
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     fn paste_with_enigo(focused: &str) -> Result<()> {
-        #[cfg(windows)]
-        wait_for_modifiers_released();
         let mut keyboard = Enigo::new(&Settings::default()).context("Connect paste keyboard")?;
         keyboard
             .key(Key::Control, Direction::Press)
@@ -560,6 +706,64 @@ impl Injector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unicode_key_pairs_keep_each_key_up_with_its_own_unit() {
+        assert_eq!(utf16_pairs('é'), vec![(0x00e9, 0x00e9)]);
+        assert_eq!(utf16_pairs('😀'), vec![(0xd83d, 0xd83d), (0xde00, 0xde00)]);
+    }
+    #[test]
+    fn guarded_typing_stops_before_destination_changes() {
+        let mut sent = String::new();
+        let mut probes = 0;
+        let error = guarded_chars(
+            "Aé😀Z",
+            || {
+                probes += 1;
+                Ok(probes <= 2)
+            },
+            |ch| {
+                sent.push(ch);
+                Ok(())
+            },
+            || {},
+        )
+        .context("Type transcript into selected application")
+        .unwrap_err();
+        assert_eq!(sent, "Aé");
+        assert_eq!(error.downcast_ref::<TargetChanged>().unwrap().sent_chars, 2);
+        assert_eq!(probes, 3);
+    }
+    #[test]
+    fn unreadable_destination_does_not_submit_a_character() {
+        let mut sent = String::new();
+        let error = guarded_chars(
+            "text",
+            || anyhow::bail!("focus unavailable"),
+            |ch| {
+                sent.push(ch);
+                Ok(())
+            },
+            || {},
+        )
+        .unwrap_err();
+        assert!(sent.is_empty());
+        assert_eq!(error.downcast_ref::<TargetChanged>().unwrap().sent_chars, 0);
+    }
+    #[test]
+    fn guarded_typing_preserves_exact_unicode_text() {
+        let mut sent = String::new();
+        guarded_chars(
+            "café 日本語 😀\n",
+            || Ok(true),
+            |ch| {
+                sent.push(ch);
+                Ok(())
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(sent, "café 日本語 😀\n");
+    }
     #[test]
     fn auto_paths() {
         let c = Injection::default();

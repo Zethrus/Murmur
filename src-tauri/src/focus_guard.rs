@@ -299,6 +299,7 @@ mod tests {
             Blocked::Elevated,
             Blocked::Unreadable,
             Blocked::SecureDesktop,
+            Blocked::Menu,
         ] {
             let target = blocked(reason);
             // Dictation started and ended in the same elevated window: still held.
