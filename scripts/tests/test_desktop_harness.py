@@ -116,6 +116,7 @@ class ImportTests(unittest.TestCase):
     def test_notepad_focus_while_hotkey_held_targets_editor_without_click(self):
         pad = targets.Notepad.__new__(targets.Notepad)
         pad.hwnd = 42
+        pad.owned_tab = False
         document = SimpleNamespace(SetFocus=mock.Mock())
         pad.document = mock.Mock(return_value=document)
         pad.uia = SimpleNamespace(center=lambda _: (100, 200), focused=lambda: document,
@@ -165,7 +166,7 @@ class ImportTests(unittest.TestCase):
         session = SimpleNamespace(ensure=mock.Mock(), wait_state=mock.Mock(return_value=True),
                                   overlay_state=lambda: "done")
         ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
-                              notepad=lambda _: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
+                              notepad=lambda *_, **__: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
                               observed_text=lambda: "full", settle=mock.Mock(),
                               guard=SimpleNamespace(start_key_trace=mock.Mock(),
                                                     stop_key_trace=lambda: {"events": [], "overflow": False}))
@@ -192,7 +193,7 @@ class ImportTests(unittest.TestCase):
         pad = SimpleNamespace(focus=mock.Mock(), wait_text=mock.Mock(return_value="corrupt"))
         guard_check = mock.Mock()
         guard_state = mock.Mock(side_effect=[{"probes_seen": 3}, {"probes_seen": 5}])
-        ctx = SimpleNamespace(notepad=lambda _: pad,
+        ctx = SimpleNamespace(notepad=lambda *_, **__: pad,
                               guard=SimpleNamespace(check=guard_check, diagnostics=guard_state,
                                                     start_key_trace=mock.Mock(),
                                                     stop_key_trace=lambda: {"events": [], "overflow": False}),
@@ -218,7 +219,7 @@ class ImportTests(unittest.TestCase):
         session = SimpleNamespace(ensure=mock.Mock(), wait_state=mock.Mock(return_value=True),
                                   overlay_state=lambda: "held")
         ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
-                              notepad=lambda _: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
+                              notepad=lambda *_, **__: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
                               observed_text=mock.Mock(side_effect=OutputCount(0)), settle=mock.Mock(),
                               guard=SimpleNamespace(start_key_trace=mock.Mock(),
                                                     stop_key_trace=lambda: {"events": [], "overflow": False}))
@@ -248,7 +249,8 @@ class ImportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             paths = [Path(directory) / f"{name}.txt" for name in ("control", "alt", "no-alt")]
             pads = [SimpleNamespace(hwnd=number, path=path,
-                                    close=mock.Mock(side_effect=lambda path=path, number=number:
+                                    text=lambda number=number: "partial" if number == 2 else "full",
+                                    save_owned=mock.Mock(side_effect=lambda path=path, number=number:
                                                     path.write_text("partial" if number == 2 else "full")))
                     for number, path in enumerate(paths, 1)]
             screenshot = mock.Mock(return_value=Path(directory) / "screenshot.png")
@@ -264,7 +266,7 @@ class ImportTests(unittest.TestCase):
                 with self.assertRaisesRegex(Fail, "alt: wrong text"):
                     hotkey_checks.h8_focus_phases(ctx)
             self.assertEqual(trial.call_count, 2)
-            self.assertEqual([pad.close.call_count for pad in pads], [1, 1, 1])
+            self.assertEqual([pad.save_owned.call_count for pad in pads], [1, 1, 1])
             self.assertEqual(screenshot.call_args_list,
                              [mock.call(1, "control-notepad.png"), mock.call(2, "alt-notepad.png"),
                               mock.call(3, "no-alt-notepad.png")])
@@ -286,8 +288,8 @@ class ImportTests(unittest.TestCase):
             # Pin the fixture to 2000 so a fast Windows rewrite still changes its mtime.
             os.utime(path, (946684800, 946684800))
             saved_bytes = b"\xef\xbb\xbfcaf\xc3\xa9\r\n"
-            pad = SimpleNamespace(hwnd=42, path=path,
-                                  close=mock.Mock(side_effect=lambda: path.write_bytes(saved_bytes)))
+            pad = SimpleNamespace(hwnd=42, path=path, text=lambda: "café\r\n",
+                                  save_owned=mock.Mock(side_effect=lambda: path.write_bytes(saved_bytes)))
             ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix,
                                   screenshot=mock.Mock(), murmur=SimpleNamespace(log=lambda: ""))
             result = {"saved_file_difference": None, "saved_file_error": None}
@@ -295,12 +297,15 @@ class ImportTests(unittest.TestCase):
             self.assertEqual((Path(directory) / "control-saved.txt").read_bytes(), saved_bytes)
             self.assertIsNone(result["saved_file_difference"])
             self.assertTrue(result["saved_file_updated"])
+            self.assertIsNone(result["capture_difference"])
+            pad.save_owned.assert_called_once_with()
             ctx.screenshot.assert_called_once_with(42, "control-notepad.png")
 
     def test_hotkey_probe_records_held_refusal_and_still_runs_non_alt(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = [Path(directory) / f"{name}.txt" for name in ("control", "alt", "no-alt")]
-            pads = [SimpleNamespace(hwnd=i, path=path, close=mock.Mock(side_effect=lambda p=path, i=i:
+            pads = [SimpleNamespace(hwnd=i, path=path, text=lambda: "full",
+                                    save_owned=mock.Mock(side_effect=lambda p=path, i=i:
                                      p.write_text("" if i == 2 else "full")))
                     for i, path in enumerate(paths, 1)]
             ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix,
@@ -319,6 +324,156 @@ class ImportTests(unittest.TestCase):
             evidence = json.loads((Path(directory) / "focus-phases.json").read_text())
             self.assertEqual(evidence["alt"]["observation"]["status"], "held_refused")
             self.assertIn("no-alt", evidence)
+
+    def test_h8_keeps_three_owned_tabs_through_ensure_and_captures_each_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unrelated = root / "unrelated.txt"
+            unrelated.write_text("keep me", encoding="utf-8")
+            events, calls, pads = [], [], {}
+            restorer = restore.Restorer(log=lambda _: None)
+            actuals = {"control": hotkey_checks.DIRECT_CONTROL, "alt": "wrong", "no-alt": "full"}
+
+            def notepad(name, *, reuse_hwnd=None, owned_tab=False):
+                calls.append((name, reuse_hwnd, owned_tab))
+                events.append(f"open {name}")
+                path = root / f"{name}.txt"
+                path.write_bytes(b"")
+                os.utime(path, (946684800, 946684800))
+
+                def wait_text(**_):
+                    events.append(f"wait {name}")
+                    return actuals[name]
+
+                pad = SimpleNamespace(hwnd=101, path=path,
+                                      focus=lambda: events.append(f"focus {name}"),
+                                      wait_text=wait_text,
+                                      text=lambda: events.append(f"read {name}") or actuals[name])
+
+                def save():
+                    events.append(f"save {name}")
+                    path.write_bytes(actuals[name].encode("utf-8"))
+
+                pad.save_owned = save
+                restorer.push(f"close {name}", lambda: events.append(f"close {name}"))
+                pads[name] = pad
+                return pad
+
+            session = SimpleNamespace(ensure=lambda *_, **__: events.append("ensure"),
+                                      wait_state=lambda *_: True, overlay_state=lambda: "done", log=lambda: "")
+            ctx = SimpleNamespace(artifact=lambda suffix: root / suffix, screenshot=mock.Mock(),
+                                  murmur=session, notepad=notepad, restorer=restorer,
+                                  fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
+                                  observe_delivery=lambda _: None, observed_text=lambda: "full",
+                                  settle=lambda: None, sleep=lambda _: None,
+                                  guard=SimpleNamespace(check=lambda: None,
+                                                        diagnostics=lambda: {"probes_seen": 1},
+                                                        start_key_trace=lambda: None,
+                                                        stop_key_trace=lambda: {"events": [], "overflow": False}))
+            with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
+                 mock.patch.object(win32, "keys_down", return_value=[]), \
+                 mock.patch.object(win32, "type_unicode"), mock.patch.object(win32, "key_down"), \
+                 mock.patch.object(win32, "key_up"), mock.patch.object(win32, "release_all"):
+                with self.assertRaisesRegex(Fail, "alt: differs at character"):
+                    hotkey_checks.h8_focus_phases(ctx)
+
+            self.assertEqual(calls, [("control", None, True), ("alt", 101, True), ("no-alt", 101, True)])
+            for name in actuals:
+                self.assertLess(events.index(f"wait {name}"), events.index(f"read {name}"))
+                self.assertLess(events.index(f"read {name}"), events.index(f"save {name}"))
+            ensures = [index for index, event in enumerate(events) if event == "ensure"]
+            self.assertEqual(len(ensures), 2)
+            self.assertLess(events.index("save control"), ensures[0])
+            self.assertLess(ensures[0], events.index("open alt"))
+            self.assertLess(events.index("focus alt"), events.index("wait alt"))
+            self.assertLess(events.index("save alt"), ensures[1])
+            self.assertLess(ensures[1], events.index("open no-alt"))
+            self.assertLess(events.index("focus no-alt"), events.index("wait no-alt"))
+            self.assertFalse(any(event.startswith("close ") for event in events))
+            self.assertEqual([(root / f"{name}-saved.txt").read_bytes() for name in actuals],
+                             [hotkey_checks.DIRECT_CONTROL.encode("utf-8"), b"wrong", b"full"])
+            evidence = json.loads((root / "focus-phases.json").read_text())
+            self.assertIsNone(evidence["control"]["capture_difference"])
+            self.assertIn("differs at character", evidence["alt"]["capture_difference"])
+            self.assertIn("differs at character", evidence["alt"]["saved_file_difference"])
+            self.assertEqual(restorer.restore_all(), [])
+            self.assertEqual(events[-3:], ["close no-alt", "close alt", "close control"])
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
+
+    def test_notepad_h8_reuses_only_named_owned_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pad = targets.Notepad(directory, "H8-alt")
+            pad.win32 = SimpleNamespace(find_windows=lambda **_: [42],
+                                        window_text=lambda _: "notepad-H8-alt.txt - Notepad",
+                                        is_window=lambda _: True, window_pid=lambda _: 7,
+                                        wait_for=lambda predicate, _: predicate())
+            with mock.patch.object(targets.subprocess, "Popen"):
+                self.assertIs(pad.start(reuse_hwnd=42, owned_tab=True), pad)
+                self.assertTrue(pad.active_document())
+                with self.assertRaisesRegex(RuntimeError, "Notepad did not open"):
+                    targets.Notepad.start(pad, reuse_hwnd=99, owned_tab=True)
+                pad.win32.window_text = lambda _: "notepad-H8-control.txt - Notepad"
+                with self.assertRaisesRegex(RuntimeError, "Notepad did not open"):
+                    targets.Notepad.start(pad, reuse_hwnd=42, owned_tab=True)
+
+    def test_h8_context_registers_tab_cleanup_instead_of_window_close(self):
+        ctx = Context.__new__(Context)
+        ctx.work, ctx.check_id = Path("work"), "H8"
+        ctx.restorer = restore.Restorer(log=lambda _: None)
+        pad = SimpleNamespace(path=Path("notepad-H8-alt.txt"), close=mock.Mock(),
+                              close_owned=mock.Mock())
+        pad.start = mock.Mock(return_value=pad)
+        with mock.patch.object(targets, "Notepad", return_value=pad) as create:
+            self.assertIs(ctx.notepad("alt", reuse_hwnd=42, owned_tab=True), pad)
+        create.assert_called_once_with(Path("work"), "H8-alt")
+        pad.start.assert_called_once_with(reuse_hwnd=42, owned_tab=True)
+        self.assertEqual(ctx.restorer.restore_all(), [])
+        pad.close_owned.assert_called_once_with()
+        pad.close.assert_not_called()
+
+    def test_notepad_h8_cleanup_closes_only_verified_tab(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unrelated = Path(directory) / "unrelated.txt"
+            unrelated.write_text("keep me", encoding="utf-8")
+            pad = targets.Notepad(directory, "H8-alt")
+            pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+            state = {"title": "unrelated.txt - Notepad", "open": True}
+            actions = []
+
+            def tap(*keys):
+                actions.append(keys)
+                if keys == ("ctrl", "tab"):
+                    state["title"] = "notepad-H8-alt.txt - Notepad"
+                elif keys == ("ctrl", "w"):
+                    state["open"] = False
+
+            pad.win32 = SimpleNamespace(is_window=lambda _: state["open"],
+                                        window_text=lambda _: state["title"],
+                                        window_pid=lambda _: 7,
+                                        activate=lambda _: True, tap=tap,
+                                        wait_for=lambda predicate, _: predicate())
+            pad.close_owned()
+            self.assertEqual(actions, [("ctrl", "tab"), ("ctrl", "w")])
+            self.assertEqual(pad.hwnd, 0)
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
+
+            pad.hwnd, state["open"], state["title"] = 42, True, "unrelated.txt - Notepad"
+            pad.win32.tap = lambda *keys: actions.append(keys)
+            with self.assertRaisesRegex(RuntimeError, "Could not locate owned Notepad tab"):
+                pad.close_owned()
+            self.assertNotIn(("ctrl", "w"), actions[2:])
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
+
+            pad.document = mock.Mock()
+            with self.assertRaisesRegex(RuntimeError, "active tab is not"):
+                pad.focus()
+            pad.document.assert_not_called()
+
+            pad.win32.window_pid = lambda _: 8
+            pad.win32.activate = mock.Mock()
+            with self.assertRaisesRegex(RuntimeError, "window ownership changed"):
+                pad.close_owned()
+            pad.win32.activate.assert_not_called()
 
     def test_overlay_focus_check_refuses_to_blame_click_when_editor_already_lost_focus(self):
         from checks import overlay as checks_overlay

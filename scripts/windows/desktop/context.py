@@ -94,10 +94,11 @@ class Context:
         self._targets.append(app)
         return app
 
-    def notepad(self, name="doc"):
+    def notepad(self, name="doc", *, reuse_hwnd=None, owned_tab=False):
         import targets
-        pad = targets.Notepad(self.work, f"{self.check_id}-{name}").start()
-        self.restorer.push(f"close Notepad {pad.path.name}", pad.close)
+        pad = targets.Notepad(self.work, f"{self.check_id}-{name}").start(
+            reuse_hwnd=reuse_hwnd, owned_tab=owned_tab)
+        self.restorer.push(f"close Notepad {pad.path.name}", pad.close_owned if owned_tab else pad.close)
         return pad
 
     def clipboard_guard(self):

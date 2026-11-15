@@ -80,12 +80,12 @@ def _focus_phase(pad, stage):
             "f9_down": "f9" in win32.keys_down(("f9",))}
 
 
-def _notepad_focus_trial(ctx, spec, name, phases):
+def _notepad_focus_trial(ctx, spec, name, phases, previous_hwnd=None):
     mark = getattr(ctx.guard, "mark", lambda _stage: None)
     mark(f"H8:{name}:ensure-begin")
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"general": {"hotkey": spec}})
     mark(f"H8:{name}:ensure-complete")
-    pad = ctx.notepad(name)
+    pad = ctx.notepad(name, reuse_hwnd=previous_hwnd, owned_tab=True)
     pad.focus()
     sample = lambda stage: phases.append(_focus_phase(pad, stage))
     modifiers, key = win32.parse_combo(spec)
@@ -137,7 +137,7 @@ def _notepad_focus_trial(ctx, spec, name, phases):
 
 def _notepad_direct_control(ctx, phases):
     """Same guarded Unicode sender into a fresh plain document, without hotkey or inference."""
-    pad = ctx.notepad("control")
+    pad = ctx.notepad("control", owned_tab=True)
     pad.focus()
     ctx.guard.check()
     if win32.keys_down():
@@ -160,13 +160,16 @@ def _notepad_direct_control(ctx, phases):
 
 
 def _capture_notepad_trial(ctx, name, result, pad, expected):
-    """Capture the untouched UIA verdict, then save and copy this owned fixture file."""
+    """Capture the settled document and exact file bytes without closing its tab."""
     ctx.screenshot(pad.hwnd, f"{name}-notepad.png")
+    captured = pad.text()
+    result["capture_difference"] = golden.compare(expected, captured) if expected is not None else None
+    result["capture_chars"] = len(captured)
     try:
         before_save = pad.path.stat().st_mtime_ns
     except OSError:
         before_save = None
-    pad.close()
+    pad.save_owned()
     try:
         after_save = pad.path.stat().st_mtime_ns
         result["saved_file_updated"] = before_save != after_save
@@ -182,15 +185,16 @@ def _capture_notepad_trial(ctx, name, result, pad, expected):
 
 
 def h8_focus_phases(ctx):
-    """Opt-in direct-input and Alt/non-Alt comparison with exact history and file oracles."""
+    """Opt-in comparison; keep each owned fixture through the next ensure and target focus."""
     results = {}
     artifact = ctx.artifact("focus-phases.json")
+    previous_hwnd = None
     try:
         for name, spec in (("control", None), ("alt", "Ctrl+Alt+Shift+F9"),
                            ("no-alt", SHIFT_HOTKEY)):
             log_start = len(ctx.murmur.log()) if name != "control" else 0
             results[name] = {"hotkey": spec, "phases": [], "difference": None,
-                             "saved_file_difference": None, "saved_file_updated": None,
+                             "capture_difference": None, "saved_file_difference": None, "saved_file_updated": None,
                              "saved_file_error": None, "saved_file_artifact": None}
             try:
                 if name == "control":
@@ -198,7 +202,7 @@ def h8_focus_phases(ctx):
                         ctx, results[name]["phases"])
                 else:
                     pad, difference, expected, observation = _notepad_focus_trial(
-                        ctx, spec, name, results[name]["phases"])
+                        ctx, spec, name, results[name]["phases"], previous_hwnd)
                 results[name]["observation"] = observation
                 results[name]["difference"] = difference
             finally:
@@ -207,10 +211,12 @@ def h8_focus_phases(ctx):
                     log_artifact.write_text(ctx.murmur.log()[log_start:], encoding="utf-8")
                     results[name]["app_log_artifact"] = log_artifact.name
             _capture_notepad_trial(ctx, name, results[name], pad, expected)
+            previous_hwnd = pad.hwnd
     finally:
         artifact.write_text(json.dumps(results, indent=2), encoding="utf-8")
     differences = [f"{name}: {reason}" for name, result in results.items()
                    for reason in (result.get("observation", {}).get("output_error"), result["difference"],
+                                  result["capture_difference"],
                                   result["saved_file_difference"], result["saved_file_error"])
                    if reason]
     if differences:

@@ -246,15 +246,31 @@ class Notepad:
         self.win32, self.uia = win32, uia
         self.path = Path(win32.long_path(str(Path(work) / f"notepad-{name}.txt")))
         self.hwnd = 0
+        self.owner_pid = 0
+        self.owned_tab = False
 
-    def start(self, timeout=20):
+    def _title_is_document(self, title):
+        title = title.lower().lstrip("*● ")
+        return title.startswith(self.path.name.lower() + " - ") or title.startswith(self.path.stem.lower() + " - ")
+
+    def active_document(self):
+        """The active tab's window title names this fixture, not another open document."""
+        return (bool(self.hwnd) and self.win32.is_window(self.hwnd) and
+                (not self.owned_tab or self.win32.window_pid(self.hwnd) == self.owner_pid) and
+                self._title_is_document(self.win32.window_text(self.hwnd)))
+
+    def start(self, timeout=20, reuse_hwnd=None, owned_tab=False):
+        self.owned_tab = owned_tab
         self.path.write_text("", encoding="utf-8")
         before = set(self.win32.find_windows(contains="Notepad"))
         subprocess.Popen(["notepad.exe", str(self.path)])
         self.hwnd = self.win32.wait_for(
-            lambda: next((h for h in self.win32.find_windows(contains=self.path.stem) if h not in before), None), timeout)
+            lambda: next((h for h in self.win32.find_windows(contains=self.path.stem)
+                          if (h not in before or h == reuse_hwnd) and
+                          (not owned_tab or self._title_is_document(self.win32.window_text(h)))), None), timeout)
         if not self.hwnd:
             raise RuntimeError("Notepad did not open")
+        self.owner_pid = self.win32.window_pid(self.hwnd)
         return self
 
     # Shift+click would extend Notepad's selection from the caret, and the next typed character
@@ -265,6 +281,8 @@ class Notepad:
         return self.uia.document_element(self.uia.from_handle(self.hwnd), timeout=5)
 
     def focus(self, click=True):
+        if self.owned_tab and not self.active_document():
+            raise RuntimeError(f"Notepad active tab is not {self.path.name}")
         document = self.document()
         point = self.uia.center(document)
         self.win32.activate(self.hwnd, click_at=None if not click else point)
@@ -278,6 +296,36 @@ class Notepad:
             raise RuntimeError("Could not focus Notepad")
         if not self.editor_focused(document):
             raise RuntimeError(f"Notepad foreground is active but editor focus is {self.uia.describe(self.uia.focused())}")
+        if self.owned_tab and not self.active_document():
+            raise RuntimeError(f"Notepad switched away from {self.path.name}")
+
+    def save_owned(self):
+        """Save the settled H8 document while keeping its tab and window alive."""
+        if not self.owned_tab:
+            raise RuntimeError("Not an H8 owned Notepad tab")
+        self.focus()
+        self.win32.tap("ctrl", "s")
+        time.sleep(0.8)
+
+    def close_owned(self):
+        """Close only this H8 tab; never close a shared window or an unverified tab."""
+        if not self.hwnd or not self.win32.is_window(self.hwnd):
+            self.hwnd = 0
+            return
+        if self.win32.window_pid(self.hwnd) != self.owner_pid:
+            raise RuntimeError(f"Notepad window ownership changed for {self.path.name}")
+        if not self.win32.activate(self.hwnd):
+            raise RuntimeError(f"Could not activate Notepad for {self.path.name}")
+        for _ in range(8):
+            if self.active_document():
+                self.win32.tap("ctrl", "w")
+                if not self.win32.wait_for(lambda: not self.win32.is_window(self.hwnd) or
+                                           not self.active_document(), 5):
+                    raise RuntimeError(f"Notepad did not close {self.path.name}")
+                self.hwnd = 0
+                return
+            self.win32.tap("ctrl", "tab")
+        raise RuntimeError(f"Could not locate owned Notepad tab {self.path.name}")
 
     def editor_focused(self, document=None):
         document = document or self.document()
