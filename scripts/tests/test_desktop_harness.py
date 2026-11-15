@@ -3,6 +3,7 @@ from contextlib import closing
 import hashlib
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import re
 import shutil
@@ -282,6 +283,8 @@ class ImportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "notepad.txt"
             path.write_bytes(b"")
+            # Pin the fixture to 2000 so a fast Windows rewrite still changes its mtime.
+            os.utime(path, (946684800, 946684800))
             saved_bytes = b"\xef\xbb\xbfcaf\xc3\xa9\r\n"
             pad = SimpleNamespace(hwnd=42, path=path,
                                   close=mock.Mock(side_effect=lambda: path.write_bytes(saved_bytes)))
