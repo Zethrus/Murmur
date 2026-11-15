@@ -1047,6 +1047,23 @@ class RunnerTests(unittest.TestCase):
                 session._wait_for_window(lambda: 0, "Settings window")
         self.assertIs(raised.exception.session, session)
 
+    def test_restart_marks_boundary_and_stays_fail_closed(self):
+        stages = []
+
+        def sleep(_seconds):
+            stages.append("guard-sleep")
+            raise guard.GuardUnavailable("probe lost")
+
+        session = murmur.MurmurSession.__new__(murmur.MurmurSession)
+        session.guard = SimpleNamespace(mark=stages.append, sleep=sleep)
+        session.stop = mock.Mock(side_effect=lambda: stages.append("stop"))
+        session.launch = mock.Mock()
+        with self.assertRaises(guard.GuardUnavailable):
+            session.restart()
+        self.assertEqual(stages, ["Murmur:restart-stop-begin", "stop",
+                                  "Murmur:restart-stop-complete", "guard-sleep"])
+        session.launch.assert_not_called()
+
     def test_launch_env_requests_backtrace_in_the_isolated_profile(self):
         session = murmur.MurmurSession(SimpleNamespace(certificate=self.work / "ci.asc"), self.work,
                                        SimpleNamespace(), {})
@@ -1355,6 +1372,42 @@ class GuardMouseTests(unittest.TestCase):
         with self.assertRaises(guard.GuardUnavailable):
             watcher.check()
         self.assertEqual(watcher.probes_seen, 0)
+
+    def test_missed_probe_records_hook_and_post_send_pump_state(self):
+        watcher = guard._HookObserver(diagnostic=True)
+        watcher._keyboard_callbacks = 26
+        watcher._last_keyboard_callback_at = guard.time.monotonic()
+        watcher._thread = SimpleNamespace(is_alive=lambda: True)
+        order = []
+
+        def send(_tag):
+            order.append("send")
+            return True
+
+        def heartbeat():
+            order.append("heartbeat")
+            watcher._heartbeat_posted += 1
+            watcher._heartbeat_received += 1
+            watcher._last_heartbeat_at = guard.time.monotonic()
+
+        with mock.patch.object(guard, "PROBE_TIMEOUT", 0.001), \
+             mock.patch.object(watcher, "_send_mouse_probe"), \
+             mock.patch.object(watcher, "_send_probe", side_effect=send), \
+             mock.patch.object(watcher, "_post_heartbeat", side_effect=heartbeat), \
+             mock.patch.object(win32, "input_desktop", return_value="Default"):
+            watcher._watch()
+            state = watcher.diagnostics()["hook_state"]["missed_probe"]
+        self.assertEqual(order, ["send", "heartbeat"])
+        self.assertEqual(state["sequence"], 1)
+        self.assertEqual(state["keyboard_callbacks_before_send"], 26)
+        self.assertEqual(state["keyboard_callbacks_at_timeout"], 26)
+        self.assertEqual(state["heartbeat_posted_at_timeout"], 1)
+        self.assertEqual(state["heartbeat_received_at_timeout"], 1)
+        self.assertTrue(state["hook_thread_alive"])
+        self.assertIsInstance(state["last_keyboard_callback_age_ms"], int)
+        self.assertIsInstance(state["last_heartbeat_age_ms"], int)
+        with self.assertRaises(guard.GuardUnavailable):
+            watcher.check()
 
     def test_diagnostic_does_not_send_key_after_real_input_during_mouse_probe(self):
         watcher = guard._HookObserver(diagnostic=True)

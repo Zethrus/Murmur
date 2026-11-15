@@ -81,7 +81,10 @@ def _focus_phase(pad, stage):
 
 
 def _notepad_focus_trial(ctx, spec, name, phases):
+    mark = getattr(ctx.guard, "mark", lambda _stage: None)
+    mark(f"H8:{name}:ensure-begin")
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"general": {"hotkey": spec}})
+    mark(f"H8:{name}:ensure-complete")
     pad = ctx.notepad(name)
     pad.focus()
     sample = lambda stage: phases.append(_focus_phase(pad, stage))

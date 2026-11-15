@@ -112,6 +112,9 @@ class _HookObserver:
         self._heartbeat_posted = 0
         self._heartbeat_received = 0
         self._heartbeat_post_error = None
+        self._last_heartbeat_at = None
+        self._last_keyboard_callback_at = None
+        self._missed_probe = None
         self._mouse_probe_tag = None
         self._mouse_probe_seen = 0
         self._mouse_probe_send_result = None
@@ -195,6 +198,7 @@ class _HookObserver:
         def keyboard(code, wparam, lparam):
             if code >= 0:
                 self._keyboard_callbacks += 1
+                self._last_keyboard_callback_at = time.monotonic()
                 event = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
                 if not is_injected_key(event.flags):
                     self._trip(f"real keyboard input (virtual key 0x{event.vkCode:02X})")
@@ -247,6 +251,7 @@ class _HookObserver:
                 break
             if message.message == WM_GUARD_HEARTBEAT:
                 self._heartbeat_received += 1
+                self._last_heartbeat_at = time.monotonic()
                 continue
             user32.TranslateMessage(ctypes.byref(message))
             user32.DispatchMessageW(ctypes.byref(message))
@@ -345,7 +350,6 @@ class _HookObserver:
             self._probe_sequence += 1
             self._expected_probe_tag = PROBE_TAG | (self._probe_sequence << 32)
             if self._diagnostic:
-                self._post_heartbeat()
                 if self._probe_sequence == 1:
                     if self._owned_probe_target is not None:
                         if not self._send_owned_probe(self._expected_probe_tag):
@@ -357,13 +361,32 @@ class _HookObserver:
                     self._send_mouse_probe(self._mouse_probe_tag)
                 if self.tripped.is_set():
                     return
+            callbacks_before = self._keyboard_callbacks
             self._probe_started = time.monotonic()
             if not self._send_probe(self._expected_probe_tag):
                 self._trip("input guard probe could not be sent (desktop unavailable or injection blocked)",
                            unavailable=True)
                 return
             self.last_probe_send_ms = round((time.monotonic() - self._probe_started) * 1000)
+            if self._diagnostic:
+                # A heartbeat posted after SendInput tests whether the hook's message thread
+                # still pumps during the same half-second as this particular probe.
+                self._post_heartbeat()
             if not self._probe_seen.wait(PROBE_TIMEOUT) and not self._stopping.is_set():
+                if self._diagnostic:
+                    now = time.monotonic()
+                    self._missed_probe = {
+                        "sequence": self._probe_sequence,
+                        "keyboard_callbacks_before_send": callbacks_before,
+                        "keyboard_callbacks_at_timeout": self._keyboard_callbacks,
+                        "heartbeat_received_at_timeout": self._heartbeat_received,
+                        "heartbeat_posted_at_timeout": self._heartbeat_posted,
+                        "last_keyboard_callback_age_ms": (round((now - self._last_keyboard_callback_at) * 1000)
+                                                          if self._last_keyboard_callback_at is not None else None),
+                        "last_heartbeat_age_ms": (round((now - self._last_heartbeat_at) * 1000)
+                                                  if self._last_heartbeat_at is not None else None),
+                        "hook_thread_alive": self._thread.is_alive() if self._thread else None,
+                    }
                 self._trip(f"input guard probe not observed within {PROBE_TIMEOUT:g} s "
                            f"(SendInput {self.last_probe_send_ms} ms, {self.probes_seen} earlier probes seen); "
                            "hook may be delayed or removed; stopping for safety", unavailable=True)
@@ -409,6 +432,7 @@ class _HookObserver:
                                     "heartbeat_posted": self._heartbeat_posted,
                                     "heartbeat_received": self._heartbeat_received,
                                     "heartbeat_post_error": self._heartbeat_post_error,
+                                    "missed_probe": self._missed_probe,
                                     "last_send_result": self._last_send_result,
                                     "last_send_error": self._last_send_error,
                                     "keyboard_callbacks": self._keyboard_callbacks,

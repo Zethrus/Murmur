@@ -214,21 +214,27 @@ class MurmurSession:
         self._log_offset = self.log_path.stat().st_size if self.log_path.exists() else 0
         self._launch_count += 1
         self._launch_output = self.home / f"murmur-launch-{self._launch_count}.txt"
+        mark = getattr(self.guard, "mark", lambda _stage: None)
         with self._launch_output.open("wb") as output:
             try:
                 self.process = subprocess.Popen([str(self.app), *args], env=self.env(wav, extra_env),
                                                 cwd=str(self.work), stdout=output, stderr=subprocess.STDOUT)
             except OSError as error:
                 raise StartupError(f"Murmur could not launch: {error}", self) from error
+        mark("Murmur:process-spawned")
         if wait_ready:
             self._wait_for_window(self.overlay_hwnd, "overlay")
+            mark("Murmur:overlay-ready")
             if "--background" not in args:
                 hwnd = self._wait_for_window(self.settings_hwnd, "Settings window")
+                mark("Murmur:settings-ready")
                 if not keep_settings:
                     self.guard.sleep(1.0)
                     win32.close_window(hwnd)
                     win32.wait_for(lambda: not self.settings_hwnd(), 5, sleep=self.guard.sleep)
+                    mark("Murmur:settings-hidden")
             self.guard.sleep(1.5)  # engine and hotkeys come up
+            mark("Murmur:startup-wait-complete")
         return self
 
     def _wait_for_window(self, find, label):
@@ -295,8 +301,12 @@ class MurmurSession:
                 win32.kill(pid)
 
     def restart(self, wav=None, config=None, args=()):
+        mark = getattr(self.guard, "mark", lambda _stage: None)
+        mark("Murmur:restart-stop-begin")
         self.stop()
+        mark("Murmur:restart-stop-complete")
         self.guard.sleep(0.5)
+        mark("Murmur:restart-launch-begin")
         return self.launch(wav=wav if wav is not None else self.wav, config=config, args=args)
 
     def ensure(self, wav, config=None):
