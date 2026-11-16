@@ -56,6 +56,14 @@ def overlay_drag_point(ctx, return_bounds=False):
     return (point, handle) if return_bounds else point
 
 
+def overlay_drag_snapshot(ctx, timeout=0.5):
+    """One fresh UIA bounds read for O8's guarded gesture-time comparison."""
+    element = uia.find(ctx.murmur.overlay(), name_="Drag to move", timeout=timeout, sleep=ctx.sleep)
+    bounds = uia.rect(element)
+    point = ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
+    return point, bounds
+
+
 def wait_held(ctx, timeout=30):
     if not ctx.murmur.wait_state("held", timeout):
         raise Fail(f"Transcript was not held (overlay: {ctx.murmur.overlay_state()})")

@@ -1805,8 +1805,13 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
             sample("at-start", 0)
             rect[0] = (634, 764, 686, 804)
             sample("moving", 25)
-        with mock.patch.object(overlay_checks, "overlay_drag_point", return_value=((960, 984),
-                                                                                      (938, 968, 982, 1000))), \
+        valid = ((960, 984), (938, 968, 982, 1000))
+        snapshots = [((1014, 1011), (970, 999, 1059, 1024)), valid, valid, valid, valid]
+        def snapshot(_ctx):
+            read = 5 - len(snapshots)
+            self.assertEqual(injected.call_count, 0 if read < 3 else 1)
+            return snapshots.pop(0)
+        with mock.patch.object(overlay_checks, "overlay_drag_snapshot", side_effect=snapshot) as sampled, \
              mock.patch.object(win32, "foreground_context", return_value=context), \
              mock.patch.object(win32, "window_pid", side_effect=lambda hwnd: {44: 71, 45: 200}[hwnd]), \
              mock.patch.object(win32, "window_rect", side_effect=lambda _hwnd: rect[0]), \
@@ -1835,7 +1840,140 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
         self.assertEqual(row["hit_before"]["pid"], 200)
         self.assertEqual(row["click_in_hit_client"], (26, 20))
         self.assertEqual(len(row["held_samples"]), 2)
-        self.assertEqual(observations, [row])
+        self.assertEqual(len(row["readiness_geometry_history"]), 3)
+        self.assertEqual(sampled.call_count, 5)  # mismatch, two matches, then two matches
+        self.assertEqual(snapshots, [])
+        self.assertIs(observations[0], row)
+        self.assertEqual(len(observations), 2)
+        self.assertIn("cannot fit", observations[1]["error"])
+        self.assertEqual(len(observations[1]["readiness_geometry_history"]), 2)
+
+    def _o8_readiness_context(self, directory):
+        session = SimpleNamespace(process=SimpleNamespace(pid=71), running=lambda: True,
+                                  overlay_hwnd=lambda: 44, ensure=mock.Mock(),
+                                  log=lambda **_kw: "\n".join(
+                                      f"QA overlay drag probe stage={stage} idle_icon=true pill_hidden=false"
+                                      for stage in (4, 5, 6)),
+                                  settings_hide_observation={"wait_succeeded": True,
+                                                             "visible_after_wait": False})
+        ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav")},
+                              restorer=SimpleNamespace(push=mock.Mock()), guard=SimpleNamespace(check=mock.Mock()),
+                              artifact=lambda suffix: Path(directory) / suffix, sleep=lambda _: None,
+                              note=mock.Mock())
+        context = {"hwnd": 0, "process_id": 0, "input_desktop": "Default",
+                   "gui_status": "no_foreground"}
+        self.enterContext(mock.patch.object(win32, "window_pid", return_value=71))
+        self.enterContext(mock.patch.object(win32, "window_rect", return_value=(934, 964, 986, 1004)))
+        self.enterContext(mock.patch.object(win32, "foreground_context", return_value=context))
+        self.enterContext(mock.patch.object(win32, "user32", SimpleNamespace(GetAncestor=lambda hwnd, _kind: hwnd)))
+        drag = self.enterContext(mock.patch.object(win32, "drag"))
+        return ctx, session, drag
+
+    def test_o8_transient_uia_mismatch_waits_for_two_fresh_matching_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx, _session, drag = self._o8_readiness_context(directory)
+            invalid = ((1014, 1011), (970, 999, 1059, 1024))
+            valid = ((960, 984), (938, 968, 982, 1000))
+            rows = [invalid, valid, valid]
+            def snapshot(_ctx):
+                self.assertEqual(drag.call_count, 0)
+                return rows.pop(0)
+            history = []
+            with mock.patch.object(overlay_checks, "overlay_drag_snapshot", side_effect=snapshot):
+                point, bounds, native = overlay_checks._o8_ready_drag_point(
+                    ctx, "cold", 71, 44, None, (0, 0), history)
+            self.assertEqual((point, bounds, native), (*valid, (934, 964, 986, 1004)))
+            self.assertEqual([row["result"] for row in history],
+                             ["UIA handle outside native overlay or unusable",
+                              "awaiting matching snapshot", "verified"])
+            self.assertEqual(rows, [])
+            drag.assert_not_called()
+
+    def test_o8_missing_uia_handle_requires_two_later_matching_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx, _session, drag = self._o8_readiness_context(directory)
+            valid = ((960, 984), (938, 968, 982, 1000))
+            history = []
+            with mock.patch.object(overlay_checks, "overlay_drag_snapshot",
+                                   side_effect=[uia.NotFound("handle absent"), valid, valid]) as snapshot:
+                result = overlay_checks._o8_ready_drag_point(ctx, "cold", 71, 44, None, (0, 0), history)
+            self.assertEqual(result, (*valid, (934, 964, 986, 1004)))
+            self.assertEqual(snapshot.call_count, 3)
+            self.assertEqual([row["result"] for row in history],
+                             ["UIA handle not found", "awaiting matching snapshot", "verified"])
+            self.assertEqual(history[0]["uia_error"], "handle absent")
+            drag.assert_not_called()
+
+    def test_o8_permanent_invalid_geometry_fails_bounded_with_launch_probe_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx, session, drag = self._o8_readiness_context(directory)
+            invalid = ((1014, 1011), (970, 999, 1059, 1024))
+            with mock.patch.object(overlay_checks, "overlay_drag_snapshot", return_value=invalid) as snapshot, \
+                 mock.patch.object(win32, "wait_for", side_effect=lambda predicate, *_a, **_kw: predicate()), \
+                 mock.patch.object(win32, "mouse_up") as mouse_up:
+                with self.assertRaisesRegex(Fail, "did not converge"):
+                    overlay_checks.o8_foreground_drag(ctx)
+            self.assertEqual(snapshot.call_count, overlay_checks.O8_GEOMETRY_ATTEMPTS)
+            drag.assert_not_called()
+            mouse_up.assert_not_called()
+            self.assertEqual(ctx.restorer.push.call_count, 1)  # placement reset only
+            session.ensure.assert_called_once()
+            record = json.loads((Path(directory) / "foreground-drag-diagnostic.json").read_text())
+            self.assertEqual(record["status"], "fail")
+            self.assertEqual(len(record["launch_dom_probes"]), 3)
+            self.assertEqual(len(record["cases"]), 1)
+            self.assertEqual(len(record["cases"][0]["readiness_geometry_history"]),
+                             overlay_checks.O8_GEOMETRY_ATTEMPTS)
+            self.assertEqual(record["cases"][0]["readiness_geometry_history"][0]["uia_drag_bounds"],
+                             list(invalid[1]))
+
+    def test_o8_guard_trip_during_uia_read_stops_before_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx, _session, drag = self._o8_readiness_context(directory)
+            def snapshot(_ctx):
+                ctx.guard.check.side_effect = guard.UserInput("owner touched input during UIA")
+                return (960, 984), (938, 968, 982, 1000)
+            cases = []
+            with mock.patch.object(overlay_checks, "overlay_drag_snapshot", side_effect=snapshot), \
+                 mock.patch.object(win32, "mouse_up") as mouse_up:
+                with self.assertRaises(guard.UserInput):
+                    overlay_checks._o8_drag(ctx, "cold", 71, None, -1, cases)
+            drag.assert_not_called()
+            mouse_up.assert_not_called()
+            self.assertEqual(len(cases), 1)
+            self.assertIn("UserInput", cases[0]["readiness_geometry_history"][0]["error"])
+            self.assertEqual(cases[0]["readiness_geometry_history"][0]["uia_drag_bounds"],
+                             (938, 968, 982, 1000))
+
+    def test_o8_changed_geometry_owner_or_desktop_during_uia_fails_before_input(self):
+        for changed in ("geometry", "owner", "process", "foreground", "root", "desktop"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+                ctx, session, drag = self._o8_readiness_context(directory)
+                cases = []
+                def snapshot(_ctx):
+                    if changed == "owner":
+                        session.overlay_hwnd = lambda: 55
+                    if changed == "process":
+                        session.process.pid = 72
+                    if changed == "foreground":
+                        win32.foreground_context.return_value = {
+                            "hwnd": 52, "process_id": 99, "input_desktop": "Default", "gui_status": "ok"}
+                    if changed == "root":
+                        win32.foreground_context.return_value = {
+                            "hwnd": 52, "process_id": 0, "input_desktop": "Default", "gui_status": "ok"}
+                    if changed == "desktop":
+                        win32.foreground_context.return_value = {
+                            "hwnd": 0, "process_id": 0, "input_desktop": "Winlogon", "gui_status": "no_foreground"}
+                    return (960, 984), (938, 968, 982, 1000)
+                with mock.patch.object(overlay_checks, "overlay_drag_snapshot", side_effect=snapshot), \
+                     mock.patch.object(win32, "window_rect", side_effect=[
+                         (934, 964, 986, 1004), (935, 964, 987, 1004)] if changed == "geometry"
+                         else None, return_value=(934, 964, 986, 1004)):
+                    with self.assertRaisesRegex(Fail, "geometry changed|ownership changed|Unsafe desktop"):
+                        overlay_checks._o8_drag(ctx, "cold", 71, None, -1, cases)
+                drag.assert_not_called()
+                self.assertEqual(len(cases), 1)
+                self.assertEqual(len(cases[0]["readiness_geometry_history"]), 1)
 
     def make_context(self, directory, events, *, movements=(True, True, True, True)):
         self.enterContext(mock.patch.object(overlay_checks, "_o8_settings", return_value=[{"hwnd": 33, "pid": 71}]))

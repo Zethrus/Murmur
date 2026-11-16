@@ -6,11 +6,13 @@ import time
 import fixtures
 import uia
 import win32
-from checks.common import click_overlay, overlay_drag_point, produce_held, wait_not_held
+from checks.common import (click_overlay, overlay_drag_point, overlay_drag_snapshot,
+                           produce_held, wait_not_held)
 from context import Fail
 
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x00000080, 0x08000000
+O8_GEOMETRY_ATTEMPTS = 4
 
 
 def _exstyle(hwnd):
@@ -178,6 +180,75 @@ def _o8_owned_foreground(hwnd, pid):
             and root == hwnd and context["process_id"] == pid)
 
 
+def _o8_verify_gesture_context(ctx, label, pid, hwnd, expected_foreground, original=None):
+    """Recheck the guard and exact owners after every potentially blocking UIA read."""
+    ctx.guard.check()
+    if (not ctx.murmur.running() or ctx.murmur.process.pid != pid or
+            ctx.murmur.overlay_hwnd() != hwnd or win32.window_pid(hwnd) != pid):
+        raise Fail(f"Murmur overlay ownership changed before {label}")
+    context = win32.foreground_context()
+    root = win32.user32.GetAncestor(context["hwnd"], win32.GA_ROOT) if context["hwnd"] else 0
+    allowed_status = ("ok", "no_foreground") if expected_foreground is None else ("ok",)
+    if context["input_desktop"] != "Default" or context["gui_status"] not in allowed_status:
+        raise Fail(f"Unsafe desktop or foreground context before {label}: {context}")
+    owner = (root, context["process_id"])
+    if expected_foreground is not None and owner != expected_foreground:
+        raise Fail(f"Foreground ownership changed before {label}: {context}, root={root}")
+    if original is not None and owner != original:
+        raise Fail(f"Foreground ownership changed during readiness for {label}: {context}, root={root}")
+    return context, root
+
+
+def _o8_ready_drag_point(ctx, label, pid, hwnd, expected_foreground, original, history):
+    """Accept two consecutive matching UIA/native snapshots, with bounded retries."""
+    previous = None
+    for attempt in range(O8_GEOMETRY_ATTEMPTS):
+        _o8_verify_gesture_context(ctx, label, pid, hwnd, expected_foreground, original)
+        before = win32.window_rect(hwnd)
+        row = {"attempt": attempt + 1, "native_before": before}
+        try:
+            point = bounds = None
+            try:
+                point, bounds = overlay_drag_snapshot(ctx)
+                row.update(uia_drag_bounds=bounds, point=point)
+            except uia.NotFound as error:
+                row["uia_error"] = str(error)
+            # UIA discovery may block while the user, process or foreground changes.
+            _o8_verify_gesture_context(ctx, label, pid, hwnd, expected_foreground, original)
+            after = win32.window_rect(hwnd)
+            row["native_after"] = after
+            if before != after:
+                raise Fail(f"Native overlay geometry changed during readiness for {label}: {before} -> {after}")
+            if bounds is not None:
+                left, top, right, bottom = after
+                valid = (bounds[2] > bounds[0] and bounds[3] > bounds[1] and
+                         left <= bounds[0] < bounds[2] <= right and
+                         top <= bounds[1] < bounds[3] <= bottom and
+                         left <= point[0] < right and top <= point[1] < bottom)
+                if valid:
+                    current = (point, bounds, after)
+                    if current == previous:
+                        row["result"] = "verified"
+                        return current
+                    previous = current
+                    row["result"] = "awaiting matching snapshot"
+                else:
+                    previous = None
+                    row["result"] = "UIA handle outside native overlay or unusable"
+            else:
+                previous = None
+                row["result"] = "UIA handle not found"
+        except BaseException as error:
+            row["error"] = f"{type(error).__name__}: {error}"
+            raise
+        finally:
+            history.append(row)
+        if attempt + 1 < O8_GEOMETRY_ATTEMPTS:
+            ctx.sleep(0.1)
+    raise Fail(f"O8 drag handle did not converge with native overlay for {label} "
+               f"after {O8_GEOMETRY_ATTEMPTS} guarded snapshots")
+
+
 def _o8_endpoint(start, before, work, preferred):
     """Choose a full trajectory from the actual position; never shorten or clip it."""
     left, top, right, bottom = work
@@ -232,32 +303,43 @@ def _o8_show_settings(ctx, pid):
 
 def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
     """One O2 held gesture, with the same 300x200 travel and movement oracle."""
-    ctx.guard.check()
-    if not ctx.murmur.running() or ctx.murmur.process.pid != pid:
-        raise Fail("Murmur process changed before the gesture")
+    geometry_history = []
+    observation = {"case": label, "readiness_geometry_history": geometry_history}
+    observations.append(observation)
     hwnd = ctx.murmur.overlay_hwnd()
-    if not hwnd or win32.window_pid(hwnd) != pid:
-        raise Fail("Murmur overlay ownership changed before the gesture")
-    start, bounds = overlay_drag_point(ctx, return_bounds=True)
-    context = win32.foreground_context()
-    foreground_root = (win32.user32.GetAncestor(context["hwnd"], win32.GA_ROOT)
-                       if context["hwnd"] else 0)
-    allowed_status = ("ok", "no_foreground") if expected_foreground is None else ("ok",)
-    if context["input_desktop"] != "Default" or context["gui_status"] not in allowed_status:
-        raise Fail(f"Unsafe desktop or foreground context before {label}: {context}")
-    if expected_foreground is not None and (foreground_root, context["process_id"]) != expected_foreground:
-        raise Fail(f"Foreground ownership changed before {label}: {context}, root={foreground_root}")
-    hit = win32.user32.WindowFromPoint(win32.POINT(*start))
-    hit_root = win32.user32.GetAncestor(hit, win32.GA_ROOT) if hit else 0
-    # WebView2 can host its hit child in a different renderer process. The
-    # top-level root, rather than the child's PID, establishes overlay ownership.
-    if not hit or hit_root != hwnd:
-        raise Fail(f"Drag point is not owned by the overlay: hit={hit}, root={hit_root}, overlay={hwnd}")
-    before = win32.window_rect(hwnd)
-    work_area = win32.work_area_at(start)
-    end = _o8_endpoint(start, before, work_area, direction)
-    sample_rows = []
-    original_foreground = (foreground_root, context["process_id"])
+    try:
+        context, foreground_root = _o8_verify_gesture_context(ctx, label, pid, hwnd, expected_foreground)
+        original_foreground = (foreground_root, context["process_id"])
+        start, bounds, ready_rect = _o8_ready_drag_point(
+            ctx, label, pid, hwnd, expected_foreground, original_foreground, geometry_history)
+        context, foreground_root = _o8_verify_gesture_context(
+            ctx, label, pid, hwnd, expected_foreground, original_foreground)
+        allowed_status = ("ok", "no_foreground") if expected_foreground is None else ("ok",)
+        hit = win32.user32.WindowFromPoint(win32.POINT(*start))
+        hit_root = win32.user32.GetAncestor(hit, win32.GA_ROOT) if hit else 0
+        # WebView2 can host its hit child in a different renderer process. The
+        # top-level root, rather than the child's PID, establishes overlay ownership.
+        if not hit or hit_root != hwnd:
+            raise Fail(f"Drag point is not owned by the overlay: hit={hit}, root={hit_root}, overlay={hwnd}")
+        before = win32.window_rect(hwnd)
+        if before != ready_rect:
+            raise Fail(f"Native overlay geometry changed after readiness for {label}: {ready_rect} -> {before}")
+        work_area = win32.work_area_at(start)
+        end = _o8_endpoint(start, before, work_area, direction)
+        log_before = len(ctx.murmur.log())
+        observation.update(process_pid=pid, start=start, end=end, verified_work_area=work_area,
+                           preferred_direction=direction, uia_drag_bounds=bounds, before=before,
+                           foreground_before=context, foreground_root=foreground_root,
+                           settings_before=_o8_settings(pid), overlay_before=_o8_window(hwnd),
+                           hit_before=_o8_window(hit),
+                           click_in_overlay_client=tuple(start[i] - win32.client_origin(hwnd)[i]
+                                                         for i in (0, 1)),
+                           click_in_hit_client=tuple(start[i] - win32.client_origin(hit)[i]
+                                                     for i in (0, 1)),
+                           held_samples=[])
+    except BaseException as error:
+        observation["error"] = f"{type(error).__name__}: {error}"
+        raise
 
     def sample(stage, step):
         ctx.guard.check()
@@ -268,32 +350,31 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
         focus = win32.foreground_context()
         focus_root = (win32.user32.GetAncestor(focus["hwnd"], win32.GA_ROOT)
                       if focus["hwnd"] else 0)
-        sample_rows.append({"monotonic_s": round(time.monotonic(), 3), "stage": stage, "step": step,
-                            "cursor": win32.cursor(),
-                            "left_down": bool(win32.user32.GetAsyncKeyState(0x01) & 0x8000),
-                            "overlay_rect": win32.window_rect(hwnd),
-                            "foreground": focus, "foreground_root": focus_root})
+        observation["held_samples"].append({"monotonic_s": round(time.monotonic(), 3),
+                                             "stage": stage, "step": step, "cursor": win32.cursor(),
+                                             "left_down": bool(win32.user32.GetAsyncKeyState(0x01) & 0x8000),
+                                             "overlay_rect": win32.window_rect(hwnd),
+                                             "foreground": focus, "foreground_root": focus_root})
         if (focus["input_desktop"] != "Default" or focus["gui_status"] not in allowed_status or
                 (focus_root, focus["process_id"]) != original_foreground):
             raise Fail(f"Foreground or desktop changed during {label}: {focus}, root={focus_root}")
 
-    log_before = len(ctx.murmur.log())
-    observation = {"case": label, "process_pid": pid, "start": start,
-                   "end": end, "verified_work_area": work_area, "preferred_direction": direction,
-                   "uia_drag_bounds": bounds, "before": before,
-                   "foreground_before": context, "foreground_root": foreground_root,
-                   "settings_before": _o8_settings(pid), "overlay_before": _o8_window(hwnd),
-                   "hit_before": _o8_window(hit),
-                   "click_in_overlay_client": tuple(start[i] - win32.client_origin(hwnd)[i] for i in (0, 1)),
-                   "click_in_hit_client": tuple(start[i] - win32.client_origin(hit)[i] for i in (0, 1)),
-                   "held_samples": sample_rows}
+    drag_attempted = False
     try:
         try:
-            ctx.guard.check()
+            _o8_verify_gesture_context(ctx, label, pid, hwnd, expected_foreground, original_foreground)
+            if win32.window_rect(hwnd) != before:
+                raise Fail(f"Native overlay geometry changed before input for {label}")
+            current_hit = win32.user32.WindowFromPoint(win32.POINT(*start))
+            current_root = win32.user32.GetAncestor(current_hit, win32.GA_ROOT) if current_hit else 0
+            if not current_hit or current_root != hwnd:
+                raise Fail(f"Drag point ownership changed before input for {label}")
+            drag_attempted = True
             win32.drag(start, observation["end"], steps=25, release=False, sample=sample)
             observation["held"] = win32.window_rect(hwnd)
         finally:
-            win32.mouse_up()
+            if drag_attempted:
+                win32.mouse_up()
         ctx.sleep(1.5)
         observation["after"] = win32.window_rect(hwnd)
         observation["foreground_after"] = win32.foreground_context()
@@ -320,7 +401,6 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
             observation["drag_log_delta"] = [line for line in delta.splitlines() if "drag" in line.lower()]
         except Exception as error:  # noqa: BLE001 - preserve the gesture's original outcome
             observation["log_read_error"] = f"{type(error).__name__}: {error}"
-        observations.append(observation)
 
 
 def o8_foreground_drag(ctx):
@@ -343,7 +423,6 @@ def o8_foreground_drag(ctx):
         if not record["settings_hide_on_launch"] or not record["settings_hide_on_launch"]["wait_succeeded"] \
                 or record["settings_hide_on_launch"]["visible_after_wait"]:
             record["failures"].append("Settings hide after cold launch did not complete")
-        ctx.restorer.push("release the mouse button", win32.mouse_up)
         # The first gesture precedes any Notepad creation, activation or handoff.
         cold = _o8_drag(ctx, "cold foreground untouched", pid, None, -1, record["cases"])
         if not cold["moved_while_held"]:
