@@ -5,7 +5,7 @@
 //! 1. `focusable: false` (tauri.conf.json) gives the top-level overlay `WS_EX_NOACTIVATE`
 //!    through tao, so a click does not activate it in the first place.
 //! 2. If it is activated anyway, the `WM_ACTIVATE` hand-back below calls `SetForegroundWindow`
-//!    on the window that lost activation.
+//!    on the window that lost activation and consumes that activation message.
 //! 3. The overlay page prevents `mousedown`'s default on its buttons so the DOM never moves focus
 //!    (src/overlay/no-focus.ts).
 //!
@@ -49,6 +49,23 @@ fn qa_mouse_message(message: u32) -> Option<&'static str> {
 /// (`WA_ACTIVE`/`WA_CLICKACTIVE`) and Windows names the window that lost activation.
 pub fn restore_previous_on_activate(message: u32, wparam: usize, previous_is_window: bool) -> bool {
     message == WM_ACTIVATE && (wparam & 0xFFFF) != WA_INACTIVE && previous_is_window
+}
+
+/// Keep the hand-back and default dispatch in one testable control-flow boundary.
+fn dispatch_activation(
+    message: u32,
+    wparam: usize,
+    previous_is_window: bool,
+    restore: impl FnOnce(),
+    forward: impl FnOnce() -> isize,
+) -> isize {
+    if restore_previous_on_activate(message, wparam, previous_is_window) {
+        restore();
+        // DefWindowProc's active WM_ACTIVATE handling assigns keyboard focus. Do not
+        // let it undo the hand-back, even if Windows refuses foreground restoration.
+        return 0;
+    }
+    forward()
 }
 
 /// Only windows owned by this thread can be subclassed (`SetWindowSubclass` refuses others).
@@ -109,21 +126,24 @@ mod native {
             return reply;
         }
         // Only WM_ACTIVATE carries a window in lparam; never probe it for other messages.
-        if message == WM_ACTIVATE {
-            let previous = lparam as HWND;
-            if restore_previous_on_activate(
-                message,
-                wparam,
-                !previous.is_null() && IsWindow(previous) != 0,
-            ) {
+        let previous = lparam as HWND;
+        let previous_is_window =
+            message == WM_ACTIVATE && !previous.is_null() && IsWindow(previous) != 0;
+        dispatch_activation(
+            message,
+            wparam,
+            previous_is_window,
+            || {
                 // The click gave Murmur the foreground right; hand it straight back.
                 SetForegroundWindow(previous);
-            }
-        }
-        if message == WM_NCDESTROY {
-            RemoveWindowSubclass(window, Some(overlay_proc), id);
-        }
-        DefSubclassProc(window, message, wparam, lparam)
+            },
+            || {
+                if message == WM_NCDESTROY {
+                    RemoveWindowSubclass(window, Some(overlay_proc), id);
+                }
+                DefSubclassProc(window, message, wparam, lparam)
+            },
+        )
     }
 
     fn subclass(window: HWND) -> bool {
@@ -179,6 +199,53 @@ pub fn install(_window: &tauri::WebviewWindow) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handled_activation_never_runs_default_focus_processing() {
+        use std::cell::Cell;
+        for state in [1, 2, 2 | 0x1_0000] {
+            let restored = Cell::new(false);
+            let forwarded = Cell::new(false);
+            let result = dispatch_activation(
+                WM_ACTIVATE,
+                state,
+                true,
+                || restored.set(true),
+                || {
+                    forwarded.set(true);
+                    99
+                },
+            );
+            assert!(restored.get());
+            assert!(
+                !forwarded.get(),
+                "hand-back must terminate activation dispatch"
+            );
+            assert_eq!(result, 0);
+        }
+    }
+
+    #[test]
+    fn unhandled_activation_and_other_messages_keep_default_dispatch() {
+        for (message, state, valid) in [
+            (WM_ACTIVATE, WA_INACTIVE, true),
+            (WM_ACTIVATE, 1, false),
+            (WM_LBUTTONDOWN, 1, true),
+            (WM_LBUTTONUP, 1, true),
+            (0x0082, 1, true), // WM_NCDESTROY must retain subclass cleanup.
+        ] {
+            assert_eq!(
+                dispatch_activation(
+                    message,
+                    state,
+                    valid,
+                    || panic!("unexpected hand-back"),
+                    || 99
+                ),
+                99
+            );
+        }
+    }
 
     #[test]
     fn mouse_activation_is_answered_without_activating() {
