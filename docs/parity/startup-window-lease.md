@@ -30,7 +30,25 @@ prelaunch, or app closure is introduced. A verified handoff retires the startup
 window once. Later target teardown gaps remain outside this correction.
 
 Local desktop-harness unit tests cover the lifecycle and fail-closed decisions.
-Native behavior on a Windows desktop is pending. The focused H1-first and
-H8-only comparison, then the full desktop suite and all release gates, remain
-mandatory before claiming a fix or reopening the release gate. The existing
-PR CI and manual results at `a98b9a8` predate this change.
+The H1-first native run at `884c6459d3f6aa660ec46afefb39a97edbde787b`
+(`/tmp/murmur-desktop-43811071941`) completed the startup handoff: H1 reached
+its Notepad assertion, with all 16 probes seen up to that point. H1 failed its
+exact comparison: history had 44 characters, Notepad 43, diverging at character
+16. Both focus diagnostics show the Notepad editor and no open menu, but the
+check queried Notepad through UI Automation before confirming history output.
+The subsequent H8 setup aborted on probe 17 despite a live hook heartbeat; the
+guard latched the failure and the remaining checks were aborted. This run shows
+that startup handoff worked once, not that the guard is reliable across the
+next target-creation boundary or that H1 delivery is correct.
+
+The normal Notepad H1/I1/I4/I5 checks now confirm the same utterance through
+the existing history and fixture-fidelity oracle before target UI Automation
+readback or focus diagnostics. A missing output or held refusal still fails;
+diagnostics are captured after the overlay settles or enters held state. Exact
+target comparison, H1 menu assertion, I4 clipboard sentinel, and I5 replacement
+assertion remain. If the overlay does not reach a settled or held state, the
+check keeps the output failure and records why it skipped Notepad diagnostics.
+The focused H1/I1/I4/I5 native comparison with the unchanged
+guard, then the full desktop suite and release gates, remain mandatory before
+claiming a fix or reopening the release gate. The separate probe-17 boundary
+miss remains unresolved.

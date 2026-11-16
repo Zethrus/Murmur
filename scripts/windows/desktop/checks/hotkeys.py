@@ -6,7 +6,7 @@ import time
 import golden
 import guard
 import win32
-from checks.common import BLOCKED_HOTKEY, CODE_HOTKEY, SHIFT_HOTKEY
+from checks.common import BLOCKED_HOTKEY, CODE_HOTKEY, SHIFT_HOTKEY, confirm_notepad_output
 from context import Fail, OutputCount
 
 
@@ -39,13 +39,13 @@ def h1_hold(ctx):
     pad = ctx.notepad()
     pad.focus()
     ctx.dictate("A", order="key-first")
+    confirm_notepad_output(ctx, pad)
     ctx.artifact("after-hotkey-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     text = pad.wait_text()
     ctx.settle()
     ctx.screenshot(pad.hwnd, "notepad.png")
     ctx.artifact("notepad-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     if pad.menu_open():
-        win32.tap("esc")
         raise Fail("Notepad's menu was activated by the hotkey release")
     ctx.expect_delivery(text, "Notepad")
 

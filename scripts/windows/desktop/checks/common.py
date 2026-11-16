@@ -98,6 +98,23 @@ def require_empty(*targets_):
             raise Fail(f"{getattr(target, 'title', 'target')} received text it should not have: {text!r}")
 
 
+def confirm_notepad_output(ctx, pad):
+    """Wait for this utterance's history before querying Notepad during delivery."""
+    try:
+        ctx.observed_text()
+    except Fail:
+        # No output (including a held refusal) remains a failure. Capture the
+        # document only after the overlay has settled or entered held state.
+        state = ctx.settle()
+        if state not in ("done", "idle", "held"):
+            ctx.note(f"Notepad diagnostics skipped while overlay state was {state!r}")
+            raise
+        ctx.artifact("after-hotkey-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
+        ctx.screenshot(pad.hwnd, "notepad.png")
+        ctx.artifact("notepad-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
+        raise
+
+
 def find_settings_button(ctx, label, timeout=15):
     window = ctx.murmur.settings()
     return uia.find(window, name_=label, control_type_=uia.BUTTON, timeout=timeout, sleep=ctx.sleep)

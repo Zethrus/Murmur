@@ -5,7 +5,7 @@ import secrets
 import fixtures
 import targets
 import win32
-from checks.common import require_empty
+from checks.common import confirm_notepad_output, require_empty
 from context import Fail, Skip
 
 
@@ -14,6 +14,7 @@ def i1_notepad(ctx):
     pad = ctx.notepad()
     pad.focus()
     ctx.dictate("A")
+    confirm_notepad_output(ctx, pad)
     ctx.artifact("after-hotkey-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     text = pad.wait_text()
     ctx.settle()
@@ -92,6 +93,7 @@ def i4_paste(ctx):
     pad = ctx.notepad()
     pad.focus()
     ctx.dictate("LONG")
+    confirm_notepad_output(ctx, pad)
     ctx.artifact("after-hotkey-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     text = pad.wait_text()
     ctx.settle()
@@ -112,6 +114,7 @@ def i5_unicode(ctx):
     pad = ctx.notepad()
     pad.focus()
     ctx.dictate("MARKER")
+    confirm_notepad_output(ctx, pad)
     ctx.artifact("after-hotkey-focus.txt").write_text(pad.focus_diagnostic(), encoding="utf-8")
     text = pad.wait_text()
     ctx.settle()

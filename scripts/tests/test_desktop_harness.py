@@ -2638,6 +2638,106 @@ class DeliveredKeysTests(unittest.TestCase):
         self.assertEqual(delivered[0]["t"], 5.0)
 
 
+class NormalNotepadReadbackTests(unittest.TestCase):
+    CHECKS = (("H1", hotkey_checks.h1_hold, "A"),
+              ("I1", insertion_checks.i1_notepad, "A"),
+              ("I4", insertion_checks.i4_paste, "LONG"),
+              ("I5", insertion_checks.i5_unicode, "MARKER"))
+
+    def exercise(self, check_id, check, fixture, *, output=True, target_text=None,
+                 menu=False, settled_state=None):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            expected = ("Please type the café déjà vu now. " if fixture == "MARKER" else
+                        fixtures.SENTENCES[fixture] + " ")
+            target_text = expected if target_text is None else target_text
+
+            def observed_text():
+                events.append("history")
+                if not output:
+                    raise OutputCount(0)
+                return expected
+
+            def focus_diagnostic():
+                events.append("uia-focus")
+                return "UIA focus: RichEditD2DPT\n"
+
+            def wait_text():
+                events.append("uia-text")
+                return target_text
+
+            pad = SimpleNamespace(hwnd=42, focus=lambda: events.append("focus"),
+                                  focus_diagnostic=focus_diagnostic, wait_text=wait_text,
+                                  menu_open=lambda: events.append("uia-menu") or menu)
+            ctx = Context.__new__(Context)
+            ctx.fixtures = {fixture: SimpleNamespace(path=f"{fixture}.wav")}
+            ctx.murmur = SimpleNamespace(ensure=lambda *_: events.append("ensure"))
+            ctx.notepad = lambda: pad
+            ctx.dictate = lambda *_a, **_kw: events.append("dictate")
+            ctx.observed_text = observed_text
+            ctx.settle = lambda: events.append("settle") or (settled_state or ("done" if output else "held"))
+            ctx.screenshot = lambda *_: events.append("screenshot")
+            ctx.artifact = lambda suffix: Path(directory) / f"{check_id}-{suffix}"
+            ctx.note = lambda _: events.append("note")
+            ctx.clipboard_guard = lambda: events.append("clipboard-guard")
+            ctx.sleep = lambda _: events.append("sleep")
+            with mock.patch.object(win32, "set_clipboard_text"), \
+                 mock.patch.object(win32, "clipboard_text", return_value="murmur-sentinel-deadbeef"), \
+                 mock.patch.object(insertion_checks.secrets, "token_hex", return_value="deadbeef"):
+                if not output:
+                    with self.assertRaisesRegex(OutputCount, "found 0"):
+                        check(ctx)
+                elif menu:
+                    with self.assertRaisesRegex(Fail, "menu was activated"):
+                        check(ctx)
+                elif target_text != expected:
+                    with self.assertRaisesRegex(Fail, "differs at character"):
+                        check(ctx)
+                else:
+                    check(ctx)
+            evidence = {suffix: (Path(directory) / f"{check_id}-{suffix}").exists()
+                        for suffix in ("after-hotkey-focus.txt", "notepad-focus.txt")}
+            return events, evidence
+
+    def test_notepad_uia_readback_waits_for_history_then_keeps_exact_comparison(self):
+        for check_id, check, fixture in self.CHECKS:
+            with self.subTest(check=check_id):
+                events, evidence = self.exercise(check_id, check, fixture)
+                self.assertLess(events.index("dictate"), events.index("history"))
+                self.assertLess(events.index("history"), events.index("uia-focus"))
+                self.assertLess(events.index("history"), events.index("uia-text"))
+                self.assertEqual(events.count("history"), 2)  # confirmation and exact oracle
+                self.assertTrue(all(evidence.values()))
+                events, _ = self.exercise(check_id, check, fixture, target_text="wrong text")
+                self.assertLess(events.index("history"), events.index("uia-text"))
+
+    def test_missing_notepad_output_fails_and_captures_only_after_settle(self):
+        for check_id, check, fixture in self.CHECKS:
+            with self.subTest(check=check_id):
+                events, evidence = self.exercise(check_id, check, fixture, output=False)
+                self.assertEqual(events.count("history"), 1)
+                self.assertNotIn("uia-text", events)
+                self.assertLess(events.index("history"), events.index("settle"))
+                self.assertLess(events.index("settle"), events.index("uia-focus"))
+                self.assertIn("screenshot", events)
+                self.assertTrue(all(evidence.values()))
+
+    def test_missing_output_does_not_query_notepad_while_still_transcribing(self):
+        events, evidence = self.exercise("I1", insertion_checks.i1_notepad, "A",
+                                         output=False, settled_state="transcribing")
+        self.assertNotIn("uia-focus", events)
+        self.assertNotIn("uia-text", events)
+        self.assertNotIn("screenshot", events)
+        self.assertIn("note", events)
+        self.assertFalse(any(evidence.values()))
+
+    def test_h1_menu_still_fails_after_history_without_sending_escape(self):
+        with mock.patch.object(win32, "tap") as tap:
+            events, _ = self.exercise("H1", hotkey_checks.h1_hold, "A", menu=True)
+        self.assertLess(events.index("history"), events.index("uia-menu"))
+        tap.assert_not_called()
+
+
 class F13Tests(unittest.TestCase):
     def test_held_modifier_phase_requires_full_transcript_reason_zero_input_and_no_history(self):
         names = ["Not inserted: focus changed", "Daniel delivered the old wooden desk today.",
