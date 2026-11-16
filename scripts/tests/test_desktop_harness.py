@@ -2256,6 +2256,51 @@ class OwnedProbeWindowTests(unittest.TestCase):
             lease.complete_handoff(target)
         window.close.assert_not_called()
 
+    def test_startup_lease_rejects_foreground_change_inside_final_readiness(self):
+        state = {"input_desktop": "Default", "hwnd": 77, "process_id": 800,
+                 "gui_status": "ok", "active_hwnd": 77, "focus_hwnd": 77}
+        calls = []
+        def ready():
+            calls.append(True)
+            if len(calls) == 2:
+                state["hwnd"] = 42
+            return True
+        native = SimpleNamespace(is_window=lambda _: True, window_pid=lambda _: 800,
+                                 foreground_context=lambda: dict(state),
+                                 user32=SimpleNamespace(GetAncestor=lambda *_: 77), GA_ROOT=2)
+        target = SimpleNamespace(hwnd=77, handoff_owner_pid=800, handoff_ready=ready)
+        window = mock.Mock()
+        lease = run.StartupProbeLease(window, mock.Mock(), native, {})
+        self.assertFalse(lease.complete_handoff(target))
+        window.close.assert_not_called()
+        self.assertFalse(lease.closed)
+
+    def test_notepad_handoff_rejects_tab_change_during_document_discovery(self):
+        pad = targets.Notepad.__new__(targets.Notepad)
+        pad.owner_pid = 800
+        pad.win32 = SimpleNamespace(pids=lambda _: [800])
+        current = [True]
+        document = object()
+        def discover():
+            current[0] = False
+            return document
+        pad.document = discover
+        pad.active_document = lambda: current[0]
+        pad.uia = SimpleNamespace(descendants=lambda _: [], focused=lambda: document,
+                                  same=lambda a, b: a is b)
+        self.assertFalse(pad.handoff_ready())
+
+    def test_notepad_editor_rechecks_focus_after_descendant_enumeration(self):
+        pad = targets.Notepad.__new__(targets.Notepad)
+        document, external = object(), object()
+        focused = [document]
+        def descendants(_):
+            focused[0] = external
+            return []
+        pad.uia = SimpleNamespace(descendants=descendants, focused=lambda: focused[0],
+                                  same=lambda a, b: a is b)
+        self.assertFalse(pad.editor_focused(document))
+
     def test_context_registers_handoff_only_after_normal_target_focus(self):
         ctx = Context.__new__(Context)
         ctx.work, ctx.check_id = Path("work"), "H1"

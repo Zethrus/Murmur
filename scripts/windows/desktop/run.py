@@ -95,6 +95,9 @@ class StartupProbeLease:
 
     def _target_ready(self, target):
         try:
+            # UIA discovery can wait. Finish it before taking the final native snapshot.
+            if not target.handoff_ready():
+                return False
             hwnd, pid = target.hwnd, target.handoff_owner_pid
             if not hwnd or not pid or not self.win32.is_window(hwnd) or self.win32.window_pid(hwnd) != pid:
                 return False
@@ -105,7 +108,7 @@ class StartupProbeLease:
                     context.get("active_hwnd") != hwnd or not focus or
                     (focus != hwnd and self.win32.user32.GetAncestor(focus, self.win32.GA_ROOT) != hwnd)):
                 return False
-            return target.handoff_ready()
+            return True
         except Exception:  # noqa: BLE001 - a failed ownership read cannot authorize handoff
             # A rebuilding UIA element or an unknown owner cannot justify retirement.
             return False

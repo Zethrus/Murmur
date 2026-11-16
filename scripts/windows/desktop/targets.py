@@ -333,8 +333,8 @@ class Notepad:
 
     def handoff_ready(self):
         """The named document, live Notepad owner and editor focus all still agree."""
-        return (self.owner_pid in self.win32.pids("Notepad.exe") and
-                self.active_document() and self.editor_focused())
+        return (self.editor_focused() and self.active_document() and
+                self.owner_pid in self.win32.pids("Notepad.exe"))
 
     def save_owned(self):
         """Save the settled H8 document while keeping its tab and window alive."""
@@ -380,9 +380,10 @@ class Notepad:
 
     def editor_focused(self, document=None):
         document = document or self.document()
+        elements = [document] + self.uia.descendants(document)
         focused = self.uia.focused()
         return bool(focused) and any(self.uia.same(focused, element)
-                                     for element in [document] + self.uia.descendants(document))
+                                     for element in elements)
 
     def focus_diagnostic(self):
         focused = self.uia.focused()
