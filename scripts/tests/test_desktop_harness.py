@@ -720,7 +720,7 @@ class ImportTests(unittest.TestCase):
                                           reuse_owner_pid=None, reuse_windows={})
         self.assertEqual(ctx.restorer.restore_all(), [])
         self.assertEqual(ctx.close_completed_notepads(), [])
-        pad.close_owned.assert_called_once_with(max_tabs=65)
+        pad.close_owned.assert_called_once_with(max_tabs=65, guard_check=ctx.guard.check)
         pad.close.assert_not_called()
 
     def test_notepad_accepts_an_older_verified_window_but_rejects_unknown_existing_window(self):
@@ -939,6 +939,39 @@ class ImportTests(unittest.TestCase):
                 self.assertEqual(len(failures), 1)
                 self.assertIn("GuardUnavailable", failures[0][1])
                 self.assertEqual(events, [])
+
+    def test_guard_trip_during_owned_tab_cleanup_stops_next_input(self):
+        for phase in ("activation", "navigation", "save"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                pad = targets.Notepad(directory, "H1-doc")
+                pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+                pad.path.write_text("owned", encoding="utf-8")
+                state = {"tripped": False}
+                actions = []
+
+                def check():
+                    if state["tripped"]:
+                        raise guard.GuardUnavailable("probe missed during cleanup")
+
+                def activate(_):
+                    if phase == "activation":
+                        state["tripped"] = True
+                    return True
+
+                def tap(*keys):
+                    actions.append(keys)
+                    state["tripped"] = True
+
+                pad.win32 = SimpleNamespace(
+                    is_window=lambda _: True, window_pid=lambda _: 7, pids=lambda _: [7],
+                    foreground=lambda: 42, activate=activate, tap=tap,
+                    window_text=lambda _: ("unrelated.txt" if phase == "navigation" else pad.path.name)
+                    + " - Notepad", wait_for=lambda predicate, _: predicate())
+                with self.assertRaisesRegex(guard.GuardUnavailable, "during cleanup"):
+                    pad.close_owned(guard_check=check)
+                self.assertEqual(actions, [] if phase == "activation" else
+                                 [("ctrl", "tab")] if phase == "navigation" else [("ctrl", "s")])
+                self.assertEqual(pad.hwnd, 42)
 
     def test_notepad_h8_cleanup_closes_only_verified_tab(self):
         with tempfile.TemporaryDirectory() as directory:

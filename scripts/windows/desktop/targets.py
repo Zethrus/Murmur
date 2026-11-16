@@ -365,8 +365,10 @@ class Notepad:
         if not self.win32.wait_for(lambda: self.active_document() and self.text() == "", 5):
             raise RuntimeError(f"Notepad did not clear {self.path.name}")
 
-    def close_owned(self, max_tabs=64):
+    def close_owned(self, max_tabs=64, guard_check=None):
         """Close only this verified run-owned tab, never its shared window or another tab."""
+        check = guard_check or (lambda: None)
+        check()
         if not self.hwnd:
             return
         if not self.win32.is_window(self.hwnd):
@@ -374,11 +376,13 @@ class Notepad:
         if (self.win32.window_pid(self.hwnd) != self.owner_pid or
                 self.owner_pid not in self.win32.pids("Notepad.exe")):
             raise RuntimeError(f"Notepad window ownership changed for {self.path.name}")
+        check()
         if not self.win32.activate(self.hwnd):
             raise RuntimeError(f"Could not activate Notepad for {self.path.name}")
         # Restored tabs from earlier sessions can precede this run's fixtures.
         # Navigation is reversible; Ctrl+W is sent only when this run's unique title is active.
         for _ in range(max_tabs):
+            check()
             if (self.win32.foreground() != self.hwnd or self.win32.window_pid(self.hwnd) != self.owner_pid or
                     self.owner_pid not in self.win32.pids("Notepad.exe")):
                 raise RuntimeError(f"Notepad lost foreground or ownership during cleanup of {self.path.name}")
@@ -387,21 +391,29 @@ class Notepad:
                 # Save at final cleanup, then require the same owned, clean document
                 # before Ctrl+W so a save prompt cannot consume the close operation.
                 def saved_owned_document():
+                    check()
                     return (self.win32.foreground() == self.hwnd and self.active_document() and
                             self.win32.window_pid(self.hwnd) == self.owner_pid and
                             self.owner_pid in self.win32.pids("Notepad.exe") and
                             not self.win32.window_text(self.hwnd).lstrip().startswith(("*", "●")) and
                             self.path.is_file())
 
+                check()
                 self.win32.tap("ctrl", "s")
                 if not self.win32.wait_for(saved_owned_document, 5) or not saved_owned_document():
                     raise RuntimeError(f"Notepad save or ownership verification failed for {self.path.name}")
+                check()
                 self.win32.tap("ctrl", "w")
-                if not self.win32.wait_for(lambda: not self.win32.is_window(self.hwnd) or
-                                           not self.active_document(), 5):
+
+                def tab_closed():
+                    check()
+                    return not self.win32.is_window(self.hwnd) or not self.active_document()
+
+                if not self.win32.wait_for(tab_closed, 5):
                     raise RuntimeError(f"Notepad did not close {self.path.name}")
                 self.hwnd = 0
                 return
+            check()
             self.win32.tap("ctrl", "tab")
         raise RuntimeError(f"Could not locate owned Notepad tab {self.path.name}")
 

@@ -33,3 +33,5 @@ The next native run requires a renewed Edison readiness check and authorization
 from the run owner. No native run was performed here. Full manual 150% DPI,
 mixed DPI, Narrator and visual parity evidence remains pending. Release
 acceptance remains closed until the native failures and cleanup are resolved.
+
+Root review added guard checks inside each retained-tab cleanup operation and its save/close predicates, not just between tabs. Regressions trip the guard during activation, tab navigation, and saving; subsequent cleanup input is refused. Checks are best effort, not atomic with Windows input submission.

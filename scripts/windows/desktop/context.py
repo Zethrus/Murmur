@@ -155,7 +155,7 @@ class Context:
         for pad in reversed(self._completed_notepads):
             try:
                 self.guard.check()
-                pad.close_owned(max_tabs=tab_search_limit)
+                pad.close_owned(max_tabs=tab_search_limit, guard_check=self.guard.check)
             except Exception as error:  # noqa: BLE001 - try every verified fixture
                 errors.append((f"close Notepad {pad.path.name}", f"{type(error).__name__}: {error}"))
                 from guard import UserInput
