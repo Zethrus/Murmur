@@ -604,6 +604,27 @@ test("QA post-size probe samples viewport center only after native size acknowle
   assert.equal(probe.hitPill,false,"a mismatched viewport is observed, not accepted as a drag hit");
   h.unload();
 });
+test("QA viewport sampling handles late arming and ignores superseded size replies",async()=>{
+  for (const armFirst of [false,true]) {
+    let arm;const sizes=[];
+    const h=await harness({qa_overlay_drag_probe:async({probe})=>probe.stage===4?new Promise(resolve=>{arm=resolve;}):true,
+      set_overlay_size:()=>new Promise(resolve=>sizes.push(resolve))});
+    h.document.elementFromPoint=()=>h.root;
+    await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);await settle();
+    const pill=h.root.querySelector(".pill");
+    pill.rect={left:4,top:4,right:204,bottom:46,width:200,height:42};h.observers.trigger();
+    h.timers.tick(1500);
+    pill.rect={left:4,top:4,right:48,bottom:36,width:44,height:32};h.observers.trigger();
+    const latest=sizes.pop();assert.ok(sizes.length>0);
+    if(armFirst){arm(true);await settle();}
+    for(const resolve of sizes)resolve();await settle();
+    assert.ok(!h.calls.some(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6),"old replies cannot qualify the current layout");
+    latest();await settle();
+    if(!armFirst){assert.ok(!h.calls.some(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6));arm(true);await settle();}
+    assert.equal(h.calls.filter(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6).length,1);
+    h.unload();
+  }
+});
 test("suggestions, held text and drag errors use the full pill over the idle icon",async()=>{
   const h=await overlay({startOverlayDrag:async()=>{throw new Error("permission denied");}}),pill=h.root.querySelector(".pill"),label=h.root.querySelector(".pill-label");
   h.timers.tick(1500);assert.equal(h.root.dataset.idle,"icon");

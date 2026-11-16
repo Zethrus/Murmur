@@ -259,6 +259,19 @@ class ImportTests(unittest.TestCase):
         pad.active_document.return_value = False
         self.assertFalse(pad.owns_keyboard_focus())
         pad.active_document.return_value = True
+        def switch_tab():
+            pad.active_document.return_value = False
+            return True
+        pad.editor_focused.side_effect = switch_tab
+        self.assertFalse(pad.owns_keyboard_focus())
+        pad.active_document.return_value = True
+        def switch_foreground():
+            native["hwnd"] = 99
+            return True
+        pad.editor_focused.side_effect = switch_foreground
+        self.assertFalse(pad.owns_keyboard_focus())
+        native["hwnd"] = 77
+        pad.editor_focused.side_effect = None
         pids[42] = 1234
         self.assertFalse(pad.owns_keyboard_focus())
 

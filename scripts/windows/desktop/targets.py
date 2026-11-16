@@ -426,6 +426,12 @@ class Notepad:
 
     def owns_keyboard_focus(self):
         """O3's read-only proof that the active fixture's editor owns keyboard input."""
+        if not self.hwnd or not self.owner_pid or not self.win32.is_window(self.hwnd):
+            return False
+        # UIA discovery may wait. Do it before the final document/native ownership
+        # snapshot so a tab or foreground change during discovery cannot authorize input.
+        if self.menu_open() or not self.editor_focused():
+            return False
         if (not self.hwnd or not self.owner_pid or not self.win32.is_window(self.hwnd) or
                 self.win32.window_pid(self.hwnd) != self.owner_pid or
                 self.owner_pid not in self.win32.pids("Notepad.exe") or
@@ -447,8 +453,7 @@ class Notepad:
         active = native.get("active_hwnd", 0)
         return (owned(foreground) and owned(active) and owned(focus) and
                 active in (foreground, focus) and
-                self.win32.class_name(focus) == "RichEditD2DPT" and
-                not self.menu_open() and self.editor_focused())
+                self.win32.class_name(focus) == "RichEditD2DPT")
 
     def focus_diagnostic(self):
         focused = self.uia.focused()

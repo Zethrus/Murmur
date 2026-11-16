@@ -22,7 +22,9 @@ focus, UIA editor focus, and no menu mode. It checks that predicate immediately
 before and after the overlay click. It then types the exact next letter without
 activation or refocus and checks the resulting text. A child from a foreign
 process, another root or tab, a menu, and a secure desktop all fail closed.
-This is a harness assertion repair; a native O3 rerun is still required.
+Potentially waiting UIA discovery runs before the final fixture/native ownership
+checks, so tab or foreground changes during discovery are rejected. This is a
+harness assertion repair; a native O3 rerun is still required.
 
 ## O2: drag entry remains unproven
 
@@ -38,14 +40,20 @@ The settled-icon stage-5 DOM probe logged pill coordinates `[50, 30, 94, 62]`;
 the gesture's native rectangle is only 52×40. This suggests a viewport or
 coordinate mismatch, but stage 5 is logged once per mount and is not a fresh
 sample of this gesture. The QA-only frontend now reports stage 6 after the
-idle icon's native size acknowledgement and a paint frame. Stage 6 samples
+latest requested size acknowledgement and an animation-frame callback. Both
+late listener arming and late sizing acknowledgements are handled; superseded
+size replies cannot trigger a sample while a newer request remains pending.
+This does not prove that the WebView2 viewport has converged. Stage 6 samples
 `elementFromPoint` at the viewport center and records viewport dimensions,
 device pixel ratio and pill bounds. O2 waits for that probe, then records fresh
 UIA drag bounds, native visible/outer/client geometry, DPI and the hit child's
 client origin immediately before the *same* attempted gesture. Those values
 allow the next native result to map the actual screen click into the WebView2
-client and compare it with the fresh DOM hit. A false hit remains a test failure;
-no retry or changed drag input can hide the original gesture. There is no
+client. The DOM snapshots are historical launch evidence, not synchronized
+with the current gesture, especially when reusing a process. They can identify
+a candidate coordinate mismatch but cannot prove its presence at mouse-down.
+The original held-movement assertion remains mandatory; no retry or changed
+drag input can hide the original gesture. There is no
 production drag or focus behavior change.
 
 Local validation: the desktop harness suite passed 212 tests, the UI suite
@@ -55,3 +63,9 @@ Rust format check still reports pre-existing differences in the untouched
 `src-tauri/src/enhance/` files. This host did not run the Windows desktop checks
 or inspect the live WebView2 viewport. The release's manual DPI, Narrator,
 visual, build, signature and GPU gates remain separate owner-controlled work.
+
+Review follow-up: regressions reproduced the stale active-fixture approval and
+missing late-arming sample before the fixes. Coverage now also checks foreign
+foreground changes during UIA work and superseded size replies. After repair,
+212 harness tests, 65 UI tests, the frontend build and diff checks passed. No
+new native result is implied.

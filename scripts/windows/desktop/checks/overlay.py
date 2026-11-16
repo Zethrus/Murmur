@@ -24,7 +24,7 @@ def _reset_placement(ctx):
 
 
 def _qa_drag_ready(log):
-    """Require the listener, settled icon and a post-size viewport hit probe."""
+    """Require launch diagnostic coverage, not current-gesture viewport convergence."""
     lines = [line for line in log.splitlines() if "QA overlay drag probe" in line]
     armed = next((index for index, line in enumerate(lines) if re.search(r"\bstage=4(?:\s|$)", line)), None)
     if armed is None:
@@ -141,6 +141,7 @@ def o2_drag(ctx):
         f"{win32.window_text(win32.foreground())!r}\n"
         f"overlay names: {ctx.murmur.overlay_names()!r}\n"
         f"new drag log: {[line for line in ctx.murmur.log()[log_before:].splitlines() if 'drag' in line.lower()]!r}\n"
+        "DOM snapshots below are historical launch evidence, not synchronized with this gesture.\n"
         f"QA DOM hit probes: {[line for line in ctx.murmur.log(since_launch=True).splitlines() if 'QA overlay drag probe' in line]!r}\n"
         f"QA native mouse boundary: {[line for line in ctx.murmur.log()[log_before:].splitlines() if 'QA overlay native mouse' in line]!r}\n",
         encoding="utf-8")

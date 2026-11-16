@@ -21,6 +21,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   let enhancement: Enhancement = NONE, revision = -1, busy = false, acting = false, dragging = false, localMessage = "";
   let timer: ReturnType<typeof setTimeout> | undefined, expiry: ReturnType<typeof setTimeout> | undefined, noticeTimer: ReturnType<typeof setTimeout> | undefined;
   let qaDragProbeEnabled = false, qaDragProbeArmed = false, qaSettledReported = false;
+  let qaIconAcknowledged = false, qaSizeAcknowledged = 0, qaViewportReported = 0;
   const disposers: (()=>void)[] = [];
   const qaDragProbe = (stage: number, event?: MouseEvent): Promise<boolean> => {
     if (typeof document.elementFromPoint !== "function") return Promise.resolve(false);
@@ -41,11 +42,26 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
       rootPointerEvents: pointer(root), pillHidden: pill.hidden,
     }});
   };
+  const reportViewportSample = (): void => {
+    if (!qaDragProbeArmed || !qaIconAcknowledged || !layoutRevision ||
+        qaSizeAcknowledged !== layoutRevision || qaViewportReported === layoutRevision) return;
+    const sampleRevision = layoutRevision;
+    requestAnimationFrame(()=>{
+      if (disposed || sampleRevision !== layoutRevision || qaSizeAcknowledged !== sampleRevision ||
+          qaViewportReported === sampleRevision || state !== "idle" || root.dataset.idle !== "icon" || pill.hidden) return;
+      qaViewportReported = sampleRevision;
+      // This observes the latest acknowledged request, not viewport convergence or
+      // freshness at a later harness gesture. Gesture-time native geometry is separate.
+      void qaDragProbe(6).catch(()=>{});
+    });
+  };
   const reportSettledIcon = (): void => {
     if (!qaDragProbeArmed || qaSettledReported || disposed || state !== "idle" ||
         root.dataset.idle !== "icon" || pill.hidden) return;
     qaSettledReported = true;
-    void qaDragProbe(5).catch(()=>{});
+    void qaDragProbe(5).then(acknowledged=>{
+      if (acknowledged && !disposed) { qaIconAcknowledged = true; reportViewportSample(); }
+    }).catch(()=>{});
   };
   panel.hidden = true;
   const idleView = (): IdleView => config?.overlay.idle_view ?? "icon";
@@ -196,9 +212,10 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     const style = window.getComputedStyle(root);
     const next = windowSize({width:box.width,height:box.height},{top:cssLength(style.paddingTop),right:cssLength(style.paddingRight),bottom:cssLength(style.paddingBottom),left:cssLength(style.paddingLeft)});
     if (!sizeChanged(reported,next)) return; reported = next;
-    void call("set_overlay_size",{width:next.width,height:next.height,layoutRevision:++layoutRevision,layoutInstance})
-      .then(()=>{ if (qaDragProbeArmed && root.dataset.idle === "icon") {
-        requestAnimationFrame(()=>{ if (!disposed) void qaDragProbe(6).catch(()=>{}); });
+    const requestedRevision = ++layoutRevision;
+    void call("set_overlay_size",{width:next.width,height:next.height,layoutRevision:requestedRevision,layoutInstance})
+      .then(()=>{ if (!disposed && requestedRevision === layoutRevision) {
+        qaSizeAcknowledged = requestedRevision; reportViewportSample();
       } }).catch(()=>{});
   };
   const Observer = (globalThis as {ResizeObserver?: typeof ResizeObserver}).ResizeObserver;
