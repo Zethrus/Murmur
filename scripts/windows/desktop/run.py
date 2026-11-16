@@ -212,13 +212,13 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
     """Run checks until complete, real input, guard loss, or shared startup failure."""
     from guard import GuardUnavailable, UserInput
     import win32
-    from context import Fail, Skip
+    from context import Fail, Skip, TargetCreationError
     from murmur import StartupError
     results = []
     plan = [(attempt, check) for attempt in range(1, repeat + 1) for check in selected]
     mark_guard = getattr(ctx.guard, "mark", lambda stage: None)
     for position, (attempt, check) in enumerate(plan):
-        ctx.begin(check.id)
+        ctx.begin(check.id, attempt)
         mark_guard(f"{check.id}:{attempt}:begin")
         mark = ctx.restorer.mark()
         started = time.monotonic()
@@ -251,6 +251,9 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
             return results, reason
         except Skip as error:
             status, reason = report.SKIPPED, str(error) or "skipped"
+        except TargetCreationError as error:
+            status, reason = report.FAIL, str(error)
+            startup_failure = f"blocked after {check.id} target creation failure: {error}"
         except Fail as error:
             status, reason = report.FAIL, str(error) or "failed"
         except StartupError as error:
@@ -349,6 +352,7 @@ def main(argv=None):
     h8_selected = any(check.id == "H8" for check in selected)
     session = None
     startup_lease = None
+    ctx = None
     try:
         print("Preparing fixtures and the test profile (no input yet)...")
         speech = fixtures.build(cache / "fixtures")
@@ -373,7 +377,8 @@ def main(argv=None):
         meta["parent_desktop_context"] = win32.desktop_context()
         ctx = Context(build=build, session=session, fixtures=speech, goldens=golden.GoldenStore(), restorer=restorer,
                       guard=guard, out=out, work=work, hotkey=args.hotkey, cache=cache,
-                      startup_probe_lease=startup_lease)
+                      startup_probe_lease=startup_lease,
+                      retain_completed_notepads={check.id for check in selected} <= {"H1", "H8"})
         results, aborted = run_checks(ctx, selected, args.repeat, checks.lookup)
         meta["goldens"] = ctx.goldens.as_dict()
     except UserInput as error:
@@ -401,9 +406,16 @@ def main(argv=None):
                 aborted = aborted or f"aborted: input guard unavailable ({error})"
         meta["input_guard"] = guard.diagnostics()
         win32.release_all()
+        if ctx is not None:
+            completed_failures = ctx.close_completed_notepads()
+            if completed_failures:
+                meta["completed_target_cleanup_failures"] = [f"{label}: {message}"
+                                                             for label, message in completed_failures]
+                aborted = aborted or "aborted: completed Notepad fixture cleanup failed"
         failures = restorer.restore_all()
         if failures:
             meta["restore_failures"] = [f"{label}: {message}" for label, message in failures]
+            aborted = aborted or "aborted: run restoration failed"
         if not args.keep_work and not remove_tree(work):
             meta["cleanup"] = f"could not delete {work}"
         meta["finished"] = report.now()

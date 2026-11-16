@@ -627,9 +627,14 @@ class ImportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             pad = targets.Notepad(directory, "H8-alt")
             self.assertIn(Path(directory).name, pad.path.name)
+            with tempfile.TemporaryDirectory() as another:
+                self.assertNotEqual(pad.path.name, targets.Notepad(another, "H8-alt").path.name)
+                self.assertNotEqual(targets.Notepad(directory, "H1-doc").path.name,
+                                    targets.Notepad(another, "H1-doc").path.name)
             pad.win32 = SimpleNamespace(find_windows=lambda **_: [42],
                                         window_text=lambda _: f"{pad.path.name} - Notepad",
                                         is_window=lambda _: True, window_pid=lambda _: 7,
+                                        pids=lambda _: [7],
                                         wait_for=lambda predicate, _: predicate())
             with mock.patch.object(targets.subprocess, "Popen"):
                 self.assertIs(pad.start(reuse_hwnd=42, owned_tab=True), pad)
@@ -639,6 +644,13 @@ class ImportTests(unittest.TestCase):
                 pad.win32.window_text = lambda _: "notepad-H8-control.txt - Notepad"
                 with self.assertRaisesRegex(RuntimeError, "Notepad did not open"):
                     targets.Notepad.start(pad, reuse_hwnd=42, owned_tab=True)
+
+                pad.win32.window_text = lambda _: f"{pad.path.name} - Notepad"
+                with self.assertRaisesRegex(RuntimeError, "Notepad did not open"):
+                    targets.Notepad.start(pad, reuse_hwnd=42, owned_tab=True, reuse_owner_pid=8)
+                pad.win32.pids = lambda _: [8]
+                with self.assertRaisesRegex(RuntimeError, "owner is not Notepad.exe"):
+                    targets.Notepad.start(pad, reuse_hwnd=42, owned_tab=True, reuse_owner_pid=7)
 
     def test_h8_context_registers_tab_cleanup_instead_of_window_close(self):
         ctx = Context.__new__(Context)
@@ -654,6 +666,114 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(ctx.restorer.restore_all(), [])
         pad.close_owned.assert_called_once_with()
         pad.close.assert_not_called()
+
+    def test_narrow_h1_h8_retains_owned_tabs_with_stable_restoration_marks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events, pads, starts = [], [], []
+            restorer = restore.Restorer(log=lambda _: None)
+            restorer.push("run baseline", lambda: events.append("run baseline"))
+            baseline = restorer.mark()
+            ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
+                          goldens=None, restorer=restorer, guard=SimpleNamespace(check=lambda: None),
+                          out=directory, work=directory, hotkey="", cache=directory,
+                          retain_completed_notepads=True)
+
+            def start(pad, **kwargs):
+                starts.append(kwargs)
+                pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, kwargs["owned_tab"]
+                pad.win32 = SimpleNamespace(is_window=lambda _: True, window_pid=lambda _: 7)
+                pads.append(pad)
+                return pad
+
+            def lookup(check):
+                def run_check(context):
+                    # These represent clipboard, settings, registry, and mouse undos. Each
+                    # must run before the next check despite the retained Notepad tab.
+                    for label in ("clipboard", "settings", "registry", "mouse"):
+                        context.restorer.push(label, lambda label=label: events.append(label))
+                    context.notepad("doc" if check.id == "H1" else "control")
+                    if check.id == "H8":
+                        self.assertEqual(events[-4:], ["mouse", "registry", "settings", "clipboard"])
+                return run_check
+
+            with mock.patch.object(targets.Notepad, "start", autospec=True, side_effect=start), \
+                 mock.patch.object(targets.Notepad, "close_owned", autospec=True,
+                                   side_effect=lambda pad: events.append(f"close {pad.path.name}")), \
+                 mock.patch.object(targets.Notepad, "close", autospec=True) as close_window, \
+                 mock.patch.object(win32, "release_all"):
+                results, aborted = run.run_checks(ctx, catalog.select("H1,H8"), 2, lookup,
+                                                   log=lambda _: None)
+                self.assertEqual([result.status for result in results], [report.PASS] * 4)
+                self.assertEqual(aborted, "")
+                self.assertEqual(restorer.mark(), baseline)
+                self.assertEqual(len(pads), 4)
+                self.assertEqual(len({pad.path.name for pad in pads}), 4)
+                self.assertTrue(all(Path(directory).name in pad.path.name for pad in pads))
+                self.assertEqual([item["reuse_hwnd"] for item in starts], [None, 42, 42, 42])
+                self.assertEqual([item["reuse_owner_pid"] for item in starts], [None, 7, 7, 7])
+                self.assertTrue(all(item["owned_tab"] for item in starts))
+                self.assertFalse(any(event.startswith("close ") for event in events))
+                self.assertEqual(ctx.close_completed_notepads(), [])
+                self.assertEqual([event for event in events if event.startswith("close ")],
+                                 [f"close {pad.path.name}" for pad in reversed(pads)])
+                close_window.assert_not_called()
+            self.assertEqual(restorer.mark(), baseline)
+
+    def test_retained_notepad_rejects_foreign_reuse_and_reports_failed_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
+                          goldens=None, restorer=restore.Restorer(log=lambda _: None),
+                          guard=SimpleNamespace(check=lambda: None), out=directory, work=directory,
+                          hotkey="", cache=directory, retain_completed_notepads=True)
+            with mock.patch.object(targets.Notepad, "start", side_effect=RuntimeError("creation failed")):
+                with mock.patch.object(win32, "release_all"):
+                    results, aborted = run.run_checks(ctx, catalog.select("H1,H8"), 1,
+                                                       lambda _: lambda context: context.notepad(),
+                                                       log=lambda _: None)
+            self.assertEqual(results[0].status, report.FAIL)
+            self.assertIn("creation failed", results[0].reason)
+            self.assertEqual(results[1].status, report.ABORTED)
+            self.assertIn("target creation failure", aborted)
+            self.assertEqual(len(ctx._completed_notepads), 1)
+            # A failed spawn has no verified HWND. It must not activate or close an unknown tab.
+            with mock.patch.object(win32, "activate") as activate, mock.patch.object(win32, "tap") as tap:
+                self.assertEqual(ctx.close_completed_notepads(), [])
+                activate.assert_not_called()
+                tap.assert_not_called()
+            ctx.begin("H8")
+            with mock.patch.object(targets.Notepad, "start") as start:
+                with self.assertRaisesRegex(RuntimeError, "not a completed fixture"):
+                    ctx.notepad("alt", reuse_hwnd=99, owned_tab=True)
+                start.assert_not_called()
+
+    def test_retained_notepad_is_drained_after_guard_abort(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
+                          goldens=None, restorer=restore.Restorer(log=lambda _: None),
+                          guard=SimpleNamespace(check=lambda: None), out=directory, work=directory,
+                          hotkey="", cache=directory, retain_completed_notepads=True)
+
+            def start(pad, **_):
+                pad.hwnd, pad.owner_pid = 42, 7
+                return pad
+
+            def check(context):
+                context.notepad()
+                raise guard.GuardUnavailable("probe 17 missed")
+
+            with mock.patch.object(targets.Notepad, "start", autospec=True, side_effect=start), \
+                 mock.patch.object(targets.Notepad, "close_owned", autospec=True,
+                                   side_effect=lambda pad: events.append(pad.path.name)), \
+                 mock.patch.object(win32, "release_all"):
+                results, aborted = run.run_checks(ctx, catalog.select("H1,H8"), 1,
+                                                   lambda _: check, log=lambda _: None)
+                self.assertEqual([result.status for result in results],
+                                 [report.ABORTED, report.ABORTED])
+                self.assertIn("input guard unavailable", aborted)
+                self.assertEqual(events, [])
+                self.assertEqual(ctx.close_completed_notepads(), [])
+                self.assertEqual(len(events), 1)
 
     def test_notepad_h8_cleanup_closes_only_verified_tab(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -679,6 +799,7 @@ class ImportTests(unittest.TestCase):
             pad.win32 = SimpleNamespace(is_window=lambda _: state["open"],
                                         window_text=lambda _: titles[state["tab"]],
                                         window_pid=lambda _: 7,
+                                        pids=lambda _: [7],
                                         activate=lambda _: True, foreground=lambda: 42, tap=tap,
                                         wait_for=lambda predicate, _: predicate())
             pad.close_owned()
@@ -710,6 +831,10 @@ class ImportTests(unittest.TestCase):
             pad.win32.window_pid = lambda _: 8
             pad.win32.activate = mock.Mock()
             with self.assertRaisesRegex(RuntimeError, "window ownership changed"):
+                pad.close_owned()
+            pad.win32.activate.assert_not_called()
+            pad.win32.is_window = lambda _: False
+            with self.assertRaisesRegex(RuntimeError, "window disappeared"):
                 pad.close_owned()
             pad.win32.activate.assert_not_called()
 
@@ -1307,7 +1432,7 @@ class FakeContext:
         self.out = Path(work)
         self.artifacts, self.notes, self.check_id = [], [], ""
 
-    def begin(self, check_id):
+    def begin(self, check_id, attempt=1):
         self.check_id, self.artifacts, self.notes = check_id, [], []
 
     def artifact(self, suffix):
@@ -2337,14 +2462,15 @@ class OwnedProbeWindowTests(unittest.TestCase):
         ctx.startup_probe_lease.complete_handoff.assert_called_with(pad)
 
     def test_outer_run_closes_no_target_lease_before_restore_on_repeat_or_abort(self):
-        cases = (("H1,H8", 2, ([], ""), False, False),
-                 ("H8", 1, guard.UserInput("owner touched input"), False, False),
-                 ("H8", 1, RuntimeError("check setup failed"), False, False),
-                 ("H8", 1, ([], ""), True, False),
-                 ("H8", 1, ([], ""), False, True))
-        for selection, repeat, outcome, stop_error, close_error in cases:
+        cases = (("H1,H8", 2, ([], ""), False, False, False),
+                 ("H8", 1, guard.UserInput("owner touched input"), False, False, False),
+                 ("H8", 1, RuntimeError("check setup failed"), False, False, False),
+                 ("H8", 1, ([], ""), True, False, False),
+                 ("H8", 1, ([], ""), False, True, False),
+                 ("H1,H8", 1, ([], ""), False, False, True))
+        for selection, repeat, outcome, stop_error, close_error, cleanup_error in cases:
             with self.subTest(selection=selection, repeat=repeat, outcome=outcome,
-                              stop_error=stop_error, close_error=close_error):
+                              stop_error=stop_error, close_error=close_error, cleanup_error=cleanup_error):
                 with tempfile.TemporaryDirectory() as temporary:
                     events = []
                     observer = mock.Mock()
@@ -2388,6 +2514,9 @@ class OwnedProbeWindowTests(unittest.TestCase):
                         mock.patch.object(targets, "show_banner"),
                         mock.patch.object(guard, "Guard", return_value=observer),
                         mock.patch.object(report, "write", return_value=SimpleNamespace(read_text=lambda **_: "{}")),
+                        mock.patch.object(Context, "close_completed_notepads",
+                                          return_value=[("close Notepad", "RuntimeError: failed")]
+                                          if cleanup_error else []),
                     ]
                     with ExitStack() as stack:
                         start = stack.enter_context(patches[1])
@@ -2395,12 +2524,17 @@ class OwnedProbeWindowTests(unittest.TestCase):
                             stack.enter_context(patch)
                         code = run.main(["--build", temporary, "--out", temporary,
                                          "--only", selection, "--repeat", str(repeat)])
+                        written_meta = report.write.call_args.args[1]
                     self.assertEqual(code, 0 if isinstance(outcome, tuple) and
-                                     not stop_error and not close_error else 1)
+                                     not stop_error and not close_error and not cleanup_error else 1)
                     self.assertEqual(start.call_count, 1)
                     lease.close.assert_called_once_with()
                     self.assertLess(events.index("guard_stop"), events.index("lease_close"))
                     self.assertLess(events.index("lease_close"), events.index("restore_murmur"))
+                    if cleanup_error:
+                        self.assertEqual(written_meta["completed_target_cleanup_failures"],
+                                         ["close Notepad: RuntimeError: failed"])
+                        self.assertIn("cleanup failed", written_meta["aborted"])
 
     def test_startup_lease_close_failure_is_fail_closed_and_retryable(self):
         window = mock.Mock(restoration="window_thread_stop_timeout")

@@ -16,6 +16,10 @@ class Fail(Exception):
     pass
 
 
+class TargetCreationError(Fail):
+    """A diagnostic Notepad spawn may have left an unverified tab; stop later checks."""
+
+
 class OutputCount(Fail):
     """The per-utterance history did not contain exactly one output."""
 
@@ -33,7 +37,7 @@ HOLD_MARGIN = 0.8  # seconds held after the spoken sentence ends
 
 class Context:
     def __init__(self, *, build, session, fixtures, goldens, restorer, guard, out, work, hotkey, cache,
-                 startup_probe_lease=None):
+                 startup_probe_lease=None, retain_completed_notepads=False):
         self.build = build
         self.murmur = session
         self.fixtures = fixtures
@@ -45,16 +49,21 @@ class Context:
         self.hotkey = hotkey
         self.cache = Path(cache)
         self.startup_probe_lease = startup_probe_lease
+        self.retain_completed_notepads = retain_completed_notepads
+        # Separate from Restorer: its depth marks must still unwind every per-check undo.
+        self._completed_notepads = []
         self.artifacts = []
         self.notes = []
         self.check_id = ""
+        self.attempt = 1
         self._targets = []
         self._delivery_cursor = None
         self._delivery_fixture = None
 
     # ------------------------------------------------------------ bookkeeping
-    def begin(self, check_id):
+    def begin(self, check_id, attempt=1):
         self.check_id = check_id
+        self.attempt = attempt
         self.artifacts, self.notes = [], []
         self._delivery_cursor = self._delivery_fixture = None
         # Only dictation checks opt into the app's existing history in this disposable profile.
@@ -100,12 +109,55 @@ class Context:
 
     def notepad(self, name="doc", *, reuse_hwnd=None, owned_tab=False):
         import targets
-        pad = targets.Notepad(self.work, f"{self.check_id}-{name}").start(
-            reuse_hwnd=reuse_hwnd, owned_tab=owned_tab)
+        retain = (getattr(self, "retain_completed_notepads", False) and self.check_id in ("H1", "H8"))
+        if retain:
+            owned_tab = True
+            reuse_owner_pid = None
+            if reuse_hwnd is not None:
+                reuse_owner_pid = next((previous.owner_pid for previous in self._completed_notepads
+                                        if previous.hwnd == reuse_hwnd), None)
+                if reuse_owner_pid is None:
+                    raise RuntimeError("Notepad reuse handle is not a completed fixture owned by this run")
+            if reuse_hwnd is None and self._completed_notepads:
+                previous = self._completed_notepads[-1]
+                if previous.hwnd and previous.win32.is_window(previous.hwnd):
+                    if previous.win32.window_pid(previous.hwnd) != previous.owner_pid:
+                        raise RuntimeError("Completed Notepad window ownership changed before target creation")
+                    reuse_hwnd = previous.hwnd
+                    reuse_owner_pid = previous.owner_pid
+        fixture_name = f"{self.check_id}-{name}"
+        if self.check_id in ("H1", "H8") and getattr(self, "attempt", 1) > 1:
+            fixture_name += f"-{self.attempt}"
+        pad = targets.Notepad(self.work, fixture_name)
+        # Creation may fail after spawning Notepad. Keep the incomplete fixture for final
+        # ownership-checked cleanup; the creation exception itself fails the check.
+        if retain:
+            self._completed_notepads.append(pad)
+        start_options = {"reuse_hwnd": reuse_hwnd, "owned_tab": owned_tab}
+        if retain:
+            start_options["reuse_owner_pid"] = reuse_owner_pid
+        try:
+            pad.start(**start_options)
+        except Exception as error:
+            if retain:
+                raise TargetCreationError(f"Notepad target creation failed: {error}") from error
+            raise
         if getattr(self, "startup_probe_lease", None) is not None:
             pad._startup_handoff = self.startup_probe_lease.complete_handoff
-        self.restorer.push(f"close Notepad {pad.path.name}", pad.close_owned if owned_tab else pad.close)
+        if not retain:
+            self.restorer.push(f"close Notepad {pad.path.name}", pad.close_owned if owned_tab else pad.close)
         return pad
+
+    def close_completed_notepads(self):
+        """Retire diagnostic tabs at run end, after the guard has stopped."""
+        errors = []
+        for pad in reversed(self._completed_notepads):
+            try:
+                pad.close_owned()
+            except Exception as error:  # noqa: BLE001 - try every verified fixture
+                errors.append((f"close Notepad {pad.path.name}", f"{type(error).__name__}: {error}"))
+        self._completed_notepads.clear()
+        return errors
 
     def clipboard_guard(self):
         """Restore the clipboard text after the check (other formats cannot be restored)."""
