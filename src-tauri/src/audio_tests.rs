@@ -195,6 +195,40 @@ fn qa_stop_flushes_elapsed_audio_even_without_a_worker_tick() -> Result<()> {
     Ok(())
 }
 #[test]
+fn qa_terminal_flush_cannot_enqueue_stop_events_for_a_restart() -> Result<()> {
+    for max_utterance_s in [1, 90] {
+        let cfg = config::Audio {
+            max_utterance_s,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        let callback: Callback = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let (mut capture, _) = AudioCapture::new_remote(&cfg, |_| {});
+        capture.start()?;
+        let mut source = vec![0.25; 6400];
+        source.resize(32_000, 0.0);
+        capture.qa_source = Some((Arc::new(source), 16_000, callback));
+        let started = Instant::now();
+        capture.buffer.lock().unwrap().qa_started = Some(started);
+        let pcm = capture.stop_at(started + Duration::from_secs(2))?;
+        assert_eq!(pcm.len(), 31_999);
+        assert!(pcm[..6400].iter().all(|&sample| sample == 0.25));
+        assert!(pcm[6400..].iter().all(|&sample| sample == 0.0));
+        // Both endpoint and EOF/duration were crossed, but this capture is already stopping.
+        assert!(capture.buffer.lock().unwrap().endpoint);
+        assert!(capture.buffer.lock().unwrap().max_sent);
+        capture.start()?;
+        assert!(capture.buffer.lock().unwrap().start.is_some());
+        assert!(
+            rx.try_iter().next().is_none(),
+            "terminal flush queued stale events after restart"
+        );
+    }
+    Ok(())
+}
+#[test]
 fn gain_and_preroll() {
     let b = Buffer {
         ring: VecDeque::from([0.8, -0.8, 0.2]),

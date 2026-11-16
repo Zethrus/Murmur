@@ -416,8 +416,18 @@ impl AudioCapture {
             .buffer
             .lock()
             .map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?;
-        if let Some((source, source_rate, callback)) = &self.qa_source {
-            push_qa_due(&mut b, source, *source_rate, now, &self.cfg, callback);
+        if let Some((source, source_rate, _)) = &self.qa_source {
+            // This capture is already stopping. Catch up PCM without queuing endpoint,
+            // duration, or level events that could be consumed after a subsequent Start.
+            let terminal_callback: Callback = Arc::new(|_| {});
+            push_qa_due(
+                &mut b,
+                source,
+                *source_rate,
+                now,
+                &self.cfg,
+                &terminal_callback,
+            );
         }
         let pcm = b.pcm(self.cfg.gain);
         if let Some((source, source_rate, _)) = &self.qa_source {
