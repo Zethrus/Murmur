@@ -92,10 +92,16 @@ def o2_drag(ctx):
     log_before = len(ctx.murmur.log())
     before = win32.window_rect(hwnd)
     ctx.screenshot(hwnd, "drag-before.png")
-    start = overlay_drag_point(ctx)
+    start, handle_rect = overlay_drag_point(ctx, return_bounds=True)
+    # Sample UIA and native geometry at this gesture, after the settled-icon handshake.
+    # The mount's stage-5 DOM probe alone may predate a WebView2 viewport resize.
+    native_geometry = {"visible": win32.window_rect(hwnd), "outer": win32.outer_rect(hwnd),
+                       "client_size": win32.client_size(hwnd), "dpi_scale": win32.dpi_scale(hwnd)}
     end = (start[0] - 300, start[1] - 200)
     hit = win32.user32.WindowFromPoint(win32.POINT(*start))
     hit_root = win32.user32.GetAncestor(hit, win32.GA_ROOT)
+    hit_geometry = {"rect": win32.window_rect(hit), "client_size": win32.client_size(hit),
+                    "class": win32.class_name(hit), "pid": win32.window_pid(hit)} if hit else None
     samples = []
 
     def sample(stage, step):
@@ -114,6 +120,8 @@ def o2_drag(ctx):
     ctx.screenshot(ctx.murmur.overlay_hwnd(), "drag-after.png")
     ctx.artifact("drag-diagnostic.txt").write_text(
         f"start: {start}; end: {end}\nbefore: {before}; held: {held}; after: {after}\n"
+        f"gesture-time UIA drag bounds: {handle_rect}; native overlay: {native_geometry!r}; "
+        f"hit child: {hit_geometry!r}\n"
         f"hit hwnd: {hex(hit)}; root: {hex(hit_root)}; overlay: {hex(hwnd)}; "
         f"hit owned by overlay: {hit_root == hwnd}\n"
         f"samples (monotonic, stage, step, cursor, physical left down, overlay rect):\n"
@@ -177,10 +185,8 @@ def o3_buttons_keep_focus(ctx):
         produce_held(ctx, "A", origin, pad, after_focus=lambda: observe("after focus_while_held"))
         observe("held before overlay click")
         before_click = observations[-1]
-        ctx.require(win32.foreground() == pad.hwnd, "Notepad lost focus before the overlay click")
-        if not pad.editor_focused():
-            raise Fail(f"Notepad editor lost keyboard focus before the overlay {button} click")
-        click_overlay(ctx, button, expect_foreground=pad.hwnd)
+        ctx.require(pad.owns_keyboard_focus(), "Owned Notepad editor lost keyboard focus before the overlay click")
+        click_overlay(ctx, button, expect_focus=pad.owns_keyboard_focus)
         expected += "x" if button == "Discard" else "y"
         _type_lands(ctx, pad, expected[-1], expected, before_click)
         wait_not_held(ctx)

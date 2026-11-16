@@ -25,6 +25,7 @@ from checks import focus as focus_checks  # noqa: E402
 from checks import insertion as insertion_checks  # noqa: E402
 from checks import hotkeys as hotkey_checks  # noqa: E402
 from checks import microphone as microphone_checks  # noqa: E402
+from checks import common as common_checks  # noqa: E402
 import fixtures  # noqa: E402
 import golden  # noqa: E402
 import guard  # noqa: E402
@@ -213,6 +214,65 @@ class ImportTests(unittest.TestCase):
         pad.win32.activate.assert_called_once_with(42, click_at=None)
         document.SetFocus.assert_called_once_with()
         pad.win32.click.assert_not_called()
+
+    def test_o3_owned_editor_focus_accepts_notepad_child_and_rejects_other_targets(self):
+        pad = targets.Notepad.__new__(targets.Notepad)
+        pad.hwnd, pad.owner_pid = 42, 33852
+        pad.active_document = mock.Mock(return_value=True)
+        pad.editor_focused = mock.Mock(return_value=True)
+        pad.menu_open = mock.Mock(return_value=False)
+        native = {"hwnd": 77, "active_hwnd": 77, "focus_hwnd": 77,
+                  "input_desktop": "Default", "gui_status": "ok", "gui_flags": 0,
+                  "process_id": 33852}
+        roots = {42: 42, 77: 42, 88: 42, 99: 99, 110: 42}
+        pids = {42: 33852, 77: 33852, 88: 1234, 99: 1234, 110: 33852}
+        pad.win32 = SimpleNamespace(
+            GA_ROOT=2, user32=SimpleNamespace(GetAncestor=lambda hwnd, _flag: roots[hwnd]),
+            is_window=lambda hwnd: hwnd in roots, window_pid=lambda hwnd: pids[hwnd],
+            pids=lambda _name: [33852], foreground_context=lambda: native,
+            class_name=lambda hwnd: "RichEditD2DPT" if hwnd == 77 else "Button")
+        self.assertTrue(pad.owns_keyboard_focus())  # observed O3 RichEdit foreground
+        native["hwnd"] = 42
+        self.assertTrue(pad.owns_keyboard_focus())  # ordinary top-level foreground
+        native["hwnd"] = 88
+        self.assertFalse(pad.owns_keyboard_focus())  # foreign-process child under the same root
+        native["hwnd"] = 99
+        self.assertFalse(pad.owns_keyboard_focus())  # different root
+        native["hwnd"] = 77
+        for change in ({"focus_hwnd": 88}, {"focus_hwnd": 99}, {"focus_hwnd": 42},
+                       {"active_hwnd": 110, "focus_hwnd": 110},
+                       {"gui_flags": 0x4}, {"gui_flags": 0x10},
+                       {"input_desktop": "Winlogon"},
+                       {"process_id": 1234}):
+            with self.subTest(change=change):
+                trial = native.copy()
+                native.update(change)
+                self.assertFalse(pad.owns_keyboard_focus())
+                native.clear()
+                native.update(trial)
+        pad.menu_open.return_value = True
+        self.assertFalse(pad.owns_keyboard_focus())
+        pad.menu_open.return_value = False
+        pad.editor_focused.return_value = False
+        self.assertFalse(pad.owns_keyboard_focus())
+        pad.editor_focused.return_value = True
+        pad.active_document.return_value = False
+        self.assertFalse(pad.owns_keyboard_focus())
+        pad.active_document.return_value = True
+        pids[42] = 1234
+        self.assertFalse(pad.owns_keyboard_focus())
+
+    def test_overlay_click_checks_owned_focus_after_click_without_refocusing(self):
+        state = {"focused": True}
+        ctx = SimpleNamespace(murmur=SimpleNamespace(overlay=lambda: object()),
+                              sleep=lambda _: None)
+        with mock.patch.object(common_checks, "overlay_button", return_value=object()), \
+             mock.patch.object(common_checks.uia, "center", return_value=(10, 20)), \
+             mock.patch.object(common_checks.win32, "click", side_effect=lambda *_: state.update(focused=False)) as click, \
+             mock.patch.object(common_checks.win32, "foreground", side_effect=AssertionError("raw hwnd check")):
+            with self.assertRaisesRegex(Fail, "moved keyboard focus"):
+                common_checks.click_overlay(ctx, "Discard", expect_focus=lambda: state["focused"])
+        click.assert_called_once_with(10, 20)
 
     def test_notepad_mode_label_reports_visible_plain_or_formatted_state(self):
         pad = targets.Notepad.__new__(targets.Notepad)
@@ -1107,18 +1167,21 @@ class ImportTests(unittest.TestCase):
         from checks import overlay as checks_overlay
         with tempfile.TemporaryDirectory() as directory:
             pad = SimpleNamespace(hwnd=42, focus_diagnostic=lambda: "UIA focus: MenuItem 'File'\n",
-                                  editor_focused=lambda: False)
+                                  owns_keyboard_focus=lambda: False)
+            def require(condition, reason):
+                if not condition:
+                    raise Fail(reason)
             ctx = SimpleNamespace(murmur=SimpleNamespace(ensure=lambda *_: None),
                                   fixtures={"A": SimpleNamespace(path="fixture.wav")},
                                   clipboard_guard=lambda: None, target=lambda *_: object(),
                                   artifact=lambda suffix: Path(directory) / suffix,
-                                  require=lambda condition, reason: self.assertTrue(condition, reason))
+                                  require=require)
             with mock.patch.object(checks_overlay, "_notepad_with_word", return_value=pad), \
                  mock.patch.object(checks_overlay, "produce_held",
                                    side_effect=lambda *_a, after_focus=None: after_focus()), \
                  mock.patch.object(checks_overlay, "click_overlay") as click, \
                  mock.patch.object(win32, "foreground", return_value=42):
-                with self.assertRaisesRegex(Fail, "before the overlay Discard click"):
+                with self.assertRaisesRegex(Fail, "before the overlay click"):
                     checks_overlay.o3_buttons_keep_focus(ctx)
             click.assert_not_called()
             evidence = (Path(directory) / "discard-focus-diagnostic.txt").read_text()
@@ -1131,10 +1194,12 @@ class ImportTests(unittest.TestCase):
         ctx = SimpleNamespace(murmur=SimpleNamespace(overlay=lambda: object(), overlay_hwnd=lambda: 42),
                               sleep=lambda _: None)
         with mock.patch.object(common.uia, "find", return_value="handle"), \
-             mock.patch.object(common.uia, "center", side_effect=[(120, 130), (250, 130)]), \
+             mock.patch.object(common.uia, "center", side_effect=[(120, 130), (120, 130), (250, 130)]), \
              mock.patch.object(common.uia, "rect", return_value=(110, 120, 130, 140)), \
              mock.patch.object(win32, "window_rect", return_value=(100, 100, 200, 200)):
             self.assertEqual(common.overlay_drag_point(ctx), (120, 130))
+            self.assertEqual(common.overlay_drag_point(ctx, return_bounds=True),
+                             ((120, 130), (110, 120, 130, 140)))
             with self.assertRaisesRegex(Fail, "outside overlay"):
                 common.overlay_drag_point(ctx)
 

@@ -30,7 +30,7 @@ def overlay_button(ctx, label, timeout=10):
     return uia.find(overlay, name_=label, control_type_=uia.BUTTON, timeout=timeout, sleep=ctx.sleep)
 
 
-def click_overlay(ctx, label, expect_foreground=None):
+def click_overlay(ctx, label, expect_foreground=None, expect_focus=None):
     """Real mouse click on an overlay button (B7: it must not take focus)."""
     button = overlay_button(ctx, label)
     x, y = uia.center(button)
@@ -38,10 +38,12 @@ def click_overlay(ctx, label, expect_foreground=None):
     ctx.sleep(0.6)
     if expect_foreground and win32.foreground() != expect_foreground:
         raise Fail(f"Clicking overlay '{label}' moved focus to {win32.window_text(win32.foreground())!r}")
+    if expect_focus is not None and not expect_focus():
+        raise Fail(f"Clicking overlay '{label}' moved keyboard focus from the expected editor")
     return x, y
 
 
-def overlay_drag_point(ctx):
+def overlay_drag_point(ctx, return_bounds=False):
     """Center of the rendered drag affordance, rather than a window-size guess."""
     element = uia.find(ctx.murmur.overlay(), name_="Drag to move", timeout=5, sleep=ctx.sleep)
     handle = uia.rect(element)
@@ -51,7 +53,7 @@ def overlay_drag_point(ctx):
     left, top, right, bottom = win32.window_rect(ctx.murmur.overlay_hwnd())
     if not (left <= point[0] < right and top <= point[1] < bottom):
         raise Fail(f"Drag handle {handle} is outside overlay {(left, top, right, bottom)}")
-    return point
+    return (point, handle) if return_bounds else point
 
 
 def wait_held(ctx, timeout=30):
