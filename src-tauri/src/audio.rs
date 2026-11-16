@@ -94,6 +94,7 @@ struct Buffer {
     endpoint: bool,
     max_sent: bool,
     qa_pos: usize,
+    qa_started: Option<Instant>,
 }
 impl Default for Buffer {
     fn default() -> Self {
@@ -109,6 +110,7 @@ impl Default for Buffer {
             endpoint: false,
             max_sent: false,
             qa_pos: 0,
+            qa_started: None,
         }
     }
 }
@@ -170,14 +172,39 @@ pub fn rms(samples: &[f32]) -> f32 {
     }
     (samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32).sqrt()
 }
+/// Supply the source samples due at this instant, catching up after a delayed QA worker tick.
+fn push_qa_due(
+    b: &mut Buffer,
+    mono: &[f32],
+    rate: u32,
+    now: Instant,
+    cfg: &config::Audio,
+    callback: &Callback,
+) {
+    let Some(started) = b.qa_started else { return };
+    let due = (now
+        .saturating_duration_since(started)
+        .as_nanos()
+        .saturating_mul(u128::from(rate))
+        / 1_000_000_000)
+        .min(mono.len() as u128) as usize;
+    if due > b.qa_pos {
+        let pos = b.qa_pos;
+        b.qa_pos = due;
+        b.push(&mono[pos..due], rate, cfg, callback);
+    }
+    if due == mono.len() && !b.max_sent {
+        b.max_sent = true;
+        callback(AudioEvent::MaxDuration);
+    }
+}
 pub struct AudioCapture {
     buffer: Arc<Mutex<Buffer>>,
     healthy: Arc<AtomicBool>,
     cfg: config::Audio,
     _stream: Option<cpal::Stream>,
     qa: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
-    qa_source: Option<(usize, u32)>,
-    qa_started: Option<Instant>,
+    qa_source: Option<(Arc<Vec<f32>>, u32, Callback)>,
 }
 /// Feeds phone PCM into the same bounded capture buffer used by local input.
 pub struct RemoteAudioSource {
@@ -217,7 +244,6 @@ impl AudioCapture {
                 _stream: None,
                 qa: None,
                 qa_source: None,
-                qa_started: None,
             },
             remote,
         )
@@ -252,9 +278,11 @@ impl AudioCapture {
                 .chunks(spec.channels as usize)
                 .map(|f| f.iter().sum::<f32>() / f.len() as f32)
                 .collect();
-            let source_samples = mono.len();
+            let mono = Arc::new(mono);
             let data = buffer.clone();
             let config = cfg.clone();
+            let worker_mono = mono.clone();
+            let worker_callback = callback.clone();
             let (tx, rx) = mpsc::channel();
             let job = thread::Builder::new()
                 .name("murmur-qa-audio".into())
@@ -269,15 +297,14 @@ impl AudioCapture {
                         if b.start.is_none() {
                             continue;
                         }
-                        let end =
-                            (b.qa_pos + (spec.sample_rate as usize / 50).max(1)).min(mono.len());
-                        let pos = b.qa_pos;
-                        b.qa_pos = end;
-                        b.push(&mono[pos..end], spec.sample_rate, &config, &callback);
-                        if end == mono.len() && !b.max_sent {
-                            b.max_sent = true;
-                            callback(AudioEvent::MaxDuration);
-                        }
+                        push_qa_due(
+                            &mut b,
+                            &worker_mono,
+                            spec.sample_rate,
+                            Instant::now(),
+                            &config,
+                            &worker_callback,
+                        );
                     }
                 })
                 .context("Start QA audio worker")?;
@@ -287,8 +314,7 @@ impl AudioCapture {
                 cfg: cfg.clone(),
                 _stream: None,
                 qa: Some((tx, job)),
-                qa_source: Some((source_samples, spec.sample_rate)),
-                qa_started: None,
+                qa_source: Some((mono, spec.sample_rate, callback)),
             });
         }
         let host = cpal::default_host();
@@ -342,7 +368,6 @@ impl AudioCapture {
             _stream: Some(stream),
             qa: None,
             qa_source: None,
-            qa_started: None,
         })
     }
     pub fn healthy(&self) -> bool {
@@ -361,12 +386,15 @@ impl AudioCapture {
         b.endpoint = false;
         b.max_sent = false;
         b.qa_pos = 0;
+        b.qa_started = None;
         if self.qa.is_some() {
             b.ring.clear();
             b.start = Some(b.cursor);
             b.resampler = Resampler::default();
-            self.qa_started = Some(Instant::now());
-            if let Some((source_samples, source_rate)) = self.qa_source {
+            let started = Instant::now();
+            b.qa_started = Some(started);
+            if let Some((source, source_rate, _)) = &self.qa_source {
+                let source_samples = source.len();
                 tracing::info!(target: "murmur::qa_audio", source_samples, source_rate,
                                "QA capture started");
             }
@@ -381,24 +409,32 @@ impl AudioCapture {
             .pcm(self.cfg.gain))
     }
     pub fn stop(&mut self) -> Result<Vec<f32>> {
+        self.stop_at(Instant::now())
+    }
+    fn stop_at(&mut self, now: Instant) -> Result<Vec<f32>> {
         let mut b = self
             .buffer
             .lock()
             .map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?;
+        if let Some((source, source_rate, callback)) = &self.qa_source {
+            push_qa_due(&mut b, source, *source_rate, now, &self.cfg, callback);
+        }
         let pcm = b.pcm(self.cfg.gain);
-        if let Some((source_samples, source_rate)) = self.qa_source {
+        if let Some((source, source_rate, _)) = &self.qa_source {
+            let source_samples = source.len();
             tracing::info!(target: "murmur::qa_audio", source_samples, source_rate,
                            consumed_source_samples = b.qa_pos, captured_pcm_samples = pcm.len(),
-                           elapsed_ms = self.qa_started.take().map(|start| start.elapsed().as_millis() as u64),
+                           elapsed_ms = b.qa_started.map(|start| now.saturating_duration_since(start).as_millis() as u64),
                            "QA capture stopped");
         }
         b.start = None;
+        b.qa_started = None;
         Ok(pcm)
     }
     pub fn cancel(&mut self) {
-        self.qa_started = None;
         if let Ok(mut b) = self.buffer.lock() {
             b.start = None;
+            b.qa_started = None;
         }
     }
 }

@@ -1430,6 +1430,8 @@ class DesktopFollowupTests(unittest.TestCase):
 
         def find(root, **criteria):
             if root == "bar":
+                if re.search(criteria.get("name_re", ""), "Murmur Settings - 1 running window"):
+                    return "settings taskbar button"
                 return chevron if "hidden icons" in criteria.get("name_re", "") else None
             return icon if root == "overflow" else None
 
@@ -1448,6 +1450,13 @@ class DesktopFollowupTests(unittest.TestCase):
             state["open"] = False
             self.assertIs(tray._tray_button(ctx), icon)
             self.assertEqual(state["clicks"], 1)
+
+    def test_tray_icon_name_matches_app_tooltip_only(self):
+        from checks import tray
+        self.assertTrue(re.search(tray.TRAY_ICON_NAME, "Murmur — no model"))
+        self.assertTrue(re.search(tray.TRAY_ICON_NAME, "Murmur — Ready"))
+        self.assertFalse(re.search(tray.TRAY_ICON_NAME, "Murmur Settings - 1 running window"))
+        self.assertFalse(re.search(tray.TRAY_ICON_NAME, "Murmur - 1 running window"))
 
     def test_tray_menu_ignores_existing_and_foreign_menus(self):
         from checks import tray

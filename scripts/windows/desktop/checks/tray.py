@@ -10,6 +10,7 @@ RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APPROVED = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 MENU_ITEMS = ("Dictate", "Sounds mute", "Overlay enabled", "Settings…", "Reload config", "Quit")
 OVERFLOW_CLASSES = ("NotifyIconOverflowWindow", "TopLevelWindowForOverflowXamlIsland")
+TRAY_ICON_NAME = r"^Murmur — \S"  # exact tooltip prefix from src-tauri/src/main.rs and app.rs
 
 
 def _tray_diagnostic(ctx, taskbar=0, overflow=0, menus=(), action=None):
@@ -42,12 +43,12 @@ def _tray_button(ctx, operation="unknown"):
     if not taskbar:
         raise Skip("no taskbar (Shell_TrayWnd) found")
     bar = uia.from_handle(taskbar)
-    icon = uia.try_find(bar, name_re=r"^Murmur", control_type_=uia.BUTTON, timeout=2, sleep=ctx.sleep)
+    icon = uia.try_find(bar, name_re=TRAY_ICON_NAME, control_type_=uia.BUTTON, timeout=2, sleep=ctx.sleep)
     if icon is not None:
         return icon
     overflow = _overflow_window()
     if overflow:
-        icon = uia.try_find(uia.from_handle(overflow), name_re=r"^Murmur",
+        icon = uia.try_find(uia.from_handle(overflow), name_re=TRAY_ICON_NAME,
                             control_type_=uia.BUTTON, timeout=2, sleep=ctx.sleep)
         if icon is None:
             _tray_diagnostic(ctx, taskbar, overflow, action={"operation": operation, "phase": "icon discovery"})
@@ -59,7 +60,7 @@ def _tray_button(ctx, operation="unknown"):
         raise Skip("icon hidden: Murmur's icon is not on the taskbar and no overflow button was found")
     win32.click(*uia.center(chevron))
     overflow = win32.wait_for(_overflow_window, 3, sleep=ctx.sleep)
-    icon = (uia.try_find(uia.from_handle(overflow), name_re=r"^Murmur", control_type_=uia.BUTTON,
+    icon = (uia.try_find(uia.from_handle(overflow), name_re=TRAY_ICON_NAME, control_type_=uia.BUTTON,
                          timeout=3, sleep=ctx.sleep) if overflow else None)
     if icon is None:
         _tray_diagnostic(ctx, taskbar, overflow, action={"operation": operation, "phase": "icon discovery"})
@@ -182,7 +183,7 @@ def t2_tray_menu(ctx):
     ctx.murmur.process = None
     ctx.sleep(1.0)
     taskbar = next(iter(win32.find_windows(class_="Shell_TrayWnd")), 0)
-    if taskbar and uia.try_find(uia.from_handle(taskbar), name_re=r"^Murmur", control_type_=uia.BUTTON):
+    if taskbar and uia.try_find(uia.from_handle(taskbar), name_re=TRAY_ICON_NAME, control_type_=uia.BUTTON):
         raise Fail("The tray icon stayed after Quit")
     observed.append("Quit")
     ctx.note(f"observed: {', '.join(observed)}")
