@@ -1,4 +1,5 @@
 """Pure parts of the Windows desktop harness (scripts/windows/desktop), runnable on any OS."""
+import ast
 from contextlib import closing
 import hashlib
 import json
@@ -29,6 +30,7 @@ import golden  # noqa: E402
 import guard  # noqa: E402
 import guard_diagnostic  # noqa: E402
 import handoff  # noqa: E402
+import idle_diagnostic  # noqa: E402
 import manual  # noqa: E402
 import murmur  # noqa: E402
 import report  # noqa: E402
@@ -72,6 +74,89 @@ def fake_owned_probe_worker(connection, diagnostic, target):
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+class IdleDiagnosticTests(unittest.TestCase):
+    SESSION = {"session_id": 1, "window_station": "WinSta0", "thread_desktop": "Default",
+               "thread_desktop_receives_input": True, "input_desktop": "Default"}
+
+    def test_samples_raw_ticks_and_marks_only_changes_after_first_sample(self):
+        elapsed = [0.0]
+        def clock():
+            return elapsed[0]
+        def sleep(seconds):
+            elapsed[0] += seconds
+
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(idle_diagnostic, "session_identity", return_value=self.SESSION), \
+             mock.patch.object(win32, "last_input_tick", side_effect=[1000, 1000, 3000, 3000]), \
+             mock.patch.object(win32, "current_tick", side_effect=[1000, 2000, 3000, 4000]), \
+             mock.patch.object(win32, "idle_seconds", side_effect=AssertionError("idle gate used")):
+            result = idle_diagnostic.diagnose(seconds=3, interval=1, clock=clock, sleep=sleep,
+                                              timestamp=lambda: "2026-11-15T00:00:00+00:00")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["reset_count"], 1)
+        self.assertEqual([sample["elapsed_s"] for sample in result["samples"]], [0, 1, 2, 3])
+        self.assertEqual([sample["idle_s"] for sample in result["samples"]], [0, 1, 0, 1])
+        self.assertEqual([sample["last_input_changed"] for sample in result["samples"]],
+                         [False, False, True, False])
+        self.assertEqual(result["session"], self.SESSION)
+
+    def test_tick_wrap_and_nonidle_session_are_observed_without_preflight(self):
+        elapsed = [0.0]
+        def sleep(seconds):
+            elapsed[0] += seconds
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(idle_diagnostic, "session_identity", return_value=self.SESSION), \
+             mock.patch.object(win32, "last_input_tick", return_value=0xFFFFFFF0), \
+             mock.patch.object(win32, "current_tick", return_value=25):
+            result = idle_diagnostic.diagnose(seconds=1, interval=1, clock=lambda: elapsed[0],
+                                              sleep=sleep, timestamp=lambda: "now")
+        self.assertEqual(result["samples"][0]["idle_s"], 0.041)
+
+    def test_refuses_wrong_or_lost_session_before_further_tick_reads(self):
+        locked = dict(self.SESSION, input_desktop="Winlogon")
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(idle_diagnostic, "session_identity", return_value=locked), \
+             mock.patch.object(win32, "last_input_tick") as last:
+            result = idle_diagnostic.diagnose(seconds=1, timestamp=lambda: "now")
+        self.assertEqual(result["status"], "session_refused")
+        last.assert_not_called()
+
+        elapsed = [0.0]
+        def sleep(seconds):
+            elapsed[0] += seconds
+        with mock.patch.object(win32, "require_windows"), \
+             mock.patch.object(idle_diagnostic, "session_identity", side_effect=[self.SESSION, locked]), \
+             mock.patch.object(win32, "last_input_tick", return_value=100) as last, \
+             mock.patch.object(win32, "current_tick", return_value=100):
+            result = idle_diagnostic.diagnose(seconds=3, clock=lambda: elapsed[0], sleep=sleep,
+                                              timestamp=lambda: "now")
+        self.assertEqual(result["status"], "session_lost")
+        self.assertEqual(len(result["samples"]), 1)
+        last.assert_called_once()
+
+    def test_diagnostic_only_calls_allowlisted_read_only_win32_functions(self):
+        tree = ast.parse((HARNESS / "idle_diagnostic.py").read_text(encoding="utf-8"))
+        calls = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                 and node.func.value.id == "win32"}
+        self.assertEqual(calls, {"require_windows", "desktop_context", "input_desktop",
+                                 "last_input_tick", "current_tick"})
+        imports = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                   for alias in node.names}
+        self.assertEqual(imports, {"argparse", "json", "os", "struct", "sys", "time", "win32"})
+
+    def test_refusal_still_writes_structured_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "idle-diagnostic.json"
+            with mock.patch.object(idle_diagnostic, "diagnose", return_value={
+                    "status": "session_refused", "samples": [], "reset_count": 0}):
+                self.assertEqual(idle_diagnostic.main(["--out", str(path)]), 1)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "session_refused")
+            self.assertEqual(record["samples"], [])
+            self.assertIn("version", record["python"])
 
 
 class ImportTests(unittest.TestCase):

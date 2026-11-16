@@ -725,6 +725,12 @@ def last_input_tick():
     return int(info.dwTime)
 
 
+def current_tick():
+    """Current 32-bit system tick, on the same clock as GetLastInputInfo."""
+    require_windows()
+    return int(kernel32.GetTickCount())
+
+
 def input_desktop():
     """Name of the desktop receiving input ('Default' when unlocked), or None when it cannot be
     opened (lock screen, UAC secure desktop)."""

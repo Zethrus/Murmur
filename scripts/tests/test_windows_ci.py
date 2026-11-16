@@ -227,6 +227,7 @@ class DesktopWorkflowTests(unittest.TestCase):
         trigger = self.text.split("\npermissions:")[0].split("\non:\n", 1)[1]
         self.assertIn("      guard_diagnostic:\n", trigger)
         self.assertIn("      guard_teardown_diagnostic:\n", trigger)
+        self.assertIn("      idle_diagnostic:\n", trigger)
         self.assertIn("        type: boolean\n", trigger)
         harness = step("windows-desktop.yml", "Harness virtual environment (hash-locked dependencies)")
         self.assertIsNone(condition(harness))
@@ -235,13 +236,30 @@ class DesktopWorkflowTests(unittest.TestCase):
         for name in ("Verify the handed-over build (SHA256SUMS and the build's own job log)",
                      "Preflight (unlocked session, idle 60 s, no other Murmur or Notepad)",
                      "Run the desktop checks (takes the keyboard and mouse; real input aborts)"):
-            self.assertIn("if: ${{ !inputs.guard_diagnostic && !inputs.guard_teardown_diagnostic }}",
+            self.assertIn("if: ${{ !inputs.guard_diagnostic && !inputs.guard_teardown_diagnostic && !inputs.idle_diagnostic }}",
                           step("windows-desktop.yml", name))
         diagnostic = step("windows-desktop.yml", "Diagnose the input guard (harness Python; no app launch)")
         self.assertEqual(condition(diagnostic), "${{ inputs.guard_diagnostic || inputs.guard_teardown_diagnostic }}")
         self.assertIn("& $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/guard_diagnostic.py", diagnostic)
         self.assertIn("$ProbeArgs += '--teardown'", diagnostic)
         self.assertNotIn("pip install", diagnostic)
+
+    def test_idle_diagnostic_is_isolated_read_only_and_mutually_exclusive(self):
+        validation = step("windows-desktop.yml", "Only the dispatched commit can be tested")
+        self.assertIn("IDLE_DIAGNOSTIC: ${{ inputs.idle_diagnostic }}", validation)
+        self.assertIn("$env:GUARD_DIAGNOSTIC -eq 'true' -and $env:IDLE_DIAGNOSTIC -eq 'true'", validation)
+        self.assertIn("$env:TEARDOWN_DIAGNOSTIC -eq 'true' -and $env:IDLE_DIAGNOSTIC -eq 'true'", validation)
+        idle = step("windows-desktop.yml", "Sample last-input idle state (read-only; no app launch)")
+        self.assertEqual(condition(idle), "${{ inputs.idle_diagnostic }}")
+        self.assertIn("& $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/idle_diagnostic.py", idle)
+        self.assertIn("'idle-diagnostic.json'", idle)
+        self.assertNotIn("handoff.py", idle)
+        self.assertNotIn("run.py", idle)
+        self.assertNotIn("guard_diagnostic.py", idle)
+        self.assertNotIn("pip install", idle)
+        guard_step = step("windows-desktop.yml", "Diagnose the input guard (harness Python; no app launch)")
+        self.assertEqual(condition(guard_step),
+                         "${{ inputs.guard_diagnostic || inputs.guard_teardown_diagnostic }}")
 
     def test_build_workflows_never_target_the_desktop_runner(self):
         for workflow in WORKFLOWS.glob("*.yml"):

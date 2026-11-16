@@ -260,6 +260,34 @@ unlocked, 60 s without input, no other `murmur.exe`, Notepad closed), shows a
 (same folder layout): `python scripts\windows\desktop\run.py --build <verified
 copy> --out <dir> [--only H1,F2] [--group focus] [--repeat 3]`.
 
+### Read-only idle diagnostic
+
+If the 60-second preflight reports recent input despite the owner leaving Edison
+untouched, dispatch `windows-desktop.yml` on the matching commit and SHA with
+`-f idle_diagnostic=true`. Leave both guard diagnostic flags false. This owner-only
+mode uses the same hash-locked harness venv and writes
+`C:\murmur-desktop-reports\<sha>\<run id>-<attempt>\idle-diagnostic.json`.
+It skips build handoff, the normal preflight, app launch, and the input guard.
+It samples for 90 seconds even when idle is below 60 seconds; it refuses a
+wrong or locked session and stops if the session changes during sampling. The
+normal desktop run still requires 60 seconds idle and retains all its guards.
+
+Each roughly one-second sample contains a UTC timestamp, elapsed time, raw
+`GetLastInputInfo` and `GetTickCount` ticks, wrap-safe computed idle seconds,
+and whether the last-input tick changed since the previous sample. The JSON also
+contains the interactive session/desktop identity and limited Python runtime
+metadata. The job summary lists status, sample and change counts, and change
+times. No command lines, window titles, key fields, pointer positions, or
+process paths are collected. This mode only reads Windows state; it neither
+sends input nor installs hooks, manipulates focus, opens a window, or closes apps.
+
+The timestamp sequence can distinguish a recent reset at job startup from
+repeated changes during the 90-second interval. `GetLastInputInfo` includes
+injected input, gives no device or process attribution, and does not itself
+prove that any specific physical input occurred. This diagnostic provides no
+native proof of the cause of the preflight failures. Review the local artifact
+before drawing a conclusion or scheduling another desktop test.
+
 For an input-guard failure before the checks, dispatch the same workflow with
 `-f guard_diagnostic=true` and the matching `sha`. This branch creates the same
 hash-locked harness venv as the full suite, but skips build handoff and app launch.
