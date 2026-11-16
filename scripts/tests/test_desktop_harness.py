@@ -781,6 +781,7 @@ class ImportTests(unittest.TestCase):
             unrelated.write_text("keep me", encoding="utf-8")
             pad = targets.Notepad(directory, "H8-alt")
             pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+            pad.path.write_text("settled text", encoding="utf-8")
             # Restored tabs can outnumber the old eight-tab search limit and can have
             # names from previous H8 runs. Only this run's unique title is closable.
             titles = (["unrelated.txt - Notepad", "notepad-H8-alt-old-run.txt - Notepad"] +
@@ -803,7 +804,8 @@ class ImportTests(unittest.TestCase):
                                         activate=lambda _: True, foreground=lambda: 42, tap=tap,
                                         wait_for=lambda predicate, _: predicate())
             pad.close_owned()
-            self.assertEqual(actions, [("ctrl", "tab")] * (len(titles) - 1) + [("ctrl", "w")])
+            self.assertEqual(actions, [("ctrl", "tab")] * (len(titles) - 1) +
+                             [("ctrl", "s"), ("ctrl", "w")])
             self.assertEqual(pad.hwnd, 0)
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
 
@@ -837,6 +839,42 @@ class ImportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "window disappeared"):
                 pad.close_owned()
             pad.win32.activate.assert_not_called()
+
+    def test_dirty_retained_h1_is_saved_before_close_and_save_failure_never_closes(self):
+        for outcome in ("saved", "pending", "ownership_changed"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                pad = targets.Notepad(directory, "H1-doc")
+                pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+                pad.path.write_text("", encoding="utf-8")
+                state = {"dirty": True, "open": True, "foreground": 42}
+                actions = []
+
+                def tap(*keys):
+                    actions.append(keys)
+                    if keys == ("ctrl", "s") and outcome == "saved":
+                        pad.path.write_text("exact completed output", encoding="utf-8")
+                        state["dirty"] = False
+                    elif keys == ("ctrl", "s") and outcome == "ownership_changed":
+                        state["dirty"] = False
+                        state["foreground"] = 99
+                    elif keys == ("ctrl", "w"):
+                        self.assertFalse(state["dirty"], "dirty tab would open a save prompt")
+                        self.assertEqual(pad.path.read_text(encoding="utf-8"), "exact completed output")
+                        state["open"] = False
+
+                pad.win32 = SimpleNamespace(
+                    is_window=lambda _: state["open"], window_pid=lambda _: 7, pids=lambda _: [7],
+                    window_text=lambda _: ("*" if state["dirty"] else "") + pad.path.name + " - Notepad",
+                    foreground=lambda: state["foreground"], activate=lambda _: True, tap=tap,
+                    wait_for=lambda predicate, _: predicate())
+                if outcome == "saved":
+                    pad.close_owned()
+                    self.assertEqual(actions, [("ctrl", "s"), ("ctrl", "w")])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "save or ownership verification failed"):
+                        pad.close_owned()
+                    self.assertEqual(actions, [("ctrl", "s")])
+                    self.assertEqual(pad.hwnd, 42)
 
     def test_notepad_h8_direct_comparison_clears_only_active_owned_tab(self):
         with tempfile.TemporaryDirectory() as directory:

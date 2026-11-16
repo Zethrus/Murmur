@@ -380,6 +380,19 @@ class Notepad:
                     self.owner_pid not in self.win32.pids("Notepad.exe")):
                 raise RuntimeError(f"Notepad lost foreground or ownership during cleanup of {self.path.name}")
             if self.active_document():
+                # H1 has only read the editor; its file can still be empty and dirty.
+                # Save at final cleanup, then require the same owned, clean document
+                # before Ctrl+W so a save prompt cannot consume the close operation.
+                def saved_owned_document():
+                    return (self.win32.foreground() == self.hwnd and self.active_document() and
+                            self.win32.window_pid(self.hwnd) == self.owner_pid and
+                            self.owner_pid in self.win32.pids("Notepad.exe") and
+                            not self.win32.window_text(self.hwnd).lstrip().startswith(("*", "●")) and
+                            self.path.is_file())
+
+                self.win32.tap("ctrl", "s")
+                if not self.win32.wait_for(saved_owned_document, 5) or not saved_owned_document():
+                    raise RuntimeError(f"Notepad save or ownership verification failed for {self.path.name}")
                 self.win32.tap("ctrl", "w")
                 if not self.win32.wait_for(lambda: not self.win32.is_window(self.hwnd) or
                                            not self.active_document(), 5):
