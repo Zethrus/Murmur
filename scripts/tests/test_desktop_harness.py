@@ -400,11 +400,60 @@ class ImportTests(unittest.TestCase):
             self.assertEqual(events[-3:], ["close no-alt", "close alt", "close control"])
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
 
+    def test_h8_compares_direct_sender_in_same_tab_after_no_alt_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events = []
+            pads = []
+            for name in ("control", "alt", "no-alt"):
+                path = root / f"{name}.txt"
+                path.write_text("", encoding="utf-8")
+                state = {"text": "wrong" if name == "no-alt" else "good"}
+
+                def save(p=path, s=state, n=name):
+                    events.append(f"save {n} {s['text']}")
+                    p.write_text(s["text"], encoding="utf-8")
+
+                def clear(s=state):
+                    events.append("clear no-alt")
+                    s["text"] = ""
+
+                pads.append(SimpleNamespace(hwnd=42, path=path, text=lambda s=state: s["text"],
+                                            save_owned=save, clear_owned=clear, state=state))
+
+            def direct(ctx, pad, phases, text):
+                self.assertIs(pad, pads[2])
+                self.assertEqual(text, "good")
+                events.append("direct no-alt")
+                pad.state["text"] = text
+                return pad, None, text, {"target_chars": len(text)}
+
+            ctx = SimpleNamespace(artifact=lambda suffix: root / suffix, screenshot=mock.Mock(),
+                                  murmur=SimpleNamespace(log=lambda: ""))
+            with mock.patch.object(hotkey_checks, "_notepad_direct_control",
+                                   return_value=(pads[0], None, "good", {"target_chars": 4})), \
+                 mock.patch.object(hotkey_checks, "_notepad_focus_trial",
+                                   side_effect=[(pads[1], None, "good", {"output_error": None}),
+                                                (pads[2], "bad output", "good", {"output_error": None})]), \
+                 mock.patch.object(hotkey_checks, "_notepad_direct_input", side_effect=direct):
+                with self.assertRaisesRegex(Fail, "no-alt: bad output"):
+                    hotkey_checks.h8_focus_phases(ctx)
+
+            self.assertLess(events.index("save no-alt wrong"), events.index("clear no-alt"))
+            self.assertLess(events.index("clear no-alt"), events.index("direct no-alt"))
+            self.assertEqual((root / "no-alt-saved.txt").read_text(), "wrong")
+            self.assertEqual((root / "same-tab-direct-saved.txt").read_text(), "good")
+            evidence = json.loads((root / "focus-phases.json").read_text())
+            self.assertEqual(evidence["no-alt"]["difference"], "bad output")
+            self.assertIsNone(evidence["same-tab-direct"]["difference"])
+            self.assertIsNone(evidence["same-tab-direct"]["saved_file_difference"])
+
     def test_notepad_h8_reuses_only_named_owned_window(self):
         with tempfile.TemporaryDirectory() as directory:
             pad = targets.Notepad(directory, "H8-alt")
+            self.assertIn(Path(directory).name, pad.path.name)
             pad.win32 = SimpleNamespace(find_windows=lambda **_: [42],
-                                        window_text=lambda _: "notepad-H8-alt.txt - Notepad",
+                                        window_text=lambda _: f"{pad.path.name} - Notepad",
                                         is_window=lambda _: True, window_pid=lambda _: 7,
                                         wait_for=lambda predicate, _: predicate())
             with mock.patch.object(targets.subprocess, "Popen"):
@@ -437,32 +486,46 @@ class ImportTests(unittest.TestCase):
             unrelated.write_text("keep me", encoding="utf-8")
             pad = targets.Notepad(directory, "H8-alt")
             pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
-            state = {"title": "unrelated.txt - Notepad", "open": True}
+            # Restored tabs can outnumber the old eight-tab search limit and can have
+            # names from previous H8 runs. Only this run's unique title is closable.
+            titles = (["unrelated.txt - Notepad", "notepad-H8-alt-old-run.txt - Notepad"] +
+                      [f"other-{index}.txt - Notepad" for index in range(9)] +
+                      [f"{pad.path.name} - Notepad"])
+            state = {"tab": 0, "open": True}
             actions = []
 
             def tap(*keys):
                 actions.append(keys)
                 if keys == ("ctrl", "tab"):
-                    state["title"] = "notepad-H8-alt.txt - Notepad"
+                    state["tab"] = (state["tab"] + 1) % len(titles)
                 elif keys == ("ctrl", "w"):
                     state["open"] = False
 
             pad.win32 = SimpleNamespace(is_window=lambda _: state["open"],
-                                        window_text=lambda _: state["title"],
+                                        window_text=lambda _: titles[state["tab"]],
                                         window_pid=lambda _: 7,
-                                        activate=lambda _: True, tap=tap,
+                                        activate=lambda _: True, foreground=lambda: 42, tap=tap,
                                         wait_for=lambda predicate, _: predicate())
             pad.close_owned()
-            self.assertEqual(actions, [("ctrl", "tab"), ("ctrl", "w")])
+            self.assertEqual(actions, [("ctrl", "tab")] * (len(titles) - 1) + [("ctrl", "w")])
             self.assertEqual(pad.hwnd, 0)
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
 
-            pad.hwnd, state["open"], state["title"] = 42, True, "unrelated.txt - Notepad"
+            pad.hwnd, state["open"], state["tab"] = 42, True, 0
+            titles[-1] = "another.txt - Notepad"
+            before = len(actions)
             pad.win32.tap = lambda *keys: actions.append(keys)
             with self.assertRaisesRegex(RuntimeError, "Could not locate owned Notepad tab"):
                 pad.close_owned()
-            self.assertNotIn(("ctrl", "w"), actions[2:])
+            self.assertNotIn(("ctrl", "w"), actions[before:])
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me")
+
+            pad.win32.foreground = lambda: 99
+            before = len(actions)
+            with self.assertRaisesRegex(RuntimeError, "lost foreground"):
+                pad.close_owned()
+            self.assertEqual(len(actions), before)
+            pad.win32.foreground = lambda: 42
 
             pad.document = mock.Mock()
             with self.assertRaisesRegex(RuntimeError, "active tab is not"):
@@ -474,6 +537,35 @@ class ImportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "window ownership changed"):
                 pad.close_owned()
             pad.win32.activate.assert_not_called()
+
+    def test_notepad_h8_direct_comparison_clears_only_active_owned_tab(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pad = targets.Notepad(directory, "H8-no-alt")
+            pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+            state = {"title": "other.txt - Notepad", "text": "keep"}
+            keys = []
+
+            def tap(*chord):
+                keys.append(chord)
+                if chord == ("delete",):
+                    state["text"] = ""
+
+            pad.win32 = SimpleNamespace(is_window=lambda _: True,
+                                        window_text=lambda _: state["title"],
+                                        window_pid=lambda _: 7, tap=tap,
+                                        wait_for=lambda predicate, _: predicate())
+            pad.focus = mock.Mock()
+            pad.text = lambda: state["text"]
+            with self.assertRaisesRegex(RuntimeError, "not owned"):
+                pad.clear_owned()
+            pad.focus.assert_not_called()
+            self.assertEqual(keys, [])
+            self.assertEqual(state["text"], "keep")
+
+            state["title"] = f"{pad.path.name} - Notepad"
+            pad.clear_owned()
+            self.assertEqual(keys, [("ctrl", "a"), ("delete",)])
+            self.assertEqual(state["text"], "")
 
     def test_overlay_focus_check_refuses_to_blame_click_when_editor_already_lost_focus(self):
         from checks import overlay as checks_overlay

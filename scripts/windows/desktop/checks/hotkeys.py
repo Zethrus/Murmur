@@ -135,9 +135,8 @@ def _notepad_focus_trial(ctx, spec, name, phases, previous_hwnd=None):
             observation["key_trace"] = _key_trace_summary(trace, expected)
 
 
-def _notepad_direct_control(ctx, phases):
-    """Same guarded Unicode sender into a fresh plain document, without hotkey or inference."""
-    pad = ctx.notepad("control", owned_tab=True)
+def _notepad_direct_input(ctx, pad, phases, text):
+    """Same guarded Unicode sender and interval as the app, without hotkey or inference."""
     pad.focus()
     ctx.guard.check()
     if win32.keys_down():
@@ -146,7 +145,7 @@ def _notepad_direct_control(ctx, phases):
     phases.append(_focus_phase(pad, "before direct input"))
     ctx.guard.start_key_trace()
     try:
-        win32.type_unicode(DIRECT_CONTROL, delay=0.012)
+        win32.type_unicode(text, delay=0.012)
     finally:
         trace = ctx.guard.stop_key_trace()
     ctx.guard.check()
@@ -154,9 +153,15 @@ def _notepad_direct_control(ctx, phases):
     phases.append(_focus_phase(pad, "after direct input"))
     actual = pad.wait_text(timeout=8, stable=1.2, sleep=ctx.sleep)
     phases.append(_focus_phase(pad, "after direct readback"))
-    return pad, golden.compare(DIRECT_CONTROL, actual), DIRECT_CONTROL, {
+    return pad, golden.compare(text, actual), text, {
         "probes_during_input": probes_after - probes_before, "target_chars": len(actual),
-        "key_trace": _key_trace_summary(trace, DIRECT_CONTROL)}
+        "key_trace": _key_trace_summary(trace, text)}
+
+
+def _notepad_direct_control(ctx, phases):
+    """First control: a fresh document before either hotkey trial."""
+    pad = ctx.notepad("control", owned_tab=True)
+    return _notepad_direct_input(ctx, pad, phases, DIRECT_CONTROL)
 
 
 def _capture_notepad_trial(ctx, name, result, pad, expected):
@@ -212,6 +217,21 @@ def h8_focus_phases(ctx):
                     results[name]["app_log_artifact"] = log_artifact.name
             _capture_notepad_trial(ctx, name, results[name], pad, expected)
             previous_hwnd = pad.hwnd
+            if name == "no-alt" and any(results[name][key] for key in
+                                        ("difference", "capture_difference", "saved_file_difference")):
+                # The failed trial's screenshot and saved bytes are already captured. Reuse
+                # exactly that owned editor to separate a Murmur-specific sender path from a
+                # Notepad/desktop state that also corrupts the harness's direct sender.
+                comparison = results["same-tab-direct"] = {
+                    "hotkey": None, "phases": [], "difference": None,
+                    "capture_difference": None, "saved_file_difference": None,
+                    "saved_file_updated": None, "saved_file_error": None,
+                    "saved_file_artifact": None,
+                }
+                pad.clear_owned()
+                _, comparison["difference"], _, comparison["observation"] = _notepad_direct_input(
+                    ctx, pad, comparison["phases"], expected)
+                _capture_notepad_trial(ctx, "same-tab-direct", comparison, pad, expected)
     finally:
         artifact.write_text(json.dumps(results, indent=2), encoding="utf-8")
     differences = [f"{name}: {reason}" for name, result in results.items()

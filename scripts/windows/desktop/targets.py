@@ -244,7 +244,10 @@ class Notepad:
         import uia
         import win32
         self.win32, self.uia = win32, uia
-        self.path = Path(win32.long_path(str(Path(work) / f"notepad-{name}.txt")))
+        # Notepad restores tabs from earlier sessions. H8's work directory is unique per run;
+        # include it in the tab name so a restored H8 tab cannot impersonate this run's fixture.
+        filename = f"notepad-{name}-{Path(work).name}.txt" if name.startswith("H8-") else f"notepad-{name}.txt"
+        self.path = Path(win32.long_path(str(Path(work) / filename)))
         self.hwnd = 0
         self.owner_pid = 0
         self.owned_tab = False
@@ -307,6 +310,16 @@ class Notepad:
         self.win32.tap("ctrl", "s")
         time.sleep(0.8)
 
+    def clear_owned(self):
+        """Clear only the verified active H8 document for a same-tab direct-input comparison."""
+        if not self.owned_tab or not self.active_document():
+            raise RuntimeError(f"Notepad active tab is not owned {self.path.name}")
+        self.focus()
+        self.win32.tap("ctrl", "a")
+        self.win32.tap("delete")
+        if not self.win32.wait_for(lambda: self.active_document() and self.text() == "", 5):
+            raise RuntimeError(f"Notepad did not clear {self.path.name}")
+
     def close_owned(self):
         """Close only this H8 tab; never close a shared window or an unverified tab."""
         if not self.hwnd or not self.win32.is_window(self.hwnd):
@@ -316,7 +329,11 @@ class Notepad:
             raise RuntimeError(f"Notepad window ownership changed for {self.path.name}")
         if not self.win32.activate(self.hwnd):
             raise RuntimeError(f"Could not activate Notepad for {self.path.name}")
-        for _ in range(8):
+        # Restored tabs from earlier Notepad sessions can precede our three fixtures.
+        # Navigation is reversible; Ctrl+W is sent only when this run's unique title is active.
+        for _ in range(64):
+            if self.win32.foreground() != self.hwnd or self.win32.window_pid(self.hwnd) != self.owner_pid:
+                raise RuntimeError(f"Notepad lost foreground or ownership during cleanup of {self.path.name}")
             if self.active_document():
                 self.win32.tap("ctrl", "w")
                 if not self.win32.wait_for(lambda: not self.win32.is_window(self.hwnd) or
