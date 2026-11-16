@@ -18,7 +18,7 @@ class Fail(Exception):
 
 
 class TargetCreationError(Fail):
-    """A diagnostic Notepad spawn may have left an unverified tab; stop later checks."""
+    """A Notepad spawn may have left an unverified tab; stop later checks."""
 
 
 class OutputCount(Fail):
@@ -38,7 +38,7 @@ HOLD_MARGIN = 0.8  # seconds held after the spoken sentence ends
 
 class Context:
     def __init__(self, *, build, session, fixtures, goldens, restorer, guard, out, work, hotkey, cache,
-                 startup_probe_lease=None, retain_completed_notepads=False):
+                 startup_probe_lease=None):
         self.build = build
         self.murmur = session
         self.fixtures = fixtures
@@ -50,9 +50,9 @@ class Context:
         self.hotkey = hotkey
         self.cache = Path(cache)
         self.startup_probe_lease = startup_probe_lease
-        self.retain_completed_notepads = retain_completed_notepads
-        # Separate from Restorer: its depth marks must still unwind every per-check undo.
+        # Notepad tabs outlive checks; all other per-check state still unwinds at its mark.
         self._completed_notepads = []
+        self._notepad_serial = 0
         self.artifacts = []
         self.notes = []
         self.check_id = ""
@@ -112,52 +112,49 @@ class Context:
         return app
 
     def notepad(self, name="doc", *, reuse_hwnd=None, owned_tab=False):
+        """Create a distinct run-owned tab; H8 may request one verified existing HWND."""
         import targets
-        retain = (getattr(self, "retain_completed_notepads", False) and self.check_id in ("H1", "H8"))
-        if retain:
-            owned_tab = True
-            reuse_owner_pid = None
-            if reuse_hwnd is not None:
-                reuse_owner_pid = next((previous.owner_pid for previous in self._completed_notepads
-                                        if previous.hwnd == reuse_hwnd), None)
-                if reuse_owner_pid is None:
-                    raise RuntimeError("Notepad reuse handle is not a completed fixture owned by this run")
-            if reuse_hwnd is None and self._completed_notepads:
-                previous = self._completed_notepads[-1]
-                if previous.hwnd and previous.win32.is_window(previous.hwnd):
-                    if previous.win32.window_pid(previous.hwnd) != previous.owner_pid:
-                        raise RuntimeError("Completed Notepad window ownership changed before target creation")
-                    reuse_hwnd = previous.hwnd
-                    reuse_owner_pid = previous.owner_pid
-        fixture_name = f"{self.check_id}-{name}"
-        if self.check_id in ("H1", "H8") and getattr(self, "attempt", 1) > 1:
-            fixture_name += f"-{self.attempt}"
+        owned_windows = {}
+        for previous in self._completed_notepads:
+            if not previous.hwnd:
+                continue  # A failed spawn has no window we may claim or close.
+            if not previous.owned_tab or not previous.owner_pid:
+                raise TargetCreationError("Completed Notepad window ownership changed before target creation")
+            if previous.hwnd in owned_windows and owned_windows[previous.hwnd] != previous.owner_pid:
+                raise TargetCreationError("Completed Notepad window has conflicting owners")
+            if previous.hwnd in owned_windows:
+                continue
+            if (not previous.win32.is_window(previous.hwnd) or
+                    previous.win32.window_pid(previous.hwnd) != previous.owner_pid or
+                    previous.owner_pid not in previous.win32.pids("Notepad.exe")):
+                raise TargetCreationError("Completed Notepad window ownership changed before target creation")
+            owned_windows[previous.hwnd] = previous.owner_pid
+        if reuse_hwnd is not None and reuse_hwnd not in owned_windows:
+            raise TargetCreationError("Notepad reuse handle is not a completed fixture owned by this run")
+        self._notepad_serial += 1
+        fixture_name = f"{self.check_id}-{name}-a{self.attempt}-c{self._notepad_serial}"
         pad = targets.Notepad(self.work, fixture_name)
         # Creation may fail after spawning Notepad. Keep the incomplete fixture for final
         # ownership-checked cleanup; the creation exception itself fails the check.
-        if retain:
-            self._completed_notepads.append(pad)
-        start_options = {"reuse_hwnd": reuse_hwnd, "owned_tab": owned_tab}
-        if retain:
-            start_options["reuse_owner_pid"] = reuse_owner_pid
+        self._completed_notepads.append(pad)
         try:
-            pad.start(**start_options)
+            pad.start(reuse_hwnd=reuse_hwnd, owned_tab=True,
+                      reuse_owner_pid=owned_windows.get(reuse_hwnd),
+                      reuse_windows=owned_windows if reuse_hwnd is None else None)
         except Exception as error:
-            if retain:
-                raise TargetCreationError(f"Notepad target creation failed: {error}") from error
-            raise
+            raise TargetCreationError(f"Notepad target creation failed: {error}") from error
         if getattr(self, "startup_probe_lease", None) is not None:
             pad._startup_handoff = self.startup_probe_lease.complete_handoff
-        if not retain:
-            self.restorer.push(f"close Notepad {pad.path.name}", pad.close_owned if owned_tab else pad.close)
         return pad
 
     def close_completed_notepads(self):
-        """Retire diagnostic tabs at run end, after the guard has stopped."""
+        """Retire run-owned tabs at run end, after the guard has stopped."""
         errors = []
+        # Preserve the old 64-tab allowance for restored tabs plus this run's fixtures.
+        tab_search_limit = 64 + len(self._completed_notepads)
         for pad in reversed(self._completed_notepads):
             try:
-                pad.close_owned()
+                pad.close_owned(max_tabs=tab_search_limit)
             except Exception as error:  # noqa: BLE001 - try every verified fixture
                 errors.append((f"close Notepad {pad.path.name}", f"{type(error).__name__}: {error}"))
         self._completed_notepads.clear()

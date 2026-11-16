@@ -685,51 +685,154 @@ class ImportTests(unittest.TestCase):
                                         pids=lambda _: [7],
                                         wait_for=lambda predicate, _: predicate())
             with mock.patch.object(targets.subprocess, "Popen"):
-                self.assertIs(pad.start(reuse_hwnd=42, owned_tab=True), pad)
+                self.assertIs(pad.start(reuse_hwnd=42, owned_tab=True, reuse_owner_pid=7), pad)
                 self.assertTrue(pad.active_document())
+                pad.path.unlink()
                 with self.assertRaisesRegex(RuntimeError, "Notepad did not open"):
-                    targets.Notepad.start(pad, reuse_hwnd=99, owned_tab=True)
+                    targets.Notepad.start(pad, reuse_hwnd=99, owned_tab=True, reuse_owner_pid=7)
                 pad.win32.window_text = lambda _: "notepad-H8-control.txt - Notepad"
+                pad.path.unlink()
                 with self.assertRaisesRegex(RuntimeError, "Notepad did not open"):
-                    targets.Notepad.start(pad, reuse_hwnd=42, owned_tab=True)
+                    targets.Notepad.start(pad, reuse_hwnd=42, owned_tab=True, reuse_owner_pid=7)
 
                 pad.win32.window_text = lambda _: f"{pad.path.name} - Notepad"
+                pad.path.unlink()
                 with self.assertRaisesRegex(RuntimeError, "Notepad did not open"):
                     targets.Notepad.start(pad, reuse_hwnd=42, owned_tab=True, reuse_owner_pid=8)
                 pad.win32.pids = lambda _: [8]
+                pad.path.unlink()
                 with self.assertRaisesRegex(RuntimeError, "owner is not Notepad.exe"):
                     targets.Notepad.start(pad, reuse_hwnd=42, owned_tab=True, reuse_owner_pid=7)
 
     def test_h8_context_registers_tab_cleanup_instead_of_window_close(self):
         ctx = Context.__new__(Context)
-        ctx.work, ctx.check_id = Path("work"), "H8"
+        ctx.work, ctx.check_id, ctx.attempt = Path("work"), "H8", 1
+        ctx._completed_notepads, ctx._notepad_serial = [], 0
         ctx.restorer = restore.Restorer(log=lambda _: None)
         pad = SimpleNamespace(path=Path("notepad-H8-alt.txt"), close=mock.Mock(),
                               close_owned=mock.Mock())
         pad.start = mock.Mock(return_value=pad)
         with mock.patch.object(targets, "Notepad", return_value=pad) as create:
-            self.assertIs(ctx.notepad("alt", reuse_hwnd=42, owned_tab=True), pad)
-        create.assert_called_once_with(Path("work"), "H8-alt")
-        pad.start.assert_called_once_with(reuse_hwnd=42, owned_tab=True)
+            self.assertIs(ctx.notepad("alt", owned_tab=True), pad)
+        create.assert_called_once_with(Path("work"), "H8-alt-a1-c1")
+        pad.start.assert_called_once_with(reuse_hwnd=None, owned_tab=True,
+                                          reuse_owner_pid=None, reuse_windows={})
         self.assertEqual(ctx.restorer.restore_all(), [])
-        pad.close_owned.assert_called_once_with()
+        self.assertEqual(ctx.close_completed_notepads(), [])
+        pad.close_owned.assert_called_once_with(max_tabs=65)
         pad.close.assert_not_called()
 
-    def test_narrow_h1_h8_retains_owned_tabs_with_stable_restoration_marks(self):
+    def test_notepad_accepts_an_older_verified_window_but_rejects_unknown_existing_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pad = targets.Notepad(directory, "I4-doc-a1-c3")
+            owners = {42: 7, 99: 8}
+            pad.win32 = SimpleNamespace(
+                find_windows=lambda **kwargs: [42, 99] if kwargs.get("contains") == "Notepad" else [42],
+                window_text=lambda _: f"{pad.path.name} - Notepad",
+                window_pid=lambda hwnd: owners[hwnd], pids=lambda _: [7, 8],
+                wait_for=lambda predicate, _: predicate())
+            with mock.patch.object(targets.subprocess, "Popen"):
+                self.assertIs(pad.start(owned_tab=True, reuse_windows=owners), pad)
+                self.assertEqual((pad.hwnd, pad.owner_pid), (42, 7))
+                pad.path.unlink()
+                with self.assertRaisesRegex(RuntimeError, "Notepad did not open"):
+                    pad.start(owned_tab=True, reuse_windows={99: 8})
+                owners[42] = 9
+                pad.path.unlink()
+                with self.assertRaisesRegex(RuntimeError, "Notepad did not open"):
+                    pad.start(owned_tab=True, reuse_windows={42: 7, 99: 8})
+
+    def test_notepad_start_never_erases_an_existing_fixture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pad = targets.Notepad(directory, "I1-doc-a1-c1")
+            pad.path.write_text("existing text", encoding="utf-8")
+            with mock.patch.object(targets.subprocess, "Popen") as spawn:
+                with self.assertRaises(FileExistsError):
+                    pad.start(owned_tab=True)
+            spawn.assert_not_called()
+            self.assertEqual(pad.path.read_text(encoding="utf-8"), "existing text")
+
+    def test_context_passes_each_verified_window_for_new_tab_and_fails_on_owner_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
+                          goldens=None, restorer=restore.Restorer(log=lambda _: None),
+                          guard=SimpleNamespace(check=lambda: None), out=directory, work=directory,
+                          hotkey="", cache=directory)
+            starts, owners = [], {42: 7, 99: 8}
+
+            def start(pad, **options):
+                starts.append(options)
+                pad.hwnd = (42, 99, 42, 42)[len(starts) - 1]
+                pad.owner_pid = owners[pad.hwnd]
+                pad.owned_tab = options["owned_tab"]
+                pad.win32 = SimpleNamespace(is_window=lambda _: True,
+                                            window_pid=lambda hwnd: owners[hwnd],
+                                            pids=lambda _: list(owners.values()))
+                return pad
+
+            with mock.patch.object(targets.Notepad, "start", autospec=True, side_effect=start):
+                for check_id in ("H1", "I4", "O3"):
+                    ctx.begin(check_id)
+                    ctx.notepad()
+                self.assertEqual(starts[2]["reuse_windows"], {42: 7, 99: 8})
+                ctx.begin("H8")
+                ctx.notepad("alt", reuse_hwnd=42, owned_tab=True)
+                self.assertEqual((starts[3]["reuse_owner_pid"], starts[3]["reuse_windows"]), (7, None))
+                self.assertEqual(len({pad.path.name for pad in ctx._completed_notepads}), 4)
+                owners[99] = 9
+                ctx.begin("O4")
+                with self.assertRaisesRegex(Fail, "ownership changed"):
+                    ctx.notepad()
+                self.assertEqual(len(starts), 4)
+
+    def test_f3_explicit_target_destruction_stays_immediate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            restorer = restore.Restorer(log=lambda _: None)
+            ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}},
+                          ensure=lambda *_: None), fixtures={"A": SimpleNamespace(path="a.wav")},
+                          goldens=None, restorer=restorer, guard=SimpleNamespace(check=lambda: None),
+                          out=directory, work=directory, hotkey="", cache=directory)
+            ctx.begin("F3")
+            mark = restorer.mark()
+            apps = []
+
+            def create(*_args, **_kwargs):
+                name = "A" if not apps else "A2"
+                app = mock.Mock(title=name, hwnd=len(apps) + 1)
+                app.start.side_effect = lambda: events.append(f"start {name}") or app
+                app.close.side_effect = lambda: events.append(f"close {name}")
+                apps.append(app)
+                return app
+
+            ctx.dictate = lambda _fixture, during: during(ctx)
+            with mock.patch.object(targets, "TargetApp", side_effect=create), \
+                 mock.patch.object(focus_checks, "wait_held"), \
+                 mock.patch.object(focus_checks, "require_empty"), \
+                 mock.patch.object(focus_checks, "click_overlay"), \
+                 mock.patch.object(focus_checks, "wait_not_held"):
+                focus_checks.f3_window_replaced(ctx)
+            self.assertEqual(events[:3], ["start A", "close A", "start A2"])
+            self.assertEqual(ctx._completed_notepads, [])
+            self.assertEqual(restorer.restore_to(mark), [])
+            self.assertEqual(events[-2:], ["close A2", "close A"])
+
+    def test_all_automatic_notepads_retained_with_unique_repeat_identity_and_immediate_state_undo(self):
         with tempfile.TemporaryDirectory() as directory:
             events, pads, starts = [], [], []
+            clipboard = {"text": "original"}
             restorer = restore.Restorer(log=lambda _: None)
             restorer.push("run baseline", lambda: events.append("run baseline"))
             baseline = restorer.mark()
             ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
                           goldens=None, restorer=restorer, guard=SimpleNamespace(check=lambda: None),
-                          out=directory, work=directory, hotkey="", cache=directory,
-                          retain_completed_notepads=True)
+                          out=directory, work=directory, hotkey="", cache=directory)
 
             def start(pad, **kwargs):
                 starts.append(kwargs)
                 pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, kwargs["owned_tab"]
-                pad.win32 = SimpleNamespace(is_window=lambda _: True, window_pid=lambda _: 7)
+                pad.win32 = SimpleNamespace(is_window=lambda _: True, window_pid=lambda _: 7,
+                                            pids=lambda _: [7])
                 pads.append(pad)
                 return pad
 
@@ -737,28 +840,38 @@ class ImportTests(unittest.TestCase):
                 def run_check(context):
                     # These represent clipboard, settings, registry, and mouse undos. Each
                     # must run before the next check despite the retained Notepad tab.
-                    for label in ("clipboard", "settings", "registry", "mouse"):
+                    self.assertEqual(clipboard["text"], "original")
+                    context.clipboard_guard()
+                    clipboard["text"] = f"changed by {check.id}"
+                    for label in ("settings", "registry", "mouse"):
                         context.restorer.push(label, lambda label=label: events.append(label))
-                    context.notepad("doc" if check.id == "H1" else "control")
-                    if check.id == "H8":
+                    if check.id in run.NOTEPAD_CHECKS:
+                        context.notepad("control" if check.id == "H8" else "doc")
+                    if len(pads) > 1:
                         self.assertEqual(events[-4:], ["mouse", "registry", "settings", "clipboard"])
                 return run_check
 
             with mock.patch.object(targets.Notepad, "start", autospec=True, side_effect=start), \
                  mock.patch.object(targets.Notepad, "close_owned", autospec=True,
-                                   side_effect=lambda pad: events.append(f"close {pad.path.name}")), \
+                                   side_effect=lambda pad, **_: events.append(f"close {pad.path.name}")), \
                  mock.patch.object(targets.Notepad, "close", autospec=True) as close_window, \
+                 mock.patch.object(win32, "clipboard_text", side_effect=lambda: clipboard["text"]), \
+                 mock.patch.object(win32, "clipboard_formats", return_value=[]), \
+                 mock.patch.object(win32, "set_clipboard_text",
+                                   side_effect=lambda value: (clipboard.update(text=value), events.append("clipboard"))), \
                  mock.patch.object(win32, "release_all"):
-                results, aborted = run.run_checks(ctx, catalog.select("H1,H8"), 2, lookup,
+                selection = "H1,H8,I1,I4,I5,I6,O3,O4,F13"
+                results, aborted = run.run_checks(ctx, catalog.select(selection), 2, lookup,
                                                    log=lambda _: None)
-                self.assertEqual([result.status for result in results], [report.PASS] * 4)
+                self.assertEqual([result.status for result in results], [report.PASS] * 18)
                 self.assertEqual(aborted, "")
+                self.assertEqual(clipboard["text"], "original")
                 self.assertEqual(restorer.mark(), baseline)
-                self.assertEqual(len(pads), 4)
-                self.assertEqual(len({pad.path.name for pad in pads}), 4)
+                self.assertEqual(len(pads), 16)
+                self.assertEqual(len({pad.path.name for pad in pads}), 16)
                 self.assertTrue(all(Path(directory).name in pad.path.name for pad in pads))
-                self.assertEqual([item["reuse_hwnd"] for item in starts], [None, 42, 42, 42])
-                self.assertEqual([item["reuse_owner_pid"] for item in starts], [None, 7, 7, 7])
+                self.assertTrue(all(item["reuse_hwnd"] is None for item in starts))
+                self.assertEqual([item["reuse_windows"] for item in starts], [{}] + [{42: 7}] * 15)
                 self.assertTrue(all(item["owned_tab"] for item in starts))
                 self.assertFalse(any(event.startswith("close ") for event in events))
                 self.assertEqual(ctx.close_completed_notepads(), [])
@@ -772,7 +885,7 @@ class ImportTests(unittest.TestCase):
             ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
                           goldens=None, restorer=restore.Restorer(log=lambda _: None),
                           guard=SimpleNamespace(check=lambda: None), out=directory, work=directory,
-                          hotkey="", cache=directory, retain_completed_notepads=True)
+                          hotkey="", cache=directory)
             with mock.patch.object(targets.Notepad, "start", side_effect=RuntimeError("creation failed")):
                 with mock.patch.object(win32, "release_all"):
                     results, aborted = run.run_checks(ctx, catalog.select("H1,H8"), 1,
@@ -790,7 +903,7 @@ class ImportTests(unittest.TestCase):
                 tap.assert_not_called()
             ctx.begin("H8")
             with mock.patch.object(targets.Notepad, "start") as start:
-                with self.assertRaisesRegex(RuntimeError, "not a completed fixture"):
+                with self.assertRaisesRegex(Fail, "not a completed fixture"):
                     ctx.notepad("alt", reuse_hwnd=99, owned_tab=True)
                 start.assert_not_called()
 
@@ -800,7 +913,7 @@ class ImportTests(unittest.TestCase):
             ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
                           goldens=None, restorer=restore.Restorer(log=lambda _: None),
                           guard=SimpleNamespace(check=lambda: None), out=directory, work=directory,
-                          hotkey="", cache=directory, retain_completed_notepads=True)
+                          hotkey="", cache=directory)
 
             def start(pad, **_):
                 pad.hwnd, pad.owner_pid = 42, 7
@@ -812,7 +925,7 @@ class ImportTests(unittest.TestCase):
 
             with mock.patch.object(targets.Notepad, "start", autospec=True, side_effect=start), \
                  mock.patch.object(targets.Notepad, "close_owned", autospec=True,
-                                   side_effect=lambda pad: events.append(pad.path.name)), \
+                                   side_effect=lambda pad, **_: events.append(pad.path.name)), \
                  mock.patch.object(win32, "release_all"):
                 results, aborted = run.run_checks(ctx, catalog.select("H1,H8"), 1,
                                                    lambda _: check, log=lambda _: None)
@@ -2583,7 +2696,8 @@ class OwnedProbeWindowTests(unittest.TestCase):
 
     def test_context_registers_handoff_only_after_normal_target_focus(self):
         ctx = Context.__new__(Context)
-        ctx.work, ctx.check_id = Path("work"), "H1"
+        ctx.work, ctx.check_id, ctx.attempt = Path("work"), "H1", 1
+        ctx._completed_notepads, ctx._notepad_serial = [], 0
         ctx.guard = mock.Mock()
         ctx.restorer = restore.Restorer(log=lambda _: None)
         ctx.startup_probe_lease = mock.Mock()

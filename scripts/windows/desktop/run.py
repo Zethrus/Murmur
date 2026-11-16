@@ -377,8 +377,7 @@ def main(argv=None):
         meta["parent_desktop_context"] = win32.desktop_context()
         ctx = Context(build=build, session=session, fixtures=speech, goldens=golden.GoldenStore(), restorer=restorer,
                       guard=guard, out=out, work=work, hotkey=args.hotkey, cache=cache,
-                      startup_probe_lease=startup_lease,
-                      retain_completed_notepads={check.id for check in selected} <= {"H1", "H8"})
+                      startup_probe_lease=startup_lease)
         results, aborted = run_checks(ctx, selected, args.repeat, checks.lookup)
         meta["goldens"] = ctx.goldens.as_dict()
     except UserInput as error:
