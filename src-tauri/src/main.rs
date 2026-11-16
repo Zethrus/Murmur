@@ -355,7 +355,8 @@ fn main() {
             ipc::get_overlay_snapshot,
             ipc::reset_overlay_position,
             ipc::set_overlay_size,
-            ipc::start_overlay_drag
+            ipc::start_overlay_drag,
+            ipc::qa_overlay_drag_probe
         ])
         .build(tauri::generate_context!());
     match application {

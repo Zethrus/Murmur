@@ -5,6 +5,7 @@ import time
 
 import golden
 import guard
+import fixtures
 import win32
 from checks.common import (BLOCKED_HOTKEY, CODE_HOTKEY, SHIFT_HOTKEY, NOTEPAD_OUTPUT_TIMEOUT,
                            confirm_notepad_output)
@@ -321,10 +322,30 @@ def h4_toggle(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"general": {"hotkey_mode": "toggle"}})
     app = ctx.target("A")
     app.focus()
-    ctx.dictate("A", mode="toggle")
-    text = app.wait_text()
-    ctx.settle()
-    ctx.expect_delivery(text, "second toggle dictation")
+    second_toggle = None
+    try:
+        second_toggle = ctx.dictate("A", mode="toggle")
+        text = app.wait_text()
+        ctx.settle()
+        ctx.expect_delivery(text, "second toggle dictation")
+    except Fail:
+        # The app's QA-only stop log records consumed source samples without transcript
+        # or WAV path. Keep the exact second-toggle time and unpadded fixture boundary.
+        try:
+            import wave
+            with wave.open(str(ctx.fixtures["A"].path), "rb") as wav:
+                rate, source_samples = wav.getframerate(), wav.getnframes()
+            ctx.artifact("toggle-qa-diagnostic.json").write_text(json.dumps({
+                "second_toggle_epoch_s": second_toggle,
+                "speech_seconds": ctx.fixtures["A"].speech_seconds,
+                "unpadded_speech_samples": source_samples - int(fixtures.PAD_SECONDS * rate),
+                "padded_source_samples": source_samples,
+                "source_rate": rate,
+            }, indent=2), encoding="utf-8")
+            ctx.artifact("toggle-app-log.txt").write_text(ctx.murmur.log(since_launch=True), encoding="utf-8")
+        except Exception as error:  # noqa: BLE001 - diagnostics must preserve the original H4 failure
+            ctx.note(f"H4 QA diagnostics failed: {type(error).__name__}: {error}")
+        raise
 
 
 def h5_escape(ctx):

@@ -4,6 +4,7 @@ C3 downloads part of "Small (English)" (463 MiB) from Hugging Face: a network fa
 as a network failure, not as an app bug.
 """
 import json
+from pathlib import Path
 
 import tomlconfig
 import uia
@@ -76,28 +77,63 @@ def c1_remove_engine(ctx):
         raise Fail("The overlay does not say the speech engine is missing")
 
 
-def _progress(window):
-    bar = uia.try_find(window, name_=f"{MODEL} progress")
-    if bar is None:
-        return None
+def _download_state(session, component, allow_absent=False):
+    """Read the exact signed component's persisted job and consumed download bytes."""
+    root = session.data / "components"
+    path = root / "jobs.json"
     try:
-        return uia.range_value(bar)
-    except Exception:  # noqa: BLE001 - indeterminate
-        return None
+        record = json.loads(path.read_text(encoding="utf-8"))["jobs"][MODEL_ID]
+    except (FileNotFoundError, KeyError) as error:
+        if allow_absent:
+            return None
+        raise Fail(f"C3 has no readable {MODEL_ID} job record: {error}") from error
+    except (OSError, ValueError, TypeError) as error:
+        raise Fail(f"C3 has no readable {MODEL_ID} job record: {error}") from error
+    if not isinstance(record, dict):
+        raise Fail(f"C3 {MODEL_ID} job record is not an object")
+    if record.get("id") != MODEL_ID or record.get("version") != component["version"]:
+        raise Fail(f"C3 job identity differs from the signed {MODEL_ID} version")
+    base = root / "downloads" / f"{MODEL_ID}-{component['version']}"
+    if component["archive"] == "zip":
+        paths = [Path(f"{base}.part")]
+    elif component["archive"] == "none":
+        paths = [base / file["name"] for file in component["files"]]
+        paths = [path if path.is_file() else Path(f"{path}.part") for path in paths]
+    else:
+        raise Fail(f"C3 has unsupported archive type {component['archive']!r}")
+    try:
+        consumed = sum(path.stat().st_size if path.is_file() else 0 for path in paths)
+    except OSError as error:
+        raise Fail(f"C3 cannot read consumed download bytes: {error}") from error
+    try:
+        return record["phase"], consumed, record["bytes_done"]
+    except KeyError as error:
+        raise Fail(f"C3 job record lacks {error.args[0]}") from error
 
 
-def _resumed_after_restart(session, baseline, ctx):
-    """A visible bar alone is not proof that Resume continued the transfer."""
+def _paused_bytes(session, component):
+    phase, consumed, recorded = _download_state(session, component)
+    if phase != "paused" or consumed <= 0 or recorded != consumed:
+        raise Fail(f"C3 paused job is inconsistent: phase={phase!r}, file={consumed}, record={recorded}")
+    return consumed
+
+
+def _resumed_after_restart(session, component, baseline, ctx):
+    """Only actual new bytes or a verified install prove Resume continued."""
     window = session.settings()
-    value = _progress(window)
-    if value is not None and value > baseline:
-        return ("advanced", value)
     if badge(ctx, window, MODEL, 0) in ("Installed", "Active") and session.installed(MODEL_ID):
-        return ("completed", value)
+        return ("completed", None)
+    state = _download_state(session, component, allow_absent=True)
+    if state is None:
+        return None
+    phase, consumed, _ = state
+    if phase in ("queued", "downloading") and consumed > baseline:
+        return ("advanced", consumed)
     return None
 
 
 def c3_pause_resume(ctx):
+    component = ctx.build.component(MODEL_ID)
     config = tomlconfig.merge(ctx.murmur.base_config, {})
     session = MurmurSession(ctx.build, ctx.work, ctx.guard, config, name="c3")
     ctx.restorer.push("stop the C3 session", session.stop)
@@ -107,15 +143,19 @@ def c3_pause_resume(ctx):
     session.launch(wav=ctx.fixtures["A"].path, config={})
     window = session.page("Components")
     uia.invoke(uia.find(window, name_=f"Install {MODEL}", control_type_=uia.BUTTON, timeout=15, sleep=ctx.sleep))
-    started = win32.wait_for(lambda: (v := _progress(session.settings())) and v > 0 and v, 120, 0.1, sleep=ctx.sleep)
+    started = win32.wait_for(lambda: (state := _download_state(session, component, allow_absent=True))
+                             and state[1] > 0 and state[1],
+                             120, 0.1, sleep=ctx.sleep)
     if not started:
         errors = [n for n in uia.names(session.settings()) if "fail" in n.lower()]
         raise Fail(f"network: the download did not start ({errors[0] if errors else 'no progress'})")
     uia.invoke(uia.find(session.settings(), name_=f"Pause {MODEL}", control_type_=uia.BUTTON, timeout=5, sleep=ctx.sleep))
     if win32.wait_for(lambda: badge(ctx, session.settings(), MODEL, 2) == "Paused", 15, 0.5, sleep=ctx.sleep) is None:
         raise Fail("Pause did not pause the download")
+    first_pause = _paused_bytes(session, component)
     uia.invoke(uia.find(session.settings(), name_=f"Resume {MODEL}", control_type_=uia.BUTTON, timeout=5, sleep=ctx.sleep))
-    resumed = win32.wait_for(lambda: (v := _progress(session.settings())) and v > started and v, 60, 0.2,
+    resumed = win32.wait_for(lambda: (state := _download_state(session, component, allow_absent=True))
+                             and state[1] > first_pause and state[1], 60, 0.2,
                              sleep=ctx.sleep)
     if not resumed:
         raise Fail("Resume did not continue the download")
@@ -123,9 +163,7 @@ def c3_pause_resume(ctx):
     if not win32.wait_for(lambda: badge(ctx, session.settings(), MODEL, 2) == "Paused", 15, 0.5,
                           sleep=ctx.sleep):
         raise Fail("The second Pause did not pause the download")
-    baseline = _progress(session.settings())
-    if baseline is None:
-        raise Fail("The second Pause has no readable progress baseline")
+    baseline = _paused_bytes(session, component)
     lifecycle = ctx.artifact("notepad-lifecycle.json")
     before_stop = ctx.notepad_ownership_snapshot()
     try:
@@ -140,17 +178,17 @@ def c3_pause_resume(ctx):
     ctx.screenshot(session.settings_hwnd(), "after-restart.png")
     if state != "Paused":
         raise Fail(f"After restart the download is {state!r}, not Paused")
-    restart_progress = _progress(session.settings())
-    if restart_progress is None or restart_progress < baseline:
+    restart_progress = _paused_bytes(session, component)
+    if restart_progress != baseline:
         raise Fail(f"Paused progress did not persist: before restart {baseline!r}, after {restart_progress!r}")
     ctx.sleep(5.0)
     if badge(ctx, session.settings(), MODEL) != "Paused":
         raise Fail("The download resumed by itself after restart")
-    persisted = _progress(session.settings())
+    persisted = _paused_bytes(session, component)
     if persisted != restart_progress:
         raise Fail(f"Paused progress changed without Resume: {restart_progress!r} -> {persisted!r}")
     uia.invoke(uia.find(session.settings(), name_=f"Resume {MODEL}", control_type_=uia.BUTTON, timeout=5, sleep=ctx.sleep))
-    outcome = win32.wait_for(lambda: _resumed_after_restart(session, persisted, ctx), 30, 0.2,
+    outcome = win32.wait_for(lambda: _resumed_after_restart(session, component, persisted, ctx), 30, 0.2,
                              sleep=ctx.sleep)
     if not outcome:
         raise Fail(f"Resume after restart stalled at {persisted!r}; no progress increase or verified install")
@@ -160,5 +198,5 @@ def c3_pause_resume(ctx):
     except Exception:  # noqa: BLE001 - finishing or already done; the profile is deleted anyway
         pass
     session.stop()
-    ctx.note(f"progress first pause {started!r}, first resume {resumed!r}, "
+    ctx.note(f"consumed bytes start {started!r}, first pause {first_pause!r}, first resume {resumed!r}, "
              f"persisted pause {persisted!r}, after restart Resume {outcome!r}")

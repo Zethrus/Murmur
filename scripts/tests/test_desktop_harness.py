@@ -1206,21 +1206,121 @@ class ImportTests(unittest.TestCase):
 
 
 class DesktopFollowupTests(unittest.TestCase):
+    C3_COMPONENT = {"version": "v1", "archive": "zip", "files": []}
+
+    def _c3_case(self, directory, session):
+        return SimpleNamespace(build=SimpleNamespace(component=lambda _id: self.C3_COMPONENT),
+                               work=directory, guard=object(),
+                               murmur=SimpleNamespace(base_config={}, running=lambda: False),
+                               fixtures={"A": SimpleNamespace(path="a.wav")},
+                               restorer=SimpleNamespace(push=mock.Mock()), sleep=lambda _: None,
+                               screenshot=mock.Mock(), artifact=lambda suffix: Path(directory) / suffix,
+                               notepad_ownership_snapshot=lambda: {}, note=mock.Mock())
+
+    def test_c3_paused_bytes_match_exact_job_and_partial_file(self):
+        from checks import components
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "components"
+            (root / "downloads").mkdir(parents=True)
+            part = root / "downloads" / "speech-small.en-v1.part"
+            part.write_bytes(b"a" * 41)
+            jobs = root / "jobs.json"
+            record = {"id": components.MODEL_ID, "version": "v1", "phase": "paused", "bytes_done": 41}
+            session = SimpleNamespace(data=Path(directory))
+            def save():
+                jobs.write_text(json.dumps({"jobs": {components.MODEL_ID: record}}))
+            save()
+            self.assertEqual(components._paused_bytes(session, self.C3_COMPONENT), 41)
+            part.write_bytes(b"a" * 42)
+            with self.assertRaisesRegex(Fail, "inconsistent"):
+                components._paused_bytes(session, self.C3_COMPONENT)
+            record["bytes_done"] = 42
+            save()
+            self.assertEqual(components._paused_bytes(session, self.C3_COMPONENT), 42)
+            part.write_bytes(b"")
+            with self.assertRaisesRegex(Fail, "inconsistent"):
+                components._paused_bytes(session, self.C3_COMPONENT)
+            record["version"] = "other"
+            save()
+            with self.assertRaisesRegex(Fail, "identity differs"):
+                components._download_state(session, self.C3_COMPONENT)
+
+    def test_o3_focus_diagnostic_records_root_pid_and_native_editor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pad = targets.Notepad(directory, "O3-doc")
+            pad.path.write_text("", encoding="utf-8")
+            pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+            pad.uia = SimpleNamespace(focused=lambda: object(), describe=lambda _: "Document 'Text editor'")
+            pad.win32 = SimpleNamespace(
+                foreground=lambda: 99,
+                foreground_context=lambda: {"active_hwnd": 99, "focus_hwnd": 101},
+                user32=SimpleNamespace(GetAncestor=lambda _h, _mode: 42), GA_ROOT=2,
+                window_pid=lambda _h: 7, class_name=lambda h: "RichEditD2DPT" if h == 101 else "Notepad",
+                window_text=lambda _h: "", gui_thread_focus=lambda _h: {"focus_hwnd": "0x65"})
+            pad.active_document = lambda: True
+            pad.editor_mode_label = lambda: "Plain text"
+            pad.menu_open = lambda: False
+            detail = pad.focus_diagnostic()
+            self.assertIn("expected owner pid: 7; active fixture: True", detail)
+            self.assertIn("'hwnd': '0x63', 'root': '0x2a', 'pid': 7", detail)
+            self.assertIn("'hwnd': '0x65', 'root': '0x2a'", detail)
+            self.assertIn("RichEditD2DPT", detail)
+
+    def test_o2_does_not_drag_without_qa_dom_probe(self):
+        from checks import overlay
+        with tempfile.TemporaryDirectory() as directory:
+            session = SimpleNamespace(ensure=lambda *_a: None, log=lambda **_k: "")
+            ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav")},
+                                  restorer=SimpleNamespace(push=mock.Mock()),
+                                  artifact=lambda suffix: Path(directory) / suffix, sleep=lambda _: None)
+            with mock.patch.object(overlay.win32, "wait_for", return_value=None), \
+                 mock.patch.object(overlay.win32, "drag") as drag:
+                with self.assertRaisesRegex(Fail, "did not arm"):
+                    overlay.o2_drag(ctx)
+            drag.assert_not_called()
+            self.assertIn("did not arm", (Path(directory) / "drag-diagnostic.txt").read_text())
+
+    def test_h4_failure_records_exact_fixture_boundary_and_app_qa_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.wav"
+            with wave.open(str(path), "wb") as writer:
+                writer.setparams((1, 2, fixtures.RATE, 0, "NONE", "not compressed"))
+                writer.writeframes(b"\0\0" * (16 + int(fixtures.PAD_SECONDS * fixtures.RATE)))
+            app = SimpleNamespace(focus=lambda: None, wait_text=lambda: "missing dog")
+            session = SimpleNamespace(ensure=lambda *_a: None, log=lambda **_k: "QA capture stopped")
+            ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path=path, speech_seconds=.001)},
+                                  target=lambda _name: app, dictate=lambda *_a, **_k: 123.5,
+                                  settle=lambda: None, expect_delivery=mock.Mock(side_effect=Fail("missing dog")),
+                                  artifact=lambda suffix: Path(directory) / suffix)
+            with self.assertRaisesRegex(Fail, "missing dog"):
+                hotkey_checks.h4_toggle(ctx)
+            record = json.loads((Path(directory) / "toggle-qa-diagnostic.json").read_text())
+            self.assertEqual(record["unpadded_speech_samples"], 16)
+            self.assertEqual(record["second_toggle_epoch_s"], 123.5)
+            self.assertEqual((Path(directory) / "toggle-app-log.txt").read_text(), "QA capture stopped")
+            self.assertNotIn(str(path), json.dumps(record))
+
     def test_c3_restart_resume_requires_advance_or_verified_install(self):
         from checks import components
         session = SimpleNamespace(settings=lambda: object(), installed=mock.Mock(return_value=False))
-        with mock.patch.object(components, "_progress", return_value=0.00042), \
+        with mock.patch.object(components, "_download_state", return_value=("downloading", 42, 42)) as state, \
              mock.patch.object(components, "badge", return_value="Paused"):
-            self.assertIsNone(components._resumed_after_restart(session, 0.00042, object()))
-        with mock.patch.object(components, "_progress", return_value=0.00043):
-            self.assertEqual(components._resumed_after_restart(session, 0.00042, object()),
-                             ("advanced", 0.00043))
-        with mock.patch.object(components, "_progress", return_value=None), \
+            self.assertIsNone(components._resumed_after_restart(session, self.C3_COMPONENT, 42, object()))
+            state.return_value = ("downloading", 43, 42)
+            self.assertEqual(components._resumed_after_restart(session, self.C3_COMPONENT, 42, object()),
+                             ("advanced", 43))
+            state.return_value = ("downloading", 0, 0)
+            self.assertIsNone(components._resumed_after_restart(session, self.C3_COMPONENT, 42, object()))
+            state.return_value = ("paused", 43, 43)
+            self.assertIsNone(components._resumed_after_restart(session, self.C3_COMPONENT, 42, object()))
+        with mock.patch.object(components, "_download_state", return_value=("paused", 42, 42)) as state, \
              mock.patch.object(components, "badge", return_value="Installed"):
-            self.assertIsNone(components._resumed_after_restart(session, 0.00042, object()))
+            self.assertIsNone(components._resumed_after_restart(session, self.C3_COMPONENT, 42, object()))
             session.installed.return_value = True
-            self.assertEqual(components._resumed_after_restart(session, 0.00042, object()),
+            state.reset_mock()
+            self.assertEqual(components._resumed_after_restart(session, self.C3_COMPONENT, 42, object()),
                              ("completed", None))
+            state.assert_not_called()
 
     def test_c3_stalled_after_restart_fails_and_records_precise_progress(self):
         from checks import components
@@ -1229,23 +1329,19 @@ class DesktopFollowupTests(unittest.TestCase):
             session.page.return_value = object()
             session.settings.return_value = object()
             session.installed.return_value = False
-            ctx = SimpleNamespace(build=object(), work=directory, guard=object(),
-                                  murmur=SimpleNamespace(base_config={}, running=lambda: False),
-                                  fixtures={"A": SimpleNamespace(path="a.wav")},
-                                  restorer=SimpleNamespace(push=mock.Mock()),
-                                  sleep=lambda _: None, screenshot=mock.Mock(),
-                                  artifact=lambda suffix: Path(directory) / suffix,
-                                  notepad_ownership_snapshot=lambda: {"foreground": {"hwnd": 42}},
-                                  note=mock.Mock())
-            progress = iter([0.00041, 0.00042, 0.00042, 0.00042, 0.00042, 0.00042])
+            ctx = self._c3_case(directory, session)
+            states = iter([("downloading", 41, 41), ("paused", 41, 41),
+                           ("downloading", 42, 41), ("paused", 42, 42),
+                           ("paused", 42, 42), ("paused", 42, 42),
+                           ("downloading", 42, 42)])
             with mock.patch.object(components, "MurmurSession", return_value=session), \
                  mock.patch.object(components.tomlconfig, "merge", return_value={}), \
                  mock.patch.object(components.uia, "find", side_effect=lambda _, name_, **__: name_), \
                  mock.patch.object(components.uia, "invoke"), \
                  mock.patch.object(components, "badge", return_value="Paused"), \
-                 mock.patch.object(components, "_progress", side_effect=lambda _: next(progress)), \
+                 mock.patch.object(components, "_download_state", side_effect=lambda *_a, **_k: next(states)), \
                  mock.patch.object(components.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()):
-                with self.assertRaisesRegex(Fail, "stalled at 0.00042"):
+                with self.assertRaisesRegex(Fail, "stalled at 42"):
                     components.c3_pause_resume(ctx)
             self.assertEqual(session.stop.call_count, 1)
             self.assertIn("before_c3_stop", (Path(directory) / "notepad-lifecycle.json").read_text())
@@ -1254,16 +1350,15 @@ class DesktopFollowupTests(unittest.TestCase):
         from checks import components
         session = mock.Mock()
         session.settings.return_value = object()
-        ctx = SimpleNamespace(build=object(), work="work", guard=object(),
-                              murmur=SimpleNamespace(base_config={}, running=lambda: False),
-                              fixtures={"A": SimpleNamespace(path="a.wav")},
-                              restorer=SimpleNamespace(push=mock.Mock()), sleep=lambda _: None)
+        ctx = self._c3_case("work", session)
         with mock.patch.object(components, "MurmurSession", return_value=session), \
              mock.patch.object(components.tomlconfig, "merge", return_value={}), \
              mock.patch.object(components.uia, "find", side_effect=lambda _, name_, **__: name_), \
              mock.patch.object(components.uia, "invoke"), \
              mock.patch.object(components, "badge", side_effect=["Paused", None]), \
-             mock.patch.object(components, "_progress", side_effect=[0.00041, 0.00042]), \
+             mock.patch.object(components, "_download_state", side_effect=[("downloading", 41, 41),
+                                                                      ("paused", 41, 41),
+                                                                      ("downloading", 42, 41)]), \
              mock.patch.object(components.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()):
             with self.assertRaisesRegex(Fail, "second Pause"):
                 components.c3_pause_resume(ctx)
@@ -1277,21 +1372,19 @@ class DesktopFollowupTests(unittest.TestCase):
                 session.settings.return_value = object()
                 session.installed.return_value = completion
                 notes = []
-                ctx = SimpleNamespace(build=object(), work=directory, guard=object(),
-                                      murmur=SimpleNamespace(base_config={}, running=lambda: False),
-                                      fixtures={"A": SimpleNamespace(path="a.wav")},
-                                      restorer=SimpleNamespace(push=mock.Mock()), sleep=lambda _: None,
-                                      screenshot=mock.Mock(), artifact=lambda suffix: Path(directory) / suffix,
-                                      notepad_ownership_snapshot=lambda: {}, note=notes.append)
-                values = iter([0.00041, 0.00042, 0.00042, 0.00042, 0.00042,
-                               None if completion else 0.00043])
+                ctx = self._c3_case(directory, session)
+                ctx.note = notes.append
+                states = iter([("downloading", 41, 41), ("paused", 41, 41),
+                               ("downloading", 42, 41), ("paused", 42, 42),
+                               ("paused", 42, 42), ("paused", 42, 42),
+                               ("downloading", 43, 42)])
                 badges = iter(["Paused", "Paused", "Paused", "Paused", "Installed"])
                 with mock.patch.object(components, "MurmurSession", return_value=session), \
                      mock.patch.object(components.tomlconfig, "merge", return_value={}), \
                      mock.patch.object(components.uia, "find", side_effect=lambda _, name_, **__: name_), \
                      mock.patch.object(components.uia, "invoke"), \
                      mock.patch.object(components, "badge", side_effect=lambda *_a, **_k: next(badges)), \
-                     mock.patch.object(components, "_progress", side_effect=lambda _: next(values)), \
+                     mock.patch.object(components, "_download_state", side_effect=lambda *_a, **_k: next(states)), \
                      mock.patch.object(components.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()):
                     components.c3_pause_resume(ctx)
                 self.assertIn("after restart Resume", notes[0])
@@ -1374,6 +1467,8 @@ class DesktopFollowupTests(unittest.TestCase):
                  mock.patch.object(tray.win32, "click", side_effect=lambda *_a, **_k: state.update(clicked=True)), \
                  mock.patch.object(tray.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()), \
                  mock.patch.object(tray.uia, "center", return_value=(1, 2)), \
+             mock.patch.object(tray.uia, "rect", return_value=(0, 0, 2, 4)), \
+             mock.patch.object(tray.uia, "handle", return_value=11), \
                  mock.patch.object(tray.uia, "from_handle", side_effect=lambda hwnd: f"menu-{hwnd}"), \
                  mock.patch.object(tray, "_tray_diagnostic") as diagnostic:
                 self.assertEqual(tray._menu(ctx), "menu-77")
@@ -1381,6 +1476,33 @@ class DesktopFollowupTests(unittest.TestCase):
                 with self.assertRaisesRegex(Fail, "newly opened tray context menu"):
                     tray._menu(ctx)
                 diagnostic.assert_called_once()
+
+    def test_tray_closed_menu_handle_reuse_is_fresh_but_visible_menu_is_not(self):
+        from checks import tray
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = SimpleNamespace(murmur=SimpleNamespace(process=SimpleNamespace(pid=7)),
+                                  sleep=lambda _: None, artifact=lambda suffix: Path(directory) / suffix)
+            state = {"visible_before": False, "clicked": False}
+            def windows(*, class_):
+                if class_ == "#32768":
+                    return [77] if state["clicked"] or state["visible_before"] else []
+                return [11] if class_ == "Shell_TrayWnd" else []
+            with mock.patch.object(tray, "_tray_button", return_value=object()), \
+                 mock.patch.object(tray, "_overflow_window", return_value=0), \
+                 mock.patch.object(tray.win32, "find_windows", side_effect=windows), \
+                 mock.patch.object(tray.win32, "window_pid", return_value=7), \
+                 mock.patch.object(tray.win32, "click", side_effect=lambda *_a, **_k: state.update(clicked=True)), \
+                 mock.patch.object(tray.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()), \
+                 mock.patch.object(tray.uia, "center", return_value=(1, 2)), \
+                 mock.patch.object(tray.uia, "rect", return_value=(0, 0, 2, 4)), \
+                 mock.patch.object(tray.uia, "handle", return_value=11), \
+                 mock.patch.object(tray.uia, "from_handle", side_effect=lambda hwnd: f"menu-{hwnd}"), \
+                 mock.patch.object(tray, "_tray_diagnostic") as diagnostic:
+                self.assertEqual(tray._menu(ctx, "Sounds mute"), "menu-77")
+                state.update(visible_before=True, clicked=False)
+                with self.assertRaisesRegex(Fail, "newly opened"):
+                    tray._menu(ctx, "Sounds mute")
+                self.assertEqual(diagnostic.call_args.kwargs["action"]["operation"], "Sounds mute")
 
     def test_tray_missing_icon_skips_but_mute_failure_fails(self):
         from checks import tray

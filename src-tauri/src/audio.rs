@@ -9,7 +9,7 @@ use std::{
         mpsc, Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const RATE: usize = 16_000;
@@ -176,6 +176,8 @@ pub struct AudioCapture {
     cfg: config::Audio,
     _stream: Option<cpal::Stream>,
     qa: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
+    qa_source: Option<(usize, u32)>,
+    qa_started: Option<Instant>,
 }
 /// Feeds phone PCM into the same bounded capture buffer used by local input.
 pub struct RemoteAudioSource {
@@ -214,6 +216,8 @@ impl AudioCapture {
                 cfg: cfg.clone(),
                 _stream: None,
                 qa: None,
+                qa_source: None,
+                qa_started: None,
             },
             remote,
         )
@@ -248,6 +252,7 @@ impl AudioCapture {
                 .chunks(spec.channels as usize)
                 .map(|f| f.iter().sum::<f32>() / f.len() as f32)
                 .collect();
+            let source_samples = mono.len();
             let data = buffer.clone();
             let config = cfg.clone();
             let (tx, rx) = mpsc::channel();
@@ -282,6 +287,8 @@ impl AudioCapture {
                 cfg: cfg.clone(),
                 _stream: None,
                 qa: Some((tx, job)),
+                qa_source: Some((source_samples, spec.sample_rate)),
+                qa_started: None,
             });
         }
         let host = cpal::default_host();
@@ -334,6 +341,8 @@ impl AudioCapture {
             cfg: cfg.clone(),
             _stream: Some(stream),
             qa: None,
+            qa_source: None,
+            qa_started: None,
         })
     }
     pub fn healthy(&self) -> bool {
@@ -356,6 +365,11 @@ impl AudioCapture {
             b.ring.clear();
             b.start = Some(b.cursor);
             b.resampler = Resampler::default();
+            self.qa_started = Some(Instant::now());
+            if let Some((source_samples, source_rate)) = self.qa_source {
+                tracing::info!(target: "murmur::qa_audio", source_samples, source_rate,
+                               "QA capture started");
+            }
         }
         Ok(())
     }
@@ -372,10 +386,17 @@ impl AudioCapture {
             .lock()
             .map_err(|_| anyhow::anyhow!("Audio lock poisoned"))?;
         let pcm = b.pcm(self.cfg.gain);
+        if let Some((source_samples, source_rate)) = self.qa_source {
+            tracing::info!(target: "murmur::qa_audio", source_samples, source_rate,
+                           consumed_source_samples = b.qa_pos, captured_pcm_samples = pcm.len(),
+                           elapsed_ms = self.qa_started.take().map(|start| start.elapsed().as_millis() as u64),
+                           "QA capture stopped");
+        }
         b.start = None;
         Ok(pcm)
     }
     pub fn cancel(&mut self) {
+        self.qa_started = None;
         if let Ok(mut b) = self.buffer.lock() {
             b.start = None;
         }

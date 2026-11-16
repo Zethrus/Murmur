@@ -14,6 +14,12 @@ export interface Status {
 }
 export type OverlayPosition = "top-center" | "bottom-center" | "custom";
 export type IdleView = "icon" | "pill" | "hidden";
+export interface QaOverlayDragProbe {
+  stage: number; x: number; y: number; targetKind: number; hitPill: boolean; hitHandle: boolean;
+  idleIcon: boolean; busy: boolean; dragging: boolean; button: number;
+  pillRect: [number, number, number, number]; handleRect: [number, number, number, number];
+  targetPointerEvents: boolean; pillPointerEvents: boolean; handlePointerEvents: boolean;
+}
 export interface OverlayPlacement {
   monitor_name: string; monitor_x: number; monitor_y: number; monitor_width: number; monitor_height: number;
   x_fraction: number; y_fraction: number;
@@ -188,6 +194,7 @@ interface Commands {
   get_overlay_snapshot: [undefined, OverlaySnapshot];
   reset_overlay_position: [undefined, void];
   set_overlay_size: [{ width: number; height: number; layoutRevision: number; layoutInstance: string }, void];
+  qa_overlay_drag_probe: [{ probe: QaOverlayDragProbe }, boolean];
   // Flipper companion (see companion/protocol.md).
   companion_status: [undefined, CompanionStatus]; companion_resync: [undefined, void];
   companion_ports: [undefined, string[]];

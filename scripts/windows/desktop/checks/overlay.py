@@ -72,6 +72,12 @@ def o1_states(ctx):
 def o2_drag(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"overlay": {"idle_view": "icon"}})
     ctx.restorer.push("reset the overlay placement", lambda: _reset_placement(ctx))
+    if not win32.wait_for(lambda: "QA overlay drag probe" in ctx.murmur.log(since_launch=True),
+                          5, 0.1, sleep=ctx.sleep):
+        ctx.artifact("drag-diagnostic.txt").write_text(
+            "QA overlay DOM probe did not arm before the gesture.\n"
+            + ctx.murmur.log(since_launch=True), encoding="utf-8")
+        raise Fail("QA overlay DOM probe did not arm")
     hwnd = ctx.murmur.overlay_hwnd()
     log_before = len(ctx.murmur.log())
     before = win32.window_rect(hwnd)
@@ -105,7 +111,8 @@ def o2_drag(ctx):
         f"cursor: {win32.cursor()}\nforeground: {hex(win32.foreground())} "
         f"{win32.window_text(win32.foreground())!r}\n"
         f"overlay names: {ctx.murmur.overlay_names()!r}\n"
-        f"new log: {[line for line in ctx.murmur.log()[log_before:].splitlines() if 'drag' in line.lower()]!r}\n",
+        f"new drag log: {[line for line in ctx.murmur.log()[log_before:].splitlines() if 'drag' in line.lower()]!r}\n"
+        f"QA DOM hit probes: {[line for line in ctx.murmur.log(since_launch=True).splitlines() if 'QA overlay drag probe' in line]!r}\n",
         encoding="utf-8")
     if abs(held[0] - before[0]) < 100 and abs(held[1] - before[1]) < 100:
         raise Fail(f"Overlay did not move while the button was held: {before} -> {held}")

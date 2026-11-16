@@ -66,6 +66,7 @@ test("components page shows every state with its actions",async()=>{
   const h=await settings({componentsFixture:fixture});await button(h.root,"Components").dispatch("click");await settle();await settle();
   const row=id=>component(h.root,id);
   assert.ok(button(row("cuda"),"Resume")&&button(row("cuda"),"Discard"));assert.match(h.root.textContent,/RTX 4060 Laptop GPU · 8.0 GB video memory · driver 580.178.04/);
+  assert.equal(row("cuda").querySelector(".progress-block").hidden,true,"paused jobs intentionally hide the progress bar");
   assert.ok(button(row("speech-tiny.en"),"Reinstall"));assert.match(row("speech-tiny.en").textContent,/do not match the signed manifest.*Nothing was deleted/);
   assert.ok(button(row("speech-distil-large-v3"),"Retry"));assert.match(row("speech-distil-large-v3").textContent,/Not enough disk space/);
   assert.ok(button(row("speech-large-v3-turbo"),"Reinstall")&&button(row("speech-large-v3-turbo"),"Remove"));
@@ -538,6 +539,21 @@ test("the whole idle icon is the drag handle and stays an icon while moving",asy
   await pill.dispatch("mousedown",{button:0});assert.equal(h.drags.length,1);assert.equal(h.root.dataset.dragging,"true");
   h.timers.tick(5000);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);
   release();await settle();h.timers.tick(1500);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);h.unload();
+});
+test("QA drag probe records DOM hit and handler receipt only when enabled",async()=>{
+  const h=await harness({qa_overlay_drag_probe:async()=>true});
+  h.document.elementFromPoint=()=>h.root;
+  await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);await settle();
+  const pill=h.root.querySelector(".pill"),bar=h.root.querySelector(".bars i");
+  h.document.elementFromPoint=()=>bar;
+  h.timers.tick(1500);
+  await h.root.dispatch("mousedown",{button:0,clientX:12,clientY:13});
+  await pill.dispatch("mousedown",{button:0,clientX:12,clientY:13});
+  const probes=h.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>plain(c.args.probe));
+  assert.deepEqual(probes.map(p=>p.stage),[0,1,2]);
+  assert.equal(probes[1].targetKind,3);assert.equal(probes[1].hitPill,true);
+  assert.equal(probes[1].idleIcon,true);assert.equal(probes[2].dragging,true);
+  assert.equal(h.drags.length,1);h.unload();
 });
 test("suggestions, held text and drag errors use the full pill over the idle icon",async()=>{
   const h=await overlay({startOverlayDrag:async()=>{throw new Error("permission denied");}}),pill=h.root.querySelector(".pill"),label=h.root.querySelector(".pill-label");

@@ -20,7 +20,24 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   let state: DictationState = "idle", config: Config | undefined, receivedState = false, receivedConfig = false, lastError = "Dictation unavailable", disposed = false;
   let enhancement: Enhancement = NONE, revision = -1, busy = false, acting = false, dragging = false, localMessage = "";
   let timer: ReturnType<typeof setTimeout> | undefined, expiry: ReturnType<typeof setTimeout> | undefined, noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let qaDragProbeEnabled = false;
   const disposers: (()=>void)[] = [];
+  const qaDragProbe = (stage: number, event?: MouseEvent): Promise<boolean> => {
+    if (typeof document.elementFromPoint !== "function") return Promise.resolve(false);
+    const box = pill.getBoundingClientRect();
+    const x = event?.clientX ?? (box.left + box.right) / 2;
+    const y = event?.clientY ?? (box.top + box.bottom) / 2;
+    const hit = document.elementFromPoint(x, y);
+    const rect = (element: Element): [number, number, number, number] => { const r = element.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+    const pointer = (element: Element | null): boolean => !!element && window.getComputedStyle(element).pointerEvents !== "none";
+    const targetKind = hit && handle.contains(hit) ? 2 : hit && hit.closest(".bars") ? 3 : hit && pill.contains(hit) ? 1 : 0;
+    return call("qa_overlay_drag_probe", {probe: {
+      stage, x, y, targetKind, hitPill: !!hit && pill.contains(hit), hitHandle: !!hit && handle.contains(hit),
+      idleIcon: root.dataset.idle === "icon", busy, dragging, button: event?.button ?? -1,
+      pillRect: rect(pill), handleRect: rect(handle), targetPointerEvents: pointer(hit),
+      pillPointerEvents: pointer(pill), handlePointerEvents: pointer(handle),
+    }});
+  };
   panel.hidden = true;
   const idleView = (): IdleView => config?.overlay.idle_view ?? "icon";
   /** Full pill chrome; dictation, suggestions, held text and drag errors always use it. */
@@ -142,9 +159,13 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   // next pointerdown. Mouse down continues to arrive for successive native drags.
   // The idle icon is itself the handle: the whole glyph starts a move.
   const beginDrag = (event: Event): void => { const pointer = event as MouseEvent;
-    if (pointer.button !== 0 || busy || dragging) return;
+    if (pointer.button !== 0 || busy || dragging) {
+      if (qaDragProbeEnabled) void qaDragProbe(3, pointer).catch(()=>{});
+      return;
+    }
     pointer.preventDefault();
     dragging = true; root.dataset.dragging = "true"; delete root.dataset.dragError;
+    if (qaDragProbeEnabled) void qaDragProbe(2, pointer).catch(()=>{});
     render(state); // clear any previous drag error and restart the normal hide timer
     void startOverlayDrag().then(()=>{
       if (disposed) return;
@@ -187,4 +208,11 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   if (disposed) return; if (!receivedConfig) apply(initial); if (status.error) lastError = status.error; if (!receivedState) render(status.state);
   if (snapshot) applySnapshot(snapshot);
   measure();
+  void qaDragProbe(0).then(enabled => {
+    if (!enabled || disposed) return;
+    qaDragProbeEnabled = true;
+    const onDown = (event: MouseEvent): void => { void qaDragProbe(1, event).catch(()=>{}); };
+    root.addEventListener("mousedown", onDown, true);
+    disposers.push(() => root.removeEventListener("mousedown", onDown, true));
+  }).catch(() => {});
 }

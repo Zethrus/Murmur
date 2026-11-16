@@ -426,9 +426,22 @@ class Notepad:
 
     def focus_diagnostic(self):
         focused = self.uia.focused()
+        foreground = self.win32.foreground()
+        native = self.win32.foreground_context()
+        focus_hwnd = native.get("focus_hwnd", 0)
+        def ownership(hwnd):
+            if not hwnd:
+                return None
+            root = self.win32.user32.GetAncestor(hwnd, self.win32.GA_ROOT) or 0
+            return {"hwnd": hex(hwnd), "root": hex(root), "pid": self.win32.window_pid(hwnd),
+                    "root_pid": self.win32.window_pid(root) if root else 0,
+                    "class": self.win32.class_name(hwnd)}
         return (f"scratch path: {self.path}\n"
-                f"Notepad hwnd: {hex(self.hwnd)}; foreground: {hex(self.win32.foreground())} "
-                f"{self.win32.window_text(self.win32.foreground())!r}\n"
+                f"Notepad hwnd: {hex(self.hwnd)}; expected owner pid: {self.owner_pid}; "
+                f"active fixture: {self.active_document()}\n"
+                f"foreground: {ownership(foreground)!r} {self.win32.window_text(foreground)!r}\n"
+                f"native active: {ownership(native.get('active_hwnd', 0))!r}; "
+                f"native focus owner: {ownership(focus_hwnd)!r}\n"
                 f"UIA focus: {self.uia.describe(focused)}\n"
                 f"native focus: {self.win32.gui_thread_focus(self.hwnd)}\n"
                 f"editor mode label: {self.editor_mode_label()}\n"

@@ -7,6 +7,7 @@ use crate::{
     overlay, platform,
     sound::Cue,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
@@ -454,4 +455,54 @@ pub async fn start_overlay_drag(app: AppHandle, window: WebviewWindow) -> Reply<
         .await
         .inspect_err(|error| tracing::warn!(%error, "overlay drag failed"))
         .map_err(error)
+}
+
+/// Fixed, text-free DOM hit evidence for the disposable QA WAV profile only.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QaOverlayDragProbe {
+    stage: u8, // 0 mounted, 1 mouse down, 2 handler accepted, 3 handler refused
+    x: f64,
+    y: f64,
+    target_kind: u8, // 0 other, 1 pill, 2 handle, 3 bars
+    hit_pill: bool,
+    hit_handle: bool,
+    idle_icon: bool,
+    busy: bool,
+    dragging: bool,
+    button: i16,
+    pill_rect: [f64; 4],
+    handle_rect: [f64; 4],
+    target_pointer_events: bool,
+    pill_pointer_events: bool,
+    handle_pointer_events: bool,
+}
+
+#[tauri::command]
+pub fn qa_overlay_drag_probe(window: WebviewWindow, probe: QaOverlayDragProbe) -> Reply<bool> {
+    require_window(&window, "overlay")?;
+    if std::env::var_os("MURMUR_QA_WAV").is_none() {
+        return Ok(false);
+    }
+    if probe.stage > 3
+        || probe.target_kind > 3
+        || ![probe.x, probe.y]
+            .into_iter()
+            .chain(probe.pill_rect)
+            .chain(probe.handle_rect)
+            .all(f64::is_finite)
+    {
+        return Err("Invalid QA overlay drag probe".into());
+    }
+    tracing::info!(target: "murmur::qa_overlay_drag", stage = probe.stage,
+                   x = probe.x, y = probe.y, target_kind = probe.target_kind,
+                   hit_pill = probe.hit_pill, hit_handle = probe.hit_handle,
+                   idle_icon = probe.idle_icon, busy = probe.busy, dragging = probe.dragging,
+                   button = probe.button, pill_rect = ?probe.pill_rect,
+                   handle_rect = ?probe.handle_rect,
+                   target_pointer_events = probe.target_pointer_events,
+                   pill_pointer_events = probe.pill_pointer_events,
+                   handle_pointer_events = probe.handle_pointer_events,
+                   "QA overlay drag probe");
+    Ok(true)
 }
