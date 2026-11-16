@@ -316,22 +316,31 @@ class Notepad:
     def document(self):
         return self.uia.document_element(self.uia.from_handle(self.hwnd), timeout=5)
 
-    def focus(self, click=True):
+    def focus(self, click=True, guard_check=None):
+        check = guard_check or (lambda: None)
+        check()
         if self.owned_tab and not self.active_document():
             raise RuntimeError(f"Notepad active tab is not {self.path.name}")
         document = self.document()
         point = self.uia.center(document)
-        self.win32.activate(self.hwnd, click_at=None if not click else point)
+        check()  # discovery can block; revalidate before any activation or input
+        options = {"guard_check": check} if guard_check is not None else {}
+        self.win32.activate(self.hwnd, click_at=None if not click else point, **options)
+        check()
         if click:
             self.win32.click(*point)
         else:
             # A foreground window can still have keyboard focus on File, especially when
             # Alt is held for the global shortcut. Focus the editor without a Shift+click.
             document.SetFocus()
-        if not self.win32.wait_for(lambda: self.win32.foreground() == self.hwnd, 3):
+        def focused():
+            check()
+            return self.win32.foreground() == self.hwnd
+        if not self.win32.wait_for(focused, 3):
             raise RuntimeError("Could not focus Notepad")
         if not self.editor_focused(document):
             raise RuntimeError(f"Notepad foreground is active but editor focus is {self.uia.describe(self.uia.focused())}")
+        check()
         if self.owned_tab and not self.active_document():
             raise RuntimeError(f"Notepad switched away from {self.path.name}")
         handoff = getattr(self, "_startup_handoff", None)

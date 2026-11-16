@@ -23,8 +23,11 @@ three gestures after foregrounding, in order, one run-owned Notepad window,
 run-owned Murmur Settings, and the same Notepad window. It creates Notepad
 only after the cold gesture. All four use O2's icon affordance, 300 × 200
 travel, 25 held steps, and 100-pixel held-movement threshold. Direction
-alternates so a successful preceding drag does not push the icon off screen;
-the direction is recorded for every case. Murmur's main PID and icon config
+prefers alternating signs, but each actual start is checked against its monitor's
+verified work area. A different sign is chosen if needed to fit the entire
+300 × 200 trajectory and translated overlay; if none fits, the diagnostic
+stops without injecting the gesture. Travel is never clipped or shortened.
+The work area, preferred direction and actual endpoint are recorded. Murmur's main PID and icon config
 stay fixed across the four gestures. The harness records foreground root/PID,
 Settings visibility and the launch hide-wait outcome, native overlay and hit
 styles and enabled state, UIA/native geometry, held samples and per-gesture
@@ -39,6 +42,17 @@ handoff. Four passing observations are inconclusive and do not clear O2.
 The final restart checks the last successful position within 2 px only when
 later failed trials have not changed that position. O8 does not replace O2's
 ordinary gate or authorize a product repair. The full 48-check run, manual
-DPI, Narrator and visual checks, signature and GPU gates remain closed and
-require owner approval; no primary key or unsigned Authenticode artifact is
-approved here.
+DPI, Narrator and visual checks, signature and GPU gates remain closed.
+The release-signing environment still requires owner approval. The user has
+authorized an unsigned Authenticode installer; no primary key retrieval is permitted.
+
+Review corrections add guard/ownership checks after Notepad creation and UIA
+discovery and before each activation/click, including activation's fallback
+path. Settings' existing HWND and original live PID are verified before the
+singleton handoff can activate it, and again afterward. Native observation
+APIs now declare pointer-width arguments centrally. Launch-specific hide
+evidence is reset on every launch. Regression coverage includes cold/partial
+movement, refusal before out-of-bounds input, guard trips during creation,
+discovery and activation, Settings ownership loss before handoff, 64-bit
+handle conversion and sequential launches. All 227 harness tests pass locally;
+these checks are not native Windows validation.

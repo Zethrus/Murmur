@@ -1,5 +1,4 @@
 """O1-O4, O6-O8: overlay states, drag and restore, B7 focus, diagnostics."""
-import ctypes
 import json
 import re
 import time
@@ -15,7 +14,6 @@ WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x00000080, 0x08000000
 
 
 def _exstyle(hwnd):
-    win32.user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
     return win32.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
 
 
@@ -157,7 +155,6 @@ def o2_drag(ctx):
 
 def _o8_window(hwnd):
     """Read-only native state at one point in time; no activation or focus repair."""
-    win32.user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
     return {"hwnd": hwnd, "pid": win32.window_pid(hwnd), "class": win32.class_name(hwnd),
             "visible": bool(win32.user32.IsWindowVisible(hwnd)),
             "enabled": bool(win32.user32.IsWindowEnabled(hwnd)),
@@ -179,6 +176,58 @@ def _o8_owned_foreground(hwnd, pid):
     root = win32.user32.GetAncestor(context["hwnd"], win32.GA_ROOT) if context["hwnd"] else 0
     return (context, root, context["input_desktop"] == "Default" and context["gui_status"] == "ok"
             and root == hwnd and context["process_id"] == pid)
+
+
+def _o8_endpoint(start, before, work, preferred):
+    """Choose a full trajectory from the actual position; never shorten or clip it."""
+    left, top, right, bottom = work
+    def fits(rect):
+        return left <= rect[0] < rect[2] <= right and top <= rect[1] < rect[3] <= bottom
+    if not fits(before) or not (left <= start[0] < right and top <= start[1] < bottom):
+        raise Fail("O8 overlay or pointer is outside the verified work area")
+    for sx, sy in ((preferred, preferred), (-preferred, -preferred),
+                   (preferred, -preferred), (-preferred, preferred)):
+        dx, dy = sx * 300, sy * 200
+        end = (start[0] + dx, start[1] + dy)
+        moved = (before[0] + dx, before[1] + dy, before[2] + dx, before[3] + dy)
+        if fits(moved) and left <= end[0] < right and top <= end[1] < bottom:
+            return end
+    raise Fail("O8 full 300x200 trajectory cannot fit the verified work area")
+
+
+def _o8_focus_notepad(ctx, pad):
+    def verify():
+        ctx.guard.check()
+        if not (pad.owned_tab and pad.hwnd and pad.owner_pid in win32.pids("Notepad.exe") and
+                win32.window_pid(pad.hwnd) == pad.owner_pid and pad.active_document()):
+            raise Fail("Notepad ownership was not verified before activation")
+    verify()
+    pad.focus(guard_check=verify)
+    verify()
+
+
+def _o8_show_settings(ctx, pid):
+    # Singleton handoff itself can activate Settings; verify its existing hidden
+    # window before requesting it, not only after activation has already occurred.
+    windows = _o8_settings(pid)
+    if len(windows) != 1:
+        raise Fail("Could not uniquely verify existing Murmur Settings before handoff")
+    hwnd = windows[0]["hwnd"]
+    def verify():
+        ctx.guard.check()
+        if (not ctx.murmur.running() or ctx.murmur.process.pid != pid or
+                not win32.is_window(hwnd) or win32.window_pid(hwnd) != pid or
+                win32.window_text(hwnd) != "Murmur Settings"):
+            raise Fail("Murmur Settings ownership changed before activation")
+    verify()
+    shown = ctx.murmur.show_settings(guard_check=verify)
+    verify()
+    if shown != hwnd:
+        raise Fail("Settings handoff returned a different window")
+    if not win32.activate(hwnd, guard_check=verify):
+        raise Fail("Could not activate verified Murmur Settings")
+    verify()
+    return hwnd
 
 
 def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
@@ -205,6 +254,8 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
     if not hit or hit_root != hwnd:
         raise Fail(f"Drag point is not owned by the overlay: hit={hit}, root={hit_root}, overlay={hwnd}")
     before = win32.window_rect(hwnd)
+    work_area = win32.work_area_at(start)
+    end = _o8_endpoint(start, before, work_area, direction)
     sample_rows = []
     original_foreground = (foreground_root, context["process_id"])
 
@@ -228,7 +279,7 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
 
     log_before = len(ctx.murmur.log())
     observation = {"case": label, "process_pid": pid, "start": start,
-                   "end": (start[0] + direction * 300, start[1] + direction * 200),
+                   "end": end, "verified_work_area": work_area, "preferred_direction": direction,
                    "uia_drag_bounds": bounds, "before": before,
                    "foreground_before": context, "foreground_root": foreground_root,
                    "settings_before": _o8_settings(pid), "overlay_before": _o8_window(hwnd),
@@ -238,6 +289,7 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
                    "held_samples": sample_rows}
     try:
         try:
+            ctx.guard.check()
             win32.drag(start, observation["end"], steps=25, release=False, sample=sample)
             observation["held"] = win32.window_rect(hwnd)
         finally:
@@ -305,10 +357,7 @@ def o8_foreground_drag(ctx):
 
         ctx.guard.check()
         pad = ctx.notepad("foreground")
-        if not (pad.owned_tab and pad.hwnd and pad.owner_pid in win32.pids("Notepad.exe") and
-                win32.window_pid(pad.hwnd) == pad.owner_pid and pad.active_document()):
-            raise Fail("Notepad ownership was not verified before activation")
-        pad.focus()
+        _o8_focus_notepad(ctx, pad)
         if ctx.startup_probe_lease is not None and not ctx.startup_probe_lease.closed:
             raise Fail("Passive startup probe did not hand off to the first verified Notepad target")
         for label, expected, direction in (
@@ -317,18 +366,10 @@ def o8_foreground_drag(ctx):
                 ("same owned Notepad foreground", (pad.hwnd, pad.owner_pid), 1)):
             ctx.guard.check()
             if label == "owned Murmur Settings foreground":
-                settings = ctx.murmur.show_settings()
-                if not settings or win32.window_pid(settings) != pid or not win32.is_window(settings):
-                    raise Fail("Murmur Settings ownership was not verified before activation")
-                ctx.guard.check()
-                if not win32.activate(settings):
-                    raise Fail("Could not activate verified Murmur Settings")
+                settings = _o8_show_settings(ctx, pid)
                 expected = (settings, pid)
             elif label == "same owned Notepad foreground":
-                if not (pad.owned_tab and pad.hwnd and pad.owner_pid in win32.pids("Notepad.exe") and
-                        win32.window_pid(pad.hwnd) == pad.owner_pid and pad.active_document()):
-                    raise Fail("Notepad ownership changed before reactivation")
-                pad.focus()
+                _o8_focus_notepad(ctx, pad)
             if label != "owned Murmur Settings foreground" and not pad.owns_keyboard_focus():
                 raise Fail(f"Owned Notepad editor lost keyboard focus before {label}")
             observed = _o8_drag(ctx, label, pid, expected, direction, record["cases"])

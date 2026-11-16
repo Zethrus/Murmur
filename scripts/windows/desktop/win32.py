@@ -128,6 +128,10 @@ def _declare():
         ("IsIconic", (wintypes.HWND,), wintypes.BOOL),
         ("IsWindow", (wintypes.HWND,), wintypes.BOOL),
         ("IsWindowVisible", (wintypes.HWND,), wintypes.BOOL),
+        ("IsWindowEnabled", (wintypes.HWND,), wintypes.BOOL),
+        ("GetWindowLongPtrW", (wintypes.HWND, ctypes.c_int), ctypes.c_ssize_t),
+        ("MonitorFromPoint", (POINT, wintypes.DWORD), handle),
+        ("GetMonitorInfoW", (handle, ctypes.c_void_p), wintypes.BOOL),
         ("GetWindowTextW", (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int), ctypes.c_int),
         ("GetWindowTextLengthW", (wintypes.HWND,), ctypes.c_int),
         ("GetClassNameW", (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int), ctypes.c_int),
@@ -547,11 +551,14 @@ def close_window(hwnd):
     user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
 
-def activate(hwnd, click_at=None, timeout=3.0):
+def activate(hwnd, click_at=None, timeout=3.0, guard_check=None):
     """Bring `hwnd` to the foreground. SetForegroundWindow is refused unless this process may
     take focus, so attach to the current foreground thread first; if that still fails and a
     point is given, click it (a real activation path)."""
+    check = guard_check or (lambda: None)
+    check()
     if user32.IsIconic(hwnd):
+        check()
         user32.ShowWindow(hwnd, SW_RESTORE)
     if foreground() == hwnd:
         return True
@@ -560,16 +567,22 @@ def activate(hwnd, click_at=None, timeout=3.0):
     other = window_thread(current) if current else 0
     attached = bool(other and other != mine and user32.AttachThreadInput(mine, other, True))
     try:
+        check()
         user32.BringWindowToTop(hwnd)
+        check()
         user32.SetForegroundWindow(hwnd)
     finally:
         if attached:
             user32.AttachThreadInput(mine, other, False)
-    if wait_for(lambda: foreground() == hwnd, 1.0, 0.05):
+    def focused():
+        check()
+        return foreground() == hwnd
+    if wait_for(focused, 1.0, 0.05):
         return True
     if click_at:
+        check()
         click(*click_at)
-    return bool(wait_for(lambda: foreground() == hwnd, timeout, 0.05))
+    return bool(wait_for(focused, timeout, 0.05))
 
 
 def broadcast_setting_change(area):
@@ -580,6 +593,14 @@ def broadcast_setting_change(area):
 class MONITORINFOEXW(ctypes.Structure):
     _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", RECT), ("rcWork", RECT), ("dwFlags", wintypes.DWORD),
                 ("szDevice", wintypes.WCHAR * 32)]
+
+
+def work_area_at(point):
+    monitor = user32.MonitorFromPoint(POINT(*point), 0)  # NULL rather than an inferred nearby monitor
+    info = MONITORINFOEXW(cbSize=ctypes.sizeof(MONITORINFOEXW))
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        raise RuntimeError("Could not verify the drag monitor's work area")
+    return info.rcWork.tuple()
 
 
 def monitors():

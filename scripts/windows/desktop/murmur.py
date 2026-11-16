@@ -208,6 +208,7 @@ class MurmurSession:
         """Start Murmur; returns once the overlay window exists. A normal launch opens Settings;
         it is hidden again (its close button hides it) unless keep_settings, so it never covers
         the target windows. settings() reopens it on demand."""
+        self.settings_hide_observation = None
         self.prepare()
         if config is not None:
             self.write_config(config)
@@ -343,24 +344,35 @@ class MurmurSession:
         hwnd = self._window(SETTINGS_TITLE)
         return hwnd if hwnd and win32.user32.IsWindowVisible(hwnd) else 0
 
-    def open_settings(self, timeout=20):
+    def open_settings(self, timeout=20, guard_check=None):
         """A second launch hands over to the running instance, which shows Settings (T3 path)."""
-        subprocess.run([str(self.app)], env=self.env(self.wav), timeout=30)
+        check = guard_check or (lambda: None)
+        env = self.env(self.wav)
+        check()
+        subprocess.run([str(self.app)], env=env, timeout=30)
+        check()
         hwnd = win32.wait_for(self.settings_hwnd, timeout, sleep=self.guard.sleep)
         if not hwnd:
             raise RuntimeError("The Settings window did not appear")
         return uia.from_handle(hwnd)
 
-    def settings(self, timeout=20):
+    def settings(self, timeout=20, guard_check=None):
         """The Settings window (UIA element), shown first when it is hidden."""
         hwnd = self.settings_hwnd()
         if not hwnd:
+            if guard_check is not None:
+                return self.open_settings(timeout, guard_check=guard_check)
             return self.open_settings(timeout)
         return uia.from_handle(hwnd)
 
-    def show_settings(self):
+    def show_settings(self, guard_check=None):
         """Handle of the visible Settings window (opened when hidden)."""
-        self.settings()
+        if guard_check is not None:
+            guard_check()
+            self.settings(guard_check=guard_check)
+            guard_check()
+        else:
+            self.settings()
         return self.settings_hwnd()
 
     def overlay(self):
