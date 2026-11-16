@@ -71,11 +71,18 @@ def held_text(ctx):
     return candidates
 
 
-def focus_change_dictation(ctx, fixture, start, finish, config=None, hotkey=None):
+def focus_change_dictation(ctx, fixture, start, finish, config=None, hotkey=None, after_focus=None):
     """Start in `start`, click `finish` while the hotkey is held, release. Returns release time."""
     ctx.murmur.ensure(ctx.fixtures[fixture].path, config or {})
     start.focus()
-    return ctx.dictate(fixture, hotkey=hotkey, during=lambda c: focus_while_held(finish))
+    def focus_and_observe(_):
+        try:
+            focus_while_held(finish)
+        finally:
+            if after_focus is not None:
+                after_focus()
+
+    return ctx.dictate(fixture, hotkey=hotkey, during=focus_and_observe)
 
 
 def focus_while_held(target):
@@ -86,9 +93,9 @@ def focus_while_held(target):
         target.focus(click=False)
 
 
-def produce_held(ctx, fixture, a, b, config=None):
+def produce_held(ctx, fixture, a, b, config=None, after_focus=None):
     """A held transcript with `b` focused (dictation started in `a`)."""
-    focus_change_dictation(ctx, fixture, a, b, config)
+    focus_change_dictation(ctx, fixture, a, b, config, after_focus=after_focus)
     wait_held(ctx)
 
 

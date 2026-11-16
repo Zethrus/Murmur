@@ -148,17 +148,39 @@ class Context:
         return pad
 
     def close_completed_notepads(self):
-        """Retire run-owned tabs at run end, after the guard has stopped."""
+        """Retire only run-owned tabs at run end; failed activation stays an error."""
         errors = []
         # Preserve the old 64-tab allowance for restored tabs plus this run's fixtures.
         tab_search_limit = 64 + len(self._completed_notepads)
         for pad in reversed(self._completed_notepads):
             try:
+                self.guard.check()
                 pad.close_owned(max_tabs=tab_search_limit)
             except Exception as error:  # noqa: BLE001 - try every verified fixture
                 errors.append((f"close Notepad {pad.path.name}", f"{type(error).__name__}: {error}"))
-        self._completed_notepads.clear()
+                from guard import UserInput
+                if isinstance(error, UserInput):
+                    break  # a latched guard failure forbids further input
+        # Keep identities for the after-cleanup snapshot; successful pads have hwnd=0.
         return errors
+
+    def notepad_ownership_snapshot(self):
+        """Read-only evidence around teardown; never grants permission to close a tab."""
+        foreground = win32.foreground_context()
+        owned = []
+        for pad in self._completed_notepads:
+            row = {"document": pad.path.name, "hwnd": pad.hwnd, "recorded_pid": pad.owner_pid,
+                   "owned_tab": pad.owned_tab}
+            if pad.hwnd:
+                try:
+                    row["window_exists"] = pad.win32.is_window(pad.hwnd)
+                    if row["window_exists"]:
+                        row["current_pid"] = pad.win32.window_pid(pad.hwnd)
+                        row["active_title"] = pad.win32.window_text(pad.hwnd)
+                except Exception as error:  # noqa: BLE001 - evidence cannot authorize cleanup
+                    row["read_error"] = f"{type(error).__name__}: {error}"
+            owned.append(row)
+        return {"foreground": foreground, "notepads": owned}
 
     def clipboard_guard(self):
         """Restore the clipboard text after the check (other formats cannot be restored)."""

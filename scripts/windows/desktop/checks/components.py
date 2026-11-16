@@ -3,6 +3,8 @@
 C3 downloads part of "Small (English)" (463 MiB) from Hugging Face: a network failure is reported
 as a network failure, not as an app bug.
 """
+import json
+
 import tomlconfig
 import uia
 import win32
@@ -11,6 +13,7 @@ from context import Fail
 from murmur import MurmurSession
 
 MODEL = "Small (English)"
+MODEL_ID = "speech-small.en"
 
 
 def _confirm(ctx):
@@ -83,6 +86,17 @@ def _progress(window):
         return None
 
 
+def _resumed_after_restart(session, baseline, ctx):
+    """A visible bar alone is not proof that Resume continued the transfer."""
+    window = session.settings()
+    value = _progress(window)
+    if value is not None and value > baseline:
+        return ("advanced", value)
+    if badge(ctx, window, MODEL, 0) in ("Installed", "Active") and session.installed(MODEL_ID):
+        return ("completed", value)
+    return None
+
+
 def c3_pause_resume(ctx):
     config = tomlconfig.merge(ctx.murmur.base_config, {})
     session = MurmurSession(ctx.build, ctx.work, ctx.guard, config, name="c3")
@@ -106,24 +120,45 @@ def c3_pause_resume(ctx):
     if not resumed:
         raise Fail("Resume did not continue the download")
     uia.invoke(uia.find(session.settings(), name_=f"Pause {MODEL}", control_type_=uia.BUTTON, timeout=5, sleep=ctx.sleep))
-    win32.wait_for(lambda: badge(ctx, session.settings(), MODEL, 2) == "Paused", 15, 0.5, sleep=ctx.sleep)
-    session.stop()  # quit mid-download (paused)
+    if not win32.wait_for(lambda: badge(ctx, session.settings(), MODEL, 2) == "Paused", 15, 0.5,
+                          sleep=ctx.sleep):
+        raise Fail("The second Pause did not pause the download")
+    baseline = _progress(session.settings())
+    if baseline is None:
+        raise Fail("The second Pause has no readable progress baseline")
+    lifecycle = ctx.artifact("notepad-lifecycle.json")
+    before_stop = ctx.notepad_ownership_snapshot()
+    try:
+        session.stop()  # quit mid-download (paused)
+    finally:
+        lifecycle.write_text(json.dumps({"before_c3_stop": before_stop,
+                                         "after_c3_stop": ctx.notepad_ownership_snapshot()}, indent=2),
+                             encoding="utf-8")
     session.launch(wav=ctx.fixtures["A"].path)
     window = session.page("Components")
     state = badge(ctx, window, MODEL)
     ctx.screenshot(session.settings_hwnd(), "after-restart.png")
     if state != "Paused":
         raise Fail(f"After restart the download is {state!r}, not Paused")
+    restart_progress = _progress(session.settings())
+    if restart_progress is None or restart_progress < baseline:
+        raise Fail(f"Paused progress did not persist: before restart {baseline!r}, after {restart_progress!r}")
     ctx.sleep(5.0)
     if badge(ctx, session.settings(), MODEL) != "Paused":
         raise Fail("The download resumed by itself after restart")
+    persisted = _progress(session.settings())
+    if persisted != restart_progress:
+        raise Fail(f"Paused progress changed without Resume: {restart_progress!r} -> {persisted!r}")
     uia.invoke(uia.find(session.settings(), name_=f"Resume {MODEL}", control_type_=uia.BUTTON, timeout=5, sleep=ctx.sleep))
-    if not win32.wait_for(lambda: _progress(session.settings()) is not None, 30, 0.2, sleep=ctx.sleep):
-        raise Fail("Resume after restart did not continue the download")
+    outcome = win32.wait_for(lambda: _resumed_after_restart(session, persisted, ctx), 30, 0.2,
+                             sleep=ctx.sleep)
+    if not outcome:
+        raise Fail(f"Resume after restart stalled at {persisted!r}; no progress increase or verified install")
     try:
         uia.invoke(uia.find(session.settings(), name_=f"Cancel {MODEL}", control_type_=uia.BUTTON, timeout=5,
                             sleep=ctx.sleep))
     except Exception:  # noqa: BLE001 - finishing or already done; the profile is deleted anyway
         pass
     session.stop()
-    ctx.note(f"progress at pause {started:.3f}, after resume {resumed:.3f}")
+    ctx.note(f"progress first pause {started!r}, first resume {resumed!r}, "
+             f"persisted pause {persisted!r}, after restart Resume {outcome!r}")

@@ -392,6 +392,25 @@ def main(argv=None):
         results += [report.Result(c.id, report.ABORTED, aborted, c.title, c.group, c.best_effort, [str(trace)])
                     for c in selected if c.id not in {r.id for r in results}]
     finally:
+        def snapshot(stage):
+            if ctx is None:
+                return
+            try:
+                meta.setdefault("notepad_finalization", {})[stage] = ctx.notepad_ownership_snapshot()
+            except Exception as error:  # noqa: BLE001 - diagnostic only, retain teardown outcome
+                meta.setdefault("notepad_finalization", {})[stage] = {
+                    "read_error": f"{type(error).__name__}: {error}"}
+
+        snapshot("before_tab_cleanup")
+        win32.release_all()
+        if ctx is not None:
+            completed_failures = ctx.close_completed_notepads()
+            snapshot("after_tab_cleanup")
+            if completed_failures:
+                meta["completed_target_cleanup_failures"] = [f"{label}: {message}"
+                                                             for label, message in completed_failures]
+                aborted = aborted or "aborted: completed Notepad fixture cleanup failed"
+        snapshot("before_guard_stop")
         try:
             guard.stop()
         except Exception as error:  # noqa: BLE001 - still retire our window and restore the run
@@ -403,14 +422,8 @@ def main(argv=None):
             except GuardUnavailable as error:
                 meta["guard_startup"]["cleanup_error"] = str(error)
                 aborted = aborted or f"aborted: input guard unavailable ({error})"
+        snapshot("after_guard_and_lease_stop")
         meta["input_guard"] = guard.diagnostics()
-        win32.release_all()
-        if ctx is not None:
-            completed_failures = ctx.close_completed_notepads()
-            if completed_failures:
-                meta["completed_target_cleanup_failures"] = [f"{label}: {message}"
-                                                             for label, message in completed_failures]
-                aborted = aborted or "aborted: completed Notepad fixture cleanup failed"
         failures = restorer.restore_all()
         if failures:
             meta["restore_failures"] = [f"{label}: {message}" for label, message in failures]

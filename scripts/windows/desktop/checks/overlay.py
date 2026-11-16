@@ -145,12 +145,22 @@ def o3_buttons_keep_focus(ctx):
     origin = ctx.target("origin")
     expected = "start"
     for button in ("Discard", "Copy"):
-        produce_held(ctx, "A", origin, pad)
+        diagnostic = ctx.artifact(f"{button.lower()}-focus-diagnostic.txt")
+        observations = []
+
+        def observe(stage):
+            try:
+                detail = pad.focus_diagnostic()
+            except Exception as error:  # noqa: BLE001 - preserve the check's original failure
+                detail = f"focus diagnostic unavailable: {type(error).__name__}: {error}"
+            observations.append(f"{stage}: foreground={win32.foreground():#x}; expected={pad.hwnd:#x}\n{detail}")
+            diagnostic.write_text("\n".join(observations), encoding="utf-8")
+
+        produce_held(ctx, "A", origin, pad, after_focus=lambda: observe("after focus_while_held"))
+        observe("held before overlay click")
+        before_click = observations[-1]
         ctx.require(win32.foreground() == pad.hwnd, "Notepad lost focus before the overlay click")
-        before_click = pad.focus_diagnostic()
         if not pad.editor_focused():
-            ctx.artifact("focus-diagnostic.txt").write_text(
-                f"before overlay click:\n{before_click}", encoding="utf-8")
             raise Fail(f"Notepad editor lost keyboard focus before the overlay {button} click")
         click_overlay(ctx, button, expect_foreground=pad.hwnd)
         expected += "x" if button == "Discard" else "y"

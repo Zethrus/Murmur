@@ -709,6 +709,7 @@ class ImportTests(unittest.TestCase):
         ctx.work, ctx.check_id, ctx.attempt = Path("work"), "H8", 1
         ctx._completed_notepads, ctx._notepad_serial = [], 0
         ctx.restorer = restore.Restorer(log=lambda _: None)
+        ctx.guard = SimpleNamespace(check=lambda: None)
         pad = SimpleNamespace(path=Path("notepad-H8-alt.txt"), close=mock.Mock(),
                               close_owned=mock.Mock())
         pad.start = mock.Mock(return_value=pad)
@@ -860,10 +861,10 @@ class ImportTests(unittest.TestCase):
                  mock.patch.object(win32, "set_clipboard_text",
                                    side_effect=lambda value: (clipboard.update(text=value), events.append("clipboard"))), \
                  mock.patch.object(win32, "release_all"):
-                selection = "H1,H8,I1,I4,I5,I6,O3,O4,F13"
+                selection = "H1,H8,I1,I4,I5,I6,O3,O4,F13,C1,C3"
                 results, aborted = run.run_checks(ctx, catalog.select(selection), 2, lookup,
                                                    log=lambda _: None)
-                self.assertEqual([result.status for result in results], [report.PASS] * 18)
+                self.assertEqual([result.status for result in results], [report.PASS] * 22)
                 self.assertEqual(aborted, "")
                 self.assertEqual(clipboard["text"], "original")
                 self.assertEqual(restorer.mark(), baseline)
@@ -907,7 +908,7 @@ class ImportTests(unittest.TestCase):
                     ctx.notepad("alt", reuse_hwnd=99, owned_tab=True)
                 start.assert_not_called()
 
-    def test_retained_notepad_is_drained_after_guard_abort(self):
+    def test_guard_abort_prevents_retained_notepad_cleanup_input(self):
         with tempfile.TemporaryDirectory() as directory:
             events = []
             ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
@@ -933,8 +934,11 @@ class ImportTests(unittest.TestCase):
                                  [report.ABORTED, report.ABORTED])
                 self.assertIn("input guard unavailable", aborted)
                 self.assertEqual(events, [])
-                self.assertEqual(ctx.close_completed_notepads(), [])
-                self.assertEqual(len(events), 1)
+                ctx.guard.check = mock.Mock(side_effect=guard.GuardUnavailable("probe 17 missed"))
+                failures = ctx.close_completed_notepads()
+                self.assertEqual(len(failures), 1)
+                self.assertIn("GuardUnavailable", failures[0][1])
+                self.assertEqual(events, [])
 
     def test_notepad_h8_cleanup_closes_only_verified_tab(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1077,13 +1081,17 @@ class ImportTests(unittest.TestCase):
                                   artifact=lambda suffix: Path(directory) / suffix,
                                   require=lambda condition, reason: self.assertTrue(condition, reason))
             with mock.patch.object(checks_overlay, "_notepad_with_word", return_value=pad), \
-                 mock.patch.object(checks_overlay, "produce_held"), \
+                 mock.patch.object(checks_overlay, "produce_held",
+                                   side_effect=lambda *_a, after_focus=None: after_focus()), \
                  mock.patch.object(checks_overlay, "click_overlay") as click, \
                  mock.patch.object(win32, "foreground", return_value=42):
                 with self.assertRaisesRegex(Fail, "before the overlay Discard click"):
                     checks_overlay.o3_buttons_keep_focus(ctx)
             click.assert_not_called()
-            self.assertIn("MenuItem 'File'", (Path(directory) / "focus-diagnostic.txt").read_text())
+            evidence = (Path(directory) / "discard-focus-diagnostic.txt").read_text()
+            self.assertIn("after focus_while_held", evidence)
+            self.assertIn("held before overlay click", evidence)
+            self.assertIn("MenuItem 'File'", evidence)
 
     def test_overlay_drag_uses_exposed_handle_bounds_and_rejects_outside(self):
         from checks import common
@@ -1162,6 +1170,214 @@ class ImportTests(unittest.TestCase):
         self.assertFalse(setup_checks._component_verified(names, "Tiny (English)"))
         names.insert(names.index("Verify Tiny (English)"), "Files verified.")
         self.assertTrue(setup_checks._component_verified(names, "Tiny (English)"))
+
+
+class DesktopFollowupTests(unittest.TestCase):
+    def test_c3_restart_resume_requires_advance_or_verified_install(self):
+        from checks import components
+        session = SimpleNamespace(settings=lambda: object(), installed=mock.Mock(return_value=False))
+        with mock.patch.object(components, "_progress", return_value=0.00042), \
+             mock.patch.object(components, "badge", return_value="Paused"):
+            self.assertIsNone(components._resumed_after_restart(session, 0.00042, object()))
+        with mock.patch.object(components, "_progress", return_value=0.00043):
+            self.assertEqual(components._resumed_after_restart(session, 0.00042, object()),
+                             ("advanced", 0.00043))
+        with mock.patch.object(components, "_progress", return_value=None), \
+             mock.patch.object(components, "badge", return_value="Installed"):
+            self.assertIsNone(components._resumed_after_restart(session, 0.00042, object()))
+            session.installed.return_value = True
+            self.assertEqual(components._resumed_after_restart(session, 0.00042, object()),
+                             ("completed", None))
+
+    def test_c3_stalled_after_restart_fails_and_records_precise_progress(self):
+        from checks import components
+        with tempfile.TemporaryDirectory() as directory:
+            session = mock.Mock()
+            session.page.return_value = object()
+            session.settings.return_value = object()
+            session.installed.return_value = False
+            ctx = SimpleNamespace(build=object(), work=directory, guard=object(),
+                                  murmur=SimpleNamespace(base_config={}, running=lambda: False),
+                                  fixtures={"A": SimpleNamespace(path="a.wav")},
+                                  restorer=SimpleNamespace(push=mock.Mock()),
+                                  sleep=lambda _: None, screenshot=mock.Mock(),
+                                  artifact=lambda suffix: Path(directory) / suffix,
+                                  notepad_ownership_snapshot=lambda: {"foreground": {"hwnd": 42}},
+                                  note=mock.Mock())
+            progress = iter([0.00041, 0.00042, 0.00042, 0.00042, 0.00042, 0.00042])
+            with mock.patch.object(components, "MurmurSession", return_value=session), \
+                 mock.patch.object(components.tomlconfig, "merge", return_value={}), \
+                 mock.patch.object(components.uia, "find", side_effect=lambda _, name_, **__: name_), \
+                 mock.patch.object(components.uia, "invoke"), \
+                 mock.patch.object(components, "badge", return_value="Paused"), \
+                 mock.patch.object(components, "_progress", side_effect=lambda _: next(progress)), \
+                 mock.patch.object(components.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()):
+                with self.assertRaisesRegex(Fail, "stalled at 0.00042"):
+                    components.c3_pause_resume(ctx)
+            self.assertEqual(session.stop.call_count, 1)
+            self.assertIn("before_c3_stop", (Path(directory) / "notepad-lifecycle.json").read_text())
+
+    def test_c3_second_pause_must_succeed_before_restart(self):
+        from checks import components
+        session = mock.Mock()
+        session.settings.return_value = object()
+        ctx = SimpleNamespace(build=object(), work="work", guard=object(),
+                              murmur=SimpleNamespace(base_config={}, running=lambda: False),
+                              fixtures={"A": SimpleNamespace(path="a.wav")},
+                              restorer=SimpleNamespace(push=mock.Mock()), sleep=lambda _: None)
+        with mock.patch.object(components, "MurmurSession", return_value=session), \
+             mock.patch.object(components.tomlconfig, "merge", return_value={}), \
+             mock.patch.object(components.uia, "find", side_effect=lambda _, name_, **__: name_), \
+             mock.patch.object(components.uia, "invoke"), \
+             mock.patch.object(components, "badge", side_effect=["Paused", None]), \
+             mock.patch.object(components, "_progress", side_effect=[0.00041, 0.00042]), \
+             mock.patch.object(components.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()):
+            with self.assertRaisesRegex(Fail, "second Pause"):
+                components.c3_pause_resume(ctx)
+        session.stop.assert_not_called()
+
+    def test_c3_after_restart_accepts_advance_or_verified_completion(self):
+        from checks import components
+        for completion in (False, True):
+            with self.subTest(completion=completion), tempfile.TemporaryDirectory() as directory:
+                session = mock.Mock()
+                session.settings.return_value = object()
+                session.installed.return_value = completion
+                notes = []
+                ctx = SimpleNamespace(build=object(), work=directory, guard=object(),
+                                      murmur=SimpleNamespace(base_config={}, running=lambda: False),
+                                      fixtures={"A": SimpleNamespace(path="a.wav")},
+                                      restorer=SimpleNamespace(push=mock.Mock()), sleep=lambda _: None,
+                                      screenshot=mock.Mock(), artifact=lambda suffix: Path(directory) / suffix,
+                                      notepad_ownership_snapshot=lambda: {}, note=notes.append)
+                values = iter([0.00041, 0.00042, 0.00042, 0.00042, 0.00042,
+                               None if completion else 0.00043])
+                badges = iter(["Paused", "Paused", "Paused", "Paused", "Installed"])
+                with mock.patch.object(components, "MurmurSession", return_value=session), \
+                     mock.patch.object(components.tomlconfig, "merge", return_value={}), \
+                     mock.patch.object(components.uia, "find", side_effect=lambda _, name_, **__: name_), \
+                     mock.patch.object(components.uia, "invoke"), \
+                     mock.patch.object(components, "badge", side_effect=lambda *_a, **_k: next(badges)), \
+                     mock.patch.object(components, "_progress", side_effect=lambda _: next(values)), \
+                     mock.patch.object(components.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()):
+                    components.c3_pause_resume(ctx)
+                self.assertIn("after restart Resume", notes[0])
+                self.assertIn("completed" if completion else "advanced", notes[0])
+                self.assertEqual(session.stop.call_count, 2)
+
+    def test_refused_notepad_activation_leaves_owned_and_unknown_tabs_untouched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pad = targets.Notepad(directory, "H1-doc")
+            pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+            pad.path.write_text("owned", encoding="utf-8")
+            keys = mock.Mock()
+            pad.win32 = SimpleNamespace(is_window=lambda _: True, window_pid=lambda _: 7,
+                                        pids=lambda _: [7], activate=lambda _: False,
+                                        tap=keys, window_text=lambda _: "unknown.txt - Notepad")
+            with self.assertRaisesRegex(RuntimeError, "Could not activate"):
+                pad.close_owned()
+            keys.assert_not_called()
+            self.assertEqual(pad.hwnd, 42)
+
+    def test_notepad_snapshot_records_foreground_and_current_owner_without_input(self):
+        ctx = Context.__new__(Context)
+        pad = SimpleNamespace(path=Path("owned.txt"), hwnd=42, owner_pid=7, owned_tab=True,
+                              win32=SimpleNamespace(is_window=lambda _: True, window_pid=lambda _: 8,
+                                                    window_text=lambda _: "unknown.txt - Notepad"))
+        ctx._completed_notepads = [pad]
+        with mock.patch.object(win32, "foreground_context", return_value={"hwnd": 99, "process_id": 9}), \
+             mock.patch.object(win32, "activate") as activate, mock.patch.object(win32, "tap") as tap:
+            snapshot = ctx.notepad_ownership_snapshot()
+        self.assertEqual(snapshot["foreground"], {"hwnd": 99, "process_id": 9})
+        self.assertEqual(snapshot["notepads"][0]["current_pid"], 8)
+        activate.assert_not_called()
+        tap.assert_not_called()
+
+    def test_tray_uses_open_overflow_without_clicking_and_opens_closed_one_once(self):
+        from checks import tray
+        ctx = SimpleNamespace(sleep=lambda _: None)
+        icon, chevron = object(), object()
+        state = {"open": True, "clicks": 0}
+
+        def windows(*, class_):
+            return [11] if class_ == "Shell_TrayWnd" else ([22] if state["open"] else [])
+
+        def find(root, **criteria):
+            if root == "bar":
+                return chevron if "hidden icons" in criteria.get("name_re", "") else None
+            return icon if root == "overflow" else None
+
+        def click(*_):
+            state["clicks"] += 1
+            state["open"] = True
+
+        with mock.patch.object(tray.win32, "find_windows", side_effect=windows), \
+             mock.patch.object(tray.win32, "click", side_effect=click), \
+             mock.patch.object(tray.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()), \
+             mock.patch.object(tray.uia, "from_handle", side_effect=lambda hwnd: "bar" if hwnd == 11 else "overflow"), \
+             mock.patch.object(tray.uia, "try_find", side_effect=find), \
+             mock.patch.object(tray.uia, "center", return_value=(1, 2)):
+            self.assertIs(tray._tray_button(ctx), icon)
+            self.assertEqual(state["clicks"], 0)
+            state["open"] = False
+            self.assertIs(tray._tray_button(ctx), icon)
+            self.assertEqual(state["clicks"], 1)
+
+    def test_tray_menu_ignores_existing_and_foreign_menus(self):
+        from checks import tray
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = SimpleNamespace(murmur=SimpleNamespace(process=SimpleNamespace(pid=7)),
+                                  sleep=lambda _: None, artifact=lambda suffix: Path(directory) / suffix)
+            state = {"clicked": False, "owner": 7}
+
+            def windows(*, class_):
+                if class_ == "#32768":
+                    return [99, 77] if state["clicked"] else [99]
+                return [11] if class_ == "Shell_TrayWnd" else []
+
+            with mock.patch.object(tray, "_tray_button", return_value=object()), \
+                 mock.patch.object(tray.win32, "find_windows", side_effect=windows), \
+                 mock.patch.object(tray.win32, "window_pid", side_effect=lambda hwnd: state["owner"] if hwnd == 77 else 8), \
+                 mock.patch.object(tray.win32, "click", side_effect=lambda *_a, **_k: state.update(clicked=True)), \
+                 mock.patch.object(tray.win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()), \
+                 mock.patch.object(tray.uia, "center", return_value=(1, 2)), \
+                 mock.patch.object(tray.uia, "from_handle", side_effect=lambda hwnd: f"menu-{hwnd}"), \
+                 mock.patch.object(tray, "_tray_diagnostic") as diagnostic:
+                self.assertEqual(tray._menu(ctx), "menu-77")
+                state["clicked"], state["owner"] = False, 8
+                with self.assertRaisesRegex(Fail, "newly opened tray context menu"):
+                    tray._menu(ctx)
+                diagnostic.assert_called_once()
+
+    def test_tray_missing_icon_skips_but_mute_failure_fails(self):
+        from checks import tray
+        with mock.patch.object(tray.win32, "find_windows", return_value=[]), \
+             mock.patch.object(tray.win32, "click") as click:
+            with self.assertRaisesRegex(Skip, "no taskbar"):
+                tray._tray_button(object())
+            click.assert_not_called()
+        with mock.patch.object(tray.win32, "find_windows",
+                               side_effect=lambda *, class_: [11] if class_ == "Shell_TrayWnd" else [22]), \
+             mock.patch.object(tray.uia, "from_handle", side_effect=lambda hwnd: hwnd), \
+             mock.patch.object(tray.uia, "try_find", return_value=None), \
+             mock.patch.object(tray, "_tray_diagnostic") as diagnostic, \
+             mock.patch.object(tray.win32, "click") as click:
+            with self.assertRaisesRegex(Skip, "already open overflow"):
+                tray._tray_button(SimpleNamespace(sleep=lambda _: None))
+            diagnostic.assert_called_once()
+            click.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.toml"
+            config.write_text("muted = false", encoding="utf-8")
+            session = SimpleNamespace(ensure=lambda *_a, **_k: None, overlay_hwnd=lambda: 42,
+                                      overlay_state=lambda: "unknown", config_path=config)
+            ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav")},
+                                  note=mock.Mock())
+            with mock.patch.object(tray, "_invoke") as invoke, \
+                 mock.patch.object(tray.win32, "user32", SimpleNamespace(IsWindowVisible=lambda _: False)):
+                with self.assertRaisesRegex(Fail, "Sounds mute.*did not set"):
+                    tray.t2_tray_menu(ctx)
+            self.assertEqual(invoke.call_count, 4)
 
 
 class ReportTests(unittest.TestCase):
@@ -2784,8 +3000,8 @@ class OwnedProbeWindowTests(unittest.TestCase):
                         mock.patch.object(guard, "Guard", return_value=observer),
                         mock.patch.object(report, "write", return_value=SimpleNamespace(read_text=lambda **_: "{}")),
                         mock.patch.object(Context, "close_completed_notepads",
-                                          return_value=[("close Notepad", "RuntimeError: failed")]
-                                          if cleanup_error else []),
+                                          side_effect=lambda: events.append("tab_cleanup") or
+                                          ([("close Notepad", "RuntimeError: failed")] if cleanup_error else [])),
                     ]
                     with ExitStack() as stack:
                         start = stack.enter_context(patches[1])
@@ -2798,6 +3014,7 @@ class OwnedProbeWindowTests(unittest.TestCase):
                                      not stop_error and not close_error and not cleanup_error else 1)
                     self.assertEqual(start.call_count, 1)
                     lease.close.assert_called_once_with()
+                    self.assertLess(events.index("tab_cleanup"), events.index("guard_stop"))
                     self.assertLess(events.index("guard_stop"), events.index("lease_close"))
                     self.assertLess(events.index("lease_close"), events.index("restore_murmur"))
                     if cleanup_error:
