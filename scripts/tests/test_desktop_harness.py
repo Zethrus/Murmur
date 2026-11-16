@@ -268,11 +268,73 @@ class ImportTests(unittest.TestCase):
         self.assertEqual([phase["stage"] for phase in phases],
                          ["before modifiers", "before F9 down", "F9 held", "listening", "before F9 up",
                           "after F9 up", "after shift up", "after alt up", "after ctrl up", "before delivery wait",
-                          "after delivery wait"])
+                          "history confirmed", "after delivery wait"])
+        self.assertTrue(all(phase["focus_snapshot"] == "deferred" for phase in phases[5:-1]))
         self.assertEqual(down.call_args_list, [mock.call("ctrl", "alt", "shift"), mock.call("f9")])
         self.assertEqual(up.call_args_list, [mock.call("f9"), mock.call("shift"), mock.call("alt"),
                                               mock.call("ctrl")])
         release.assert_called_once_with()
+
+    def test_h8_release_has_no_target_focus_reads_until_history_confirms_output(self):
+        events = []
+        released = False
+        history_confirmed = False
+        expected = "The quick brown fox jumps over the lazy dog. "
+
+        def focus_snapshot(_pad, stage):
+            events.append(("focus", stage))
+            self.assertFalse(released and not history_confirmed,
+                             f"Notepad focus read during insertion: {stage}")
+            return {"stage": stage}
+
+        def key_up(key):
+            nonlocal released
+            events.append(("up", key))
+            if key == "f9":
+                released = True
+
+        def history_after(_cursor):
+            nonlocal history_confirmed
+            events.append(("history", None))
+            if events.count(("history", None)) == 1:
+                return []
+            history_confirmed = True
+            return [(1, expected)]
+
+        def readback(**_):
+            events.append(("readback", None))
+            self.assertTrue(history_confirmed)
+            return "partial"
+
+        pad = SimpleNamespace(focus=mock.Mock(), wait_text=readback)
+        session = SimpleNamespace(ensure=mock.Mock(), history_cursor=lambda: 0,
+                                  history_after=history_after, wait_state=lambda *_: True,
+                                  overlay_state=lambda: "done")
+        ctx = Context.__new__(Context)
+        ctx.murmur = session
+        ctx.fixtures = {"A": SimpleNamespace(path="a.wav", speech_seconds=0)}
+        ctx.notepad = lambda *_, **__: pad
+        ctx.sleep = lambda _: None
+        ctx.settle = lambda: events.append(("settled", None))
+        ctx.guard = SimpleNamespace(start_key_trace=mock.Mock(),
+                                    stop_key_trace=mock.Mock(return_value={"events": [], "overflow": False}))
+        phases = []
+        with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=focus_snapshot), \
+             mock.patch.object(win32, "key_down"), mock.patch.object(win32, "key_up", side_effect=key_up), \
+             mock.patch.object(win32, "release_all") as release:
+            _, difference, observed, observation = hotkey_checks._notepad_focus_trial(
+                ctx, "Ctrl+Alt+Shift+F9", "alt", phases)
+        self.assertEqual(observed, expected)
+        self.assertTrue(difference)
+        self.assertEqual(observation["status"], "output")
+        self.assertLess(events.index(("up", "f9")), events.index(("history", None)))
+        self.assertLess(events.index(("history", None)), events.index(("readback", None)))
+        self.assertLess(events.index(("settled", None)), events.index(("focus", "after delivery wait")))
+        self.assertEqual([stage for kind, stage in events if kind == "focus"],
+                         ["before modifiers", "before F9 down", "F9 held", "listening",
+                          "before F9 up", "after delivery wait"])
+        release.assert_called_once_with()
+        ctx.guard.stop_key_trace.assert_called_once_with()
 
     def test_notepad_direct_control_keeps_guard_and_exact_readback(self):
         pad = SimpleNamespace(focus=mock.Mock(), wait_text=mock.Mock(return_value="corrupt"))
@@ -308,9 +370,9 @@ class ImportTests(unittest.TestCase):
                               observed_text=mock.Mock(side_effect=OutputCount(0)), settle=mock.Mock(),
                               guard=SimpleNamespace(start_key_trace=mock.Mock(),
                                                     stop_key_trace=lambda: {"events": [], "overflow": False}))
-        with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
+        with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}) as focus, \
              mock.patch.object(win32, "key_down"), mock.patch.object(win32, "key_up"), \
-             mock.patch.object(win32, "release_all"):
+             mock.patch.object(win32, "release_all") as release:
             _, difference, expected, observation = hotkey_checks._notepad_focus_trial(
                 ctx, "Ctrl+Alt+Shift+F9", "alt", phases)
         self.assertIsNone(expected)
@@ -318,7 +380,34 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(observation["status"], "held_refused")
         self.assertEqual(observation["output_error"], "Expected one output for this utterance, found 0")
         self.assertEqual(observation["key_trace"]["packet_text"], "")
-        self.assertEqual(phases[-1]["stage"], "after delivery wait")
+        self.assertEqual(phases[-1]["stage"], "history unavailable")
+        self.assertEqual(focus.call_count, 5)
+        release.assert_called_once_with()
+
+    def test_h8_history_error_cleans_up_without_post_release_focus_read(self):
+        phases = []
+        pad = SimpleNamespace(focus=mock.Mock(), wait_text=mock.Mock())
+        ctx = SimpleNamespace(murmur=SimpleNamespace(ensure=mock.Mock(), wait_state=lambda *_: True),
+                              fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
+                              notepad=lambda *_, **__: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
+                              observed_text=mock.Mock(side_effect=RuntimeError("history unavailable")),
+                              guard=SimpleNamespace(start_key_trace=mock.Mock(),
+                                                    stop_key_trace=mock.Mock(return_value={
+                                                        "events": [], "overflow": False})))
+        with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}) as focus, \
+             mock.patch.object(win32, "key_down"), mock.patch.object(win32, "key_up") as up, \
+             mock.patch.object(win32, "release_all") as release:
+            with self.assertRaisesRegex(RuntimeError, "history unavailable"):
+                hotkey_checks._notepad_focus_trial(ctx, "Ctrl+Alt+Shift+F9", "alt", phases)
+        self.assertEqual(focus.call_count, 5)
+        self.assertEqual([phase["stage"] for phase in phases[-5:]],
+                         ["after F9 up", "after shift up", "after alt up", "after ctrl up",
+                          "before delivery wait"])
+        self.assertEqual(up.call_args_list, [mock.call("f9"), mock.call("shift"), mock.call("alt"),
+                                              mock.call("ctrl")])
+        pad.wait_text.assert_not_called()
+        release.assert_called_once_with()
+        ctx.guard.stop_key_trace.assert_called_once_with()
 
     def test_drag_sampling_keeps_held_geometry_assertion(self):
         samples = []
@@ -530,6 +619,7 @@ class ImportTests(unittest.TestCase):
             self.assertEqual((root / "same-tab-direct-saved.txt").read_text(), "good")
             evidence = json.loads((root / "focus-phases.json").read_text())
             self.assertEqual(evidence["no-alt"]["difference"], "bad output")
+            self.assertIn("differs at character", evidence["no-alt"]["saved_file_difference"])
             self.assertIsNone(evidence["same-tab-direct"]["difference"])
             self.assertIsNone(evidence["same-tab-direct"]["saved_file_difference"])
 

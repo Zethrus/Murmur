@@ -95,3 +95,20 @@ sampling as a sufficient explanation in that run and focus investigation on
 the per-character check/thread and target message processing. Do not change
 the production sender, clipboard preference, focus guard or release gate based
 on this trace alone.
+
+## H8 comparison harness change
+
+The H8 diagnostic now records timestamps, without target UI Automation or
+native focus reads, from F9 release through the history wait. It keeps the
+pre-release focus snapshots and takes the post-delivery snapshot only after
+the per-utterance history oracle finds one output, Notepad readback settles,
+and the overlay settle wait runs. A missing or ambiguous history output omits
+that post-delivery focus snapshot. The history poll reads the disposable SQLite
+profile, not Notepad; its row is written after Murmur submits the input and
+does not by itself prove that Notepad processed every character.
+
+This changes diagnostic evidence collection only. The exact hook, history,
+UI Automation and saved-byte comparisons, same-tab direct control, release
+order, continuous guard, and key cleanup remain in place. No new native result
+or sender repair is established here. An exact app result would need a repeat
+and focused full gates before release acceptance.

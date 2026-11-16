@@ -88,6 +88,10 @@ def _notepad_focus_trial(ctx, spec, name, phases, previous_hwnd=None):
     pad = ctx.notepad(name, reuse_hwnd=previous_hwnd, owned_tab=True)
     pad.focus()
     sample = lambda stage: phases.append(_focus_phase(pad, stage))
+    # Release can start insertion before the next Python statement. Keep timing evidence
+    # without asking Notepad for focus, descendants, status, or text during that interval.
+    timestamp = lambda stage: phases.append({"stage": stage, "time": time.time(),
+                                             "focus_snapshot": "deferred"})
     modifiers, key = win32.parse_combo(spec)
     ctx.observe_delivery("A")
     ctx.guard.start_key_trace()
@@ -104,21 +108,24 @@ def _notepad_focus_trial(ctx, spec, name, phases, previous_hwnd=None):
         ctx.sleep(ctx.fixtures["A"].speech_seconds + 0.8)
         sample("before F9 up")
         win32.key_up(key)
-        sample("after F9 up")
+        timestamp("after F9 up")
         ctx.sleep(0.05)
         for modifier in reversed(modifiers):
             win32.key_up(modifier)
-            sample(f"after {modifier} up")
-        sample("before delivery wait")
+            timestamp(f"after {modifier} up")
+        timestamp("before delivery wait")
         try:
             expected = ctx.observed_text()
             output_error = None
+            timestamp("history confirmed")
         except OutputCount as error:
             expected = None
             output_error = error
+            timestamp("history unavailable")
         actual = pad.wait_text(timeout=8, stable=1.2, sleep=ctx.sleep)
         ctx.settle()
-        sample("after delivery wait")
+        if expected is not None:
+            sample("after delivery wait")
         overlay = ctx.murmur.overlay_state()
         status = ("held_refused" if output_error and output_error.count == 0 and overlay == "held"
                   else "no_output" if output_error and output_error.count == 0
