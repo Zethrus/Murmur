@@ -21,6 +21,7 @@ struct Fixture {
     /// What the fake engine reports when asked to stop (false = still running).
     engine_stops: Arc<std::sync::atomic::AtomicBool>,
     changes: Arc<Mutex<Vec<Kind>>>,
+    changes_wake: Arc<Condvar>,
     free: u64,
 }
 
@@ -71,6 +72,7 @@ impl Fixture {
             stops: Arc::default(),
             engine_stops: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             changes: Arc::default(),
+            changes_wake: Arc::default(),
             free: u64::MAX,
         }
     }
@@ -104,6 +106,7 @@ impl Fixture {
         let stops = self.stops.clone();
         let engine_stops = self.engine_stops.clone();
         let changes = self.changes.clone();
+        let changes_wake = self.changes_wake.clone();
         Components::new(
             Options {
                 data: self.data.clone(),
@@ -127,10 +130,27 @@ impl Fixture {
                     stops.fetch_add(1, Ordering::Relaxed);
                     engine_stops.load(Ordering::Relaxed)
                 }),
-                changed: Box::new(move |kind| changes.lock().unwrap().push(kind)),
+                changed: Box::new(move |kind| {
+                    changes.lock().unwrap().push(kind);
+                    changes_wake.notify_all();
+                }),
                 usage: Box::new(move || usage.lock().unwrap().clone()),
             },
         )
+    }
+    /// A terminal snapshot can precede the worker's notification callback.
+    fn wait_changed(&self, kind: Kind) {
+        let changes = self.changes.lock().unwrap();
+        let (changes, _) = self
+            .changes_wake
+            .wait_timeout_while(changes, Duration::from_secs(20), |changes| {
+                !changes.contains(&kind)
+            })
+            .unwrap();
+        assert!(
+            changes.contains(&kind),
+            "{kind:?} change callback missing after 20 seconds"
+        );
     }
     fn model(&self, id: &str, files: &[(&str, &[u8])]) -> serde_json::Value {
         let mut value = component(id, "speech-model");
@@ -285,7 +305,7 @@ fn installs_engine_and_model_end_to_end() {
         f.stops.load(Ordering::Relaxed) >= 1,
         "engine stopped before activation"
     );
-    assert!(f.changes.lock().unwrap().contains(&Kind::Engine));
+    f.wait_changed(Kind::Engine);
     // Selecting the model makes it active and "in use": removal is refused.
     f.usage.lock().unwrap().speech_model = "tiny.en".into();
     assert_eq!(wait(&components, "speech-tiny.en")["state"], "active");
@@ -690,10 +710,7 @@ fn failed_activation_restarts_the_stopped_engine() {
         f.stops.load(Ordering::Relaxed) >= 1,
         "smoke test passed, engine stopped"
     );
-    assert!(
-        f.changes.lock().unwrap().contains(&Kind::Engine),
-        "engine restart requested after the failed switch"
-    );
+    f.wait_changed(Kind::Engine);
     assert!(components.engine_dir().is_none());
     fs::remove_dir_all(blocker).unwrap();
     components.shutdown();
@@ -870,6 +887,7 @@ fn failed_removal_restarts_the_stopped_engine() {
     let components = f.start();
     components.install(&["engine".into()]).unwrap();
     assert_eq!(wait(&components, "engine")["state"], "active");
+    f.wait_changed(Kind::Engine);
     f.changes.lock().unwrap().clear();
     // A read-only store root: the engine folder cannot be deleted.
     let root = f.data.join("components");
@@ -906,10 +924,13 @@ fn engine_files_are_never_switched_or_deleted_while_the_engine_runs() {
     let state = wait(&components, "engine");
     assert_eq!(state["state"], "failed", "{state}");
     assert!(components.engine_dir().is_none());
+    f.wait_changed(Kind::Engine);
+    f.changes.lock().unwrap().clear();
     // Once it stops, the install goes through.
     f.engine_stops.store(true, Ordering::Relaxed);
     components.install(&["engine".into()]).unwrap();
     assert_eq!(wait(&components, "engine")["state"], "active");
+    f.wait_changed(Kind::Engine);
     let dir = components.engine_dir().unwrap();
     // Removal while the engine stays alive is refused and keeps the files.
     f.engine_stops.store(false, Ordering::Relaxed);
