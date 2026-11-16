@@ -24,12 +24,17 @@ def _reset_placement(ctx):
 
 
 def _qa_drag_ready(log):
-    """A stage-0 handshake precedes listener setup and the icon's final layout."""
+    """Require the listener, settled icon and a post-size viewport hit probe."""
     lines = [line for line in log.splitlines() if "QA overlay drag probe" in line]
     armed = next((index for index, line in enumerate(lines) if re.search(r"\bstage=4(?:\s|$)", line)), None)
-    return armed is not None and any(
-        re.search(r"\bstage=5(?:\s|$)", line) and "idle_icon=true" in line
-        and "pill_hidden=false" in line for line in lines[armed + 1:]
+    if armed is None:
+        return False
+    settled = next((index for index, line in enumerate(lines[armed + 1:], armed + 1)
+                    if re.search(r"\bstage=5(?:\s|$)", line) and "idle_icon=true" in line
+                    and "pill_hidden=false" in line), None)
+    return settled is not None and any(
+        re.search(r"\bstage=6(?:\s|$)", line) and "idle_icon=true" in line
+        for line in lines[settled + 1:]
     )
 
 
@@ -85,9 +90,9 @@ def o2_drag(ctx):
     if not win32.wait_for(lambda: _qa_drag_ready(ctx.murmur.log(since_launch=True)),
                           5, 0.1, sleep=ctx.sleep):
         ctx.artifact("drag-diagnostic.txt").write_text(
-            "QA overlay capture listener or settled idle icon did not arm before the gesture.\n"
+            "QA overlay capture listener, settled icon or post-size viewport probe did not arm before the gesture.\n"
             + ctx.murmur.log(since_launch=True), encoding="utf-8")
-        raise Fail("QA overlay capture listener or settled idle icon did not arm")
+        raise Fail("QA overlay capture listener, settled icon or post-size viewport probe did not arm")
     hwnd = ctx.murmur.overlay_hwnd()
     log_before = len(ctx.murmur.log())
     before = win32.window_rect(hwnd)
@@ -96,12 +101,17 @@ def o2_drag(ctx):
     # Sample UIA and native geometry at this gesture, after the settled-icon handshake.
     # The mount's stage-5 DOM probe alone may predate a WebView2 viewport resize.
     native_geometry = {"visible": win32.window_rect(hwnd), "outer": win32.outer_rect(hwnd),
-                       "client_size": win32.client_size(hwnd), "dpi_scale": win32.dpi_scale(hwnd)}
+                       "client_origin": win32.client_origin(hwnd), "client_size": win32.client_size(hwnd),
+                       "dpi_scale": win32.dpi_scale(hwnd)}
     end = (start[0] - 300, start[1] - 200)
     hit = win32.user32.WindowFromPoint(win32.POINT(*start))
     hit_root = win32.user32.GetAncestor(hit, win32.GA_ROOT)
-    hit_geometry = {"rect": win32.window_rect(hit), "client_size": win32.client_size(hit),
+    hit_geometry = {"rect": win32.window_rect(hit), "client_origin": win32.client_origin(hit),
+                    "client_size": win32.client_size(hit),
                     "class": win32.class_name(hit), "pid": win32.window_pid(hit)} if hit else None
+    client_click = tuple(start[index] - native_geometry["client_origin"][index] for index in (0, 1))
+    hit_client_click = (tuple(start[index] - hit_geometry["client_origin"][index] for index in (0, 1))
+                        if hit_geometry else None)
     samples = []
 
     def sample(stage, step):
@@ -122,6 +132,7 @@ def o2_drag(ctx):
         f"start: {start}; end: {end}\nbefore: {before}; held: {held}; after: {after}\n"
         f"gesture-time UIA drag bounds: {handle_rect}; native overlay: {native_geometry!r}; "
         f"hit child: {hit_geometry!r}\n"
+        f"click relative to overlay/hit client (physical px): {client_click}; {hit_client_click}\n"
         f"hit hwnd: {hex(hit)}; root: {hex(hit_root)}; overlay: {hex(hwnd)}; "
         f"hit owned by overlay: {hit_root == hwnd}\n"
         f"samples (monotonic, stage, step, cursor, physical left down, overlay rect):\n"

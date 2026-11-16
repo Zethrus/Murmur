@@ -37,13 +37,21 @@ separate renderer process. O4 and F11 drag behavior passed in the same attempt.
 The settled-icon stage-5 DOM probe logged pill coordinates `[50, 30, 94, 62]`;
 the gesture's native rectangle is only 52×40. This suggests a viewport or
 coordinate mismatch, but stage 5 is logged once per mount and is not a fresh
-sample of this gesture. The O2 failure path now records fresh UIA drag bounds,
-native visible/outer/client geometry, DPI and the hit child geometry immediately
-before the *same* attempted gesture. The next native result can compare those
-values with stage 5 and the actual mouse-down; no retry or changed drag input
-can hide the original failure. There is no production overlay change yet.
+sample of this gesture. The QA-only frontend now reports stage 6 after the
+idle icon's native size acknowledgement and a paint frame. Stage 6 samples
+`elementFromPoint` at the viewport center and records viewport dimensions,
+device pixel ratio and pill bounds. O2 waits for that probe, then records fresh
+UIA drag bounds, native visible/outer/client geometry, DPI and the hit child's
+client origin immediately before the *same* attempted gesture. Those values
+allow the next native result to map the actual screen click into the WebView2
+client and compare it with the fresh DOM hit. A false hit remains a test failure;
+no retry or changed drag input can hide the original gesture. There is no
+production drag or focus behavior change.
 
-Local validation: `python3 -m unittest scripts.tests.test_desktop_harness`
-passed 211 tests. This host did not run the Windows desktop checks or inspect
-the live WebView2 viewport. The release's manual DPI, Narrator, visual, build,
-signature and GPU gates remain separate owner-controlled work.
+Local validation: the desktop harness suite passed 212 tests, the UI suite
+passed 64 tests, `npm run build` passed, the targeted Rust QA probe test passed,
+and `rustfmt --check --edition 2021 src-tauri/src/ipc.rs` passed. The workspace-wide
+Rust format check still reports pre-existing differences in the untouched
+`src-tauri/src/enhance/` files. This host did not run the Windows desktop checks
+or inspect the live WebView2 viewport. The release's manual DPI, Narrator,
+visual, build, signature and GPU gates remain separate owner-controlled work.

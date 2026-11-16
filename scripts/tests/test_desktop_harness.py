@@ -1350,13 +1350,55 @@ class DesktopFollowupTests(unittest.TestCase):
         stage0 = "QA overlay drag probe stage=0 idle_icon=false"
         armed = "QA overlay drag probe stage=4 idle_icon=false"
         settled = "QA overlay drag probe stage=5 idle_icon=true pill_hidden=false"
+        sized = "QA overlay drag probe stage=6 idle_icon=true target_kind=3 hit_pill=true"
         self.assertFalse(overlay._qa_drag_ready(stage0))
         self.assertFalse(overlay._qa_drag_ready(stage0 + "\n" + settled))
         self.assertFalse(overlay._qa_drag_ready(stage0 + "\n" + armed))
         self.assertFalse(overlay._qa_drag_ready(settled + "\n" + armed))
         self.assertFalse(overlay._qa_drag_ready(armed + "\n" + settled.replace("false", "true")))
         self.assertFalse(overlay._qa_drag_ready(armed + "\n" + settled.replace("idle_icon=true", "idle_icon=false")))
-        self.assertTrue(overlay._qa_drag_ready(stage0 + "\n" + armed + "\n" + settled))
+        self.assertFalse(overlay._qa_drag_ready(stage0 + "\n" + armed + "\n" + settled))
+        self.assertFalse(overlay._qa_drag_ready(stage0 + "\n" + armed + "\n" + sized + "\n" + settled))
+        self.assertTrue(overlay._qa_drag_ready(stage0 + "\n" + armed + "\n" + settled + "\n" + sized))
+
+    def test_o2_failed_gesture_records_fresh_client_mapping_without_retry(self):
+        from checks import overlay
+        stages = "\n".join(f"QA overlay drag probe stage={stage} idle_icon=true pill_hidden=false"
+                           for stage in (4, 5, 6))
+        session = SimpleNamespace(ensure=mock.Mock(), log=lambda **_k: stages,
+                                  overlay_hwnd=lambda: 42, overlay_names=lambda: [],
+                                  restart=mock.Mock())
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav")},
+                                  restorer=SimpleNamespace(push=mock.Mock()),
+                                  artifact=lambda suffix: Path(directory) / suffix,
+                                  screenshot=lambda *_: None, sleep=lambda _: None)
+            user32 = SimpleNamespace(WindowFromPoint=lambda _point: 77,
+                                     GetAncestor=lambda _hwnd, _kind: 42,
+                                     GetAsyncKeyState=lambda _key: 0)
+            with mock.patch.object(overlay, "overlay_drag_point", return_value=((960, 984), (940, 970, 980, 998))), \
+                 mock.patch.object(win32, "wait_for", return_value=True), \
+                 mock.patch.object(win32, "window_rect", return_value=(934, 964, 986, 1004)), \
+                 mock.patch.object(win32, "outer_rect", return_value=(934, 964, 986, 1004)), \
+                 mock.patch.object(win32, "client_origin", return_value=(934, 964)), \
+                 mock.patch.object(win32, "client_size", return_value=(52, 40)), \
+                 mock.patch.object(win32, "dpi_scale", return_value=1), \
+                 mock.patch.object(win32, "user32", user32), \
+                 mock.patch.object(win32, "class_name", return_value="Chrome_RenderWidgetHostHWND"), \
+                 mock.patch.object(win32, "window_pid", return_value=123), \
+                 mock.patch.object(win32, "cursor", return_value=(960, 984)), \
+                 mock.patch.object(win32, "foreground", return_value=0), \
+                 mock.patch.object(win32, "window_text", return_value=""), \
+                 mock.patch.object(win32, "drag") as drag, \
+                 mock.patch.object(win32, "mouse_up"):
+                with self.assertRaisesRegex(Fail, "did not move"):
+                    overlay.o2_drag(ctx)
+            drag.assert_called_once()
+            session.restart.assert_not_called()
+            evidence = (Path(directory) / "drag-diagnostic.txt").read_text()
+            self.assertIn("gesture-time UIA drag bounds: (940, 970, 980, 998)", evidence)
+            self.assertIn("click relative to overlay/hit client (physical px): (26, 20); (26, 20)", evidence)
+            self.assertIn("stage=6", evidence)
 
     def test_h4_failure_records_exact_fixture_boundary_and_app_qa_log(self):
         with tempfile.TemporaryDirectory() as directory:

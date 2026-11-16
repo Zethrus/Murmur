@@ -26,14 +26,15 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     if (typeof document.elementFromPoint !== "function") return Promise.resolve(false);
     // The icon hides .drag-handle; its visible pill is the native drag target.
     const box = pill.getBoundingClientRect();
-    const x = event?.clientX ?? (box.left + box.right) / 2;
-    const y = event?.clientY ?? (box.top + box.bottom) / 2;
+    const x = event?.clientX ?? (stage === 6 ? window.innerWidth / 2 : (box.left + box.right) / 2);
+    const y = event?.clientY ?? (stage === 6 ? window.innerHeight / 2 : (box.top + box.bottom) / 2);
     const hit = document.elementFromPoint(x, y);
     const rect = (element: Element): [number, number, number, number] => { const r = element.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
     const pointer = (element: Element | null): boolean => !!element && window.getComputedStyle(element).pointerEvents !== "none";
     const targetKind = hit && handle.contains(hit) ? 2 : hit && hit.closest(".bars") ? 3 : hit && pill.contains(hit) ? 1 : 0;
     return call("qa_overlay_drag_probe", {probe: {
       stage, x, y, targetKind, hitPill: !!hit && pill.contains(hit), hitHandle: !!hit && handle.contains(hit),
+      viewportWidth: window.innerWidth, viewportHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio,
       idleIcon: root.dataset.idle === "icon", busy, dragging, button: event?.button ?? -1,
       pillRect: rect(pill), handleRect: rect(handle), targetPointerEvents: pointer(hit),
       pillPointerEvents: pointer(pill), handlePointerEvents: pointer(handle),
@@ -195,7 +196,10 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     const style = window.getComputedStyle(root);
     const next = windowSize({width:box.width,height:box.height},{top:cssLength(style.paddingTop),right:cssLength(style.paddingRight),bottom:cssLength(style.paddingBottom),left:cssLength(style.paddingLeft)});
     if (!sizeChanged(reported,next)) return; reported = next;
-    void call("set_overlay_size",{width:next.width,height:next.height,layoutRevision:++layoutRevision,layoutInstance}).catch(()=>{});
+    void call("set_overlay_size",{width:next.width,height:next.height,layoutRevision:++layoutRevision,layoutInstance})
+      .then(()=>{ if (qaDragProbeArmed && root.dataset.idle === "icon") {
+        requestAnimationFrame(()=>{ if (!disposed) void qaDragProbe(6).catch(()=>{}); });
+      } }).catch(()=>{});
   };
   const Observer = (globalThis as {ResizeObserver?: typeof ResizeObserver}).ResizeObserver;
   if (Observer) { const observer = new Observer(()=>measure()); observer.observe(root); observer.observe(pill); disposers.push(()=>observer.disconnect()); }

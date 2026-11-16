@@ -461,9 +461,12 @@ pub async fn start_overlay_drag(app: AppHandle, window: WebviewWindow) -> Reply<
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QaOverlayDragProbe {
-    stage: u8, // 0 mounted, 1 mouse down, 2 accepted, 3 refused, 4 listener armed, 5 settled icon
+    stage: u8, // 0 mounted, 1 mouse down, 2 accepted, 3 refused, 4 armed, 5 icon, 6 post-size viewport
     x: f64,
     y: f64,
+    viewport_width: f64,
+    viewport_height: f64,
+    device_pixel_ratio: f64,
     target_kind: u8, // 0 other, 1 pill, 2 handle, 3 bars
     hit_pill: bool,
     hit_handle: bool,
@@ -481,13 +484,19 @@ pub struct QaOverlayDragProbe {
 }
 
 fn valid_qa_overlay_drag_probe(probe: &QaOverlayDragProbe) -> bool {
-    probe.stage <= 5
+    probe.stage <= 6
         && probe.target_kind <= 3
-        && [probe.x, probe.y]
-            .into_iter()
-            .chain(probe.pill_rect)
-            .chain(probe.handle_rect)
-            .all(f64::is_finite)
+        && [
+            probe.x,
+            probe.y,
+            probe.viewport_width,
+            probe.viewport_height,
+            probe.device_pixel_ratio,
+        ]
+        .into_iter()
+        .chain(probe.pill_rect)
+        .chain(probe.handle_rect)
+        .all(f64::is_finite)
 }
 
 #[tauri::command]
@@ -501,6 +510,8 @@ pub fn qa_overlay_drag_probe(window: WebviewWindow, probe: QaOverlayDragProbe) -
     }
     tracing::info!(target: "murmur::qa_overlay_drag", stage = probe.stage,
                    x = probe.x, y = probe.y, target_kind = probe.target_kind,
+                   viewport_width = probe.viewport_width, viewport_height = probe.viewport_height,
+                   device_pixel_ratio = probe.device_pixel_ratio,
                    hit_pill = probe.hit_pill, hit_handle = probe.hit_handle,
                    idle_icon = probe.idle_icon, busy = probe.busy, dragging = probe.dragging,
                    button = probe.button, pill_rect = ?probe.pill_rect,
@@ -523,6 +534,9 @@ mod qa_overlay_drag_tests {
             stage: 0,
             x: 1.0,
             y: 2.0,
+            viewport_width: 52.0,
+            viewport_height: 40.0,
+            device_pixel_ratio: 1.0,
             target_kind: 0,
             hit_pill: false,
             hit_handle: false,
@@ -538,17 +552,20 @@ mod qa_overlay_drag_tests {
             root_pointer_events: false,
             pill_hidden: false,
         };
-        for stage in 0..=5 {
+        for stage in 0..=6 {
             probe.stage = stage;
             assert!(valid_qa_overlay_drag_probe(&probe));
         }
-        probe.stage = 6;
+        probe.stage = 7;
         assert!(!valid_qa_overlay_drag_probe(&probe));
-        probe.stage = 5;
+        probe.stage = 6;
         probe.target_kind = 4;
         assert!(!valid_qa_overlay_drag_probe(&probe));
         probe.target_kind = 0;
         probe.handle_rect[0] = f64::NAN;
+        assert!(!valid_qa_overlay_drag_probe(&probe));
+        probe.handle_rect[0] = 0.0;
+        probe.viewport_width = f64::INFINITY;
         assert!(!valid_qa_overlay_drag_probe(&probe));
     }
 }

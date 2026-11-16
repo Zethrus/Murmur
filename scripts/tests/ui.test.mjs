@@ -554,7 +554,7 @@ test("QA drag probe records DOM hit and handler receipt only when enabled",async
   await h.root.dispatch("mousedown",{button:0,clientX:12,clientY:13});
   await pill.dispatch("mousedown",{button:0,clientX:12,clientY:13});
   const probes=h.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>plain(c.args.probe));
-  assert.deepEqual(probes.map(p=>p.stage),[0,4,5,1,2]);
+  assert.deepEqual(probes.filter(p=>p.stage!==6).map(p=>p.stage),[0,4,5,1,2]);
   assert.equal(probes[2].idleIcon,true);assert.equal(probes[2].pillHidden,false);
   assert.equal(probes[2].rootPointerEvents,true);assert.equal(probes[2].targetKind,3);
   assert.deepEqual(probes[2].pillRect,[10,20,50,60]);assert.deepEqual([probes[2].x,probes[2].y],[30,40]);
@@ -583,6 +583,26 @@ test("QA icon sample waits for listener acknowledgment and does not alter normal
   assert.deepEqual(normal.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>c.args.probe.stage),[0]);
   assert.equal(normal.drags.length,1,"QA disabled leaves the normal drag handler active");
   assert.equal(normal.root.dataset.idle,"icon");normal.unload();
+});
+test("QA post-size probe samples viewport center only after native size acknowledgment",async()=>{
+  let acknowledgeSize;
+  const h=await harness({qa_overlay_drag_probe:async()=>true,
+    set_overlay_size:()=>new Promise(resolve=>{acknowledgeSize=resolve;})});
+  h.document.elementFromPoint=()=>h.root;
+  await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);await settle();
+  const pill=h.root.querySelector(".pill");
+  pill.rect={left:50,top:30,right:94,bottom:62,width:44,height:32};
+  h.timers.tick(1500);
+  h.observers.trigger();
+  assert.equal(typeof acknowledgeSize,"function");
+  assert.ok(!h.calls.some(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6));
+  Object.assign(h.window,{innerWidth:52,innerHeight:40,devicePixelRatio:1.25});
+  acknowledgeSize();await settle();
+  const probe=plain(h.calls.find(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6).args.probe);
+  assert.deepEqual([probe.x,probe.y,probe.viewportWidth,probe.viewportHeight,probe.devicePixelRatio],[26,20,52,40,1.25]);
+  assert.deepEqual(probe.pillRect,[50,30,94,62]);
+  assert.equal(probe.hitPill,false,"a mismatched viewport is observed, not accepted as a drag hit");
+  h.unload();
 });
 test("suggestions, held text and drag errors use the full pill over the idle icon",async()=>{
   const h=await overlay({startOverlayDrag:async()=>{throw new Error("permission denied");}}),pill=h.root.querySelector(".pill"),label=h.root.querySelector(".pill-label");

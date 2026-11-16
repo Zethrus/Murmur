@@ -138,6 +138,7 @@ def _declare():
         ("GetAncestor", (wintypes.HWND, wintypes.UINT), wintypes.HWND),
         ("SendMessageW", (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM), ctypes.c_ssize_t),
         ("GetClientRect", (wintypes.HWND, ctypes.POINTER(RECT)), wintypes.BOOL),
+        ("ClientToScreen", (wintypes.HWND, ctypes.POINTER(POINT)), wintypes.BOOL),
         ("SetWindowPos", (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                           wintypes.UINT), wintypes.BOOL),
         ("GetDpiForWindow", (wintypes.HWND,), wintypes.UINT),
@@ -523,6 +524,14 @@ def client_size(hwnd):
     rect = RECT()
     user32.GetClientRect(hwnd, ctypes.byref(rect))
     return rect.right - rect.left, rect.bottom - rect.top
+
+
+def client_origin(hwnd):
+    """Physical screen position of a window's client (or WebView2 child) origin."""
+    point = POINT(0, 0)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(point)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return point.x, point.y
 
 
 def dpi_scale(hwnd):

@@ -60,8 +60,9 @@ export async function harness(overrides={}) {
   const on=async(name,handler)=>{const listeners=events.get(name)??new Set();listeners.add(handler);events.set(name,listeners);return ()=>listeners.delete(handler);};
   const observers=resizeObservers(),padding="20px";
   const window={addEventListener:(name,fn)=>{if(name==="beforeunload")unloads.push(fn);},confirm:()=>true,
+    innerWidth:608,innerHeight:160,devicePixelRatio:1,
     getComputedStyle:()=>({paddingTop:padding,paddingRight:padding,paddingBottom:padding,paddingLeft:padding})};
-  const context=vm.createContext({console,document,window,HTMLElement:Element,HTMLInputElement:Element,HTMLButtonElement:Element,performance,URLSearchParams,ResizeObserver:observers.ResizeObserver,...timers});
+  const context=vm.createContext({console,document,window,HTMLElement:Element,HTMLInputElement:Element,HTMLButtonElement:Element,performance,URLSearchParams,ResizeObserver:observers.ResizeObserver,requestAnimationFrame:fn=>fn(),...timers});
   const bridge=new vm.SyntheticModule(["call","on","appVersion","startOverlayDrag"],function(){this.setExport("call",call);this.setExport("on",on);this.setExport("appVersion",async()=>"0.1.0");
     this.setExport("startOverlayDrag",async()=>{drags.push(true);if(overrides.startOverlayDrag) await overrides.startOverlayDrag();});},{context});
   const cache=new Map();

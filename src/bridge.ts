@@ -16,6 +16,7 @@ export type OverlayPosition = "top-center" | "bottom-center" | "custom";
 export type IdleView = "icon" | "pill" | "hidden";
 export interface QaOverlayDragProbe {
   stage: number; x: number; y: number; targetKind: number; hitPill: boolean; hitHandle: boolean;
+  viewportWidth: number; viewportHeight: number; devicePixelRatio: number;
   idleIcon: boolean; busy: boolean; dragging: boolean; button: number;
   pillRect: [number, number, number, number]; handleRect: [number, number, number, number];
   targetPointerEvents: boolean; pillPointerEvents: boolean; handlePointerEvents: boolean;
