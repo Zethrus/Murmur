@@ -1680,6 +1680,120 @@ class DesktopFollowupTests(unittest.TestCase):
 
 
 class O8ForegroundDiagnosticTests(unittest.TestCase):
+    def _selector(self, ctx, candidates, *, root_hwnd=44, roots=None):
+        """Mock only UIA's returned tree; run the real O8 candidate selector."""
+        root = object()
+        ctx.murmur.overlay = lambda: root
+        ctx.murmur.overlay_hwnd = lambda: 44
+        roots = roots or {}
+        self.enterContext(mock.patch.object(uia, "find_all", return_value=list(candidates)))
+        self.enterContext(mock.patch.object(uia, "handle", side_effect=lambda e: (
+            root_hwnd if e is root else candidates[e][2])))
+        self.enterContext(mock.patch.object(uia, "name", return_value="Drag to move"))
+        self.enterContext(mock.patch.object(uia, "control_type", side_effect=lambda e: candidates[e][0]))
+        self.enterContext(mock.patch.object(uia, "rect", side_effect=lambda e: candidates[e][1]))
+        self.enterContext(mock.patch.object(win32, "user32", SimpleNamespace(
+            GetAncestor=lambda hwnd, _kind: roots.get(hwnd, 44))))
+
+    def test_o8_selector_skips_tooltip_and_hidden_handle_for_visible_pill(self):
+        root = SimpleNamespace(murmur=SimpleNamespace(), guard=SimpleNamespace(check=mock.Mock()),
+                               sleep=lambda _seconds: None)
+        candidates = {object(): (uia.TOOLTIP, (970, 999, 1059, 1024), 0),
+                      object(): (uia.IMAGE, (0, 0, 0, 0), 0),
+                      object(): (uia.GROUP, (938, 968, 982, 1000), 0)}
+        self._selector(root, candidates)
+        details = {}
+        self.assertEqual(common_checks.overlay_drag_snapshot(
+            root, (934, 964, 986, 1004), details, timeout=0),
+            ((960, 984), (938, 968, 982, 1000)))
+        self.assertEqual(details["uia_root_hwnd"], 44)
+        self.assertEqual([row["control_type"] for row in details["uia_candidates"]],
+                         [uia.TOOLTIP, uia.IMAGE, uia.GROUP])
+        self.assertEqual(details["uia_selected"]["bounds"], (938, 968, 982, 1000))
+        self.assertEqual(details["uia_selected"]["native_root_hwnd"], 0)
+
+    def test_o8_selector_rejects_duplicate_valid_pills_and_unknown_root(self):
+        for root_hwnd, candidates, error in (
+                (44, {object(): (uia.GROUP, (938, 968, 960, 1000), 0),
+                      object(): (uia.GROUP, (960, 968, 982, 1000), 0)}, "ambiguous"),
+                (0, {object(): (uia.GROUP, (938, 968, 982, 1000), 0)}, "not the owned overlay")):
+            with self.subTest(error=error):
+                ctx = SimpleNamespace(murmur=SimpleNamespace(), guard=SimpleNamespace(check=mock.Mock()),
+                                      sleep=lambda _seconds: None)
+                self._selector(ctx, candidates, root_hwnd=root_hwnd)
+                with self.assertRaisesRegex(Fail, error):
+                    common_checks.overlay_drag_snapshot(ctx, (934, 964, 986, 1004), {}, timeout=0)
+
+    def test_o8_selector_records_unreadable_stale_bounds(self):
+        ctx = SimpleNamespace(murmur=SimpleNamespace(), guard=SimpleNamespace(check=mock.Mock()),
+                              sleep=lambda _seconds: None)
+        self._selector(ctx, {object(): (uia.GROUP, (938, 968, 982, 1000), 0)})
+        details = {}
+        with mock.patch.object(uia, "rect", side_effect=RuntimeError("stale element")):
+            with self.assertRaises(uia.NotFound):
+                common_checks.overlay_drag_snapshot(ctx, (934, 964, 986, 1004), details, timeout=0)
+        self.assertIn("stale element", details["uia_candidates"][0]["bounds_error"])
+        self.assertEqual(details["uia_candidates"][0]["rejections"], ["bounds unreadable"])
+
+    def test_o8_selector_rejects_tooltip_outside_and_foreign_native_root_without_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx, _session, drag = self._o8_readiness_context(directory)
+            self._selector(ctx, {object(): (uia.TOOLTIP, (970, 999, 1059, 1024), 0),
+                                 object(): (uia.GROUP, (970, 999, 1059, 1024), 0),
+                                 object(): (uia.GROUP, (938, 968, 982, 1000), 55)}, roots={55: 99})
+            cases = []
+            real = common_checks.overlay_drag_snapshot
+            with mock.patch.object(overlay_checks, "overlay_drag_snapshot",
+                                   side_effect=lambda c, b, d: real(c, b, d, timeout=0)), \
+                 mock.patch.object(win32, "mouse_up") as up:
+                with self.assertRaisesRegex(Fail, "did not converge"):
+                    overlay_checks._o8_drag(ctx, "cold", 71, None, -1, cases)
+            drag.assert_not_called()
+            up.assert_not_called()
+            self.assertEqual(len(cases[0]["readiness_geometry_history"]), 4)
+            for row in cases[0]["readiness_geometry_history"]:
+                self.assertEqual(len(row["uia_candidates"]), 3)
+                self.assertEqual([item["rejections"] for item in row["uia_candidates"]],
+                                 [["not status group", "outside native overlay or unusable"],
+                                  ["outside native overlay or unusable"], ["foreign native root"]])
+
+    def test_o8_guard_trip_during_candidate_enumeration_stops_before_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx, _session, drag = self._o8_readiness_context(directory)
+            element = object()
+            self._selector(ctx, {element: (uia.GROUP, (938, 968, 982, 1000), 0)})
+            def enumerate_candidates(*_args, **_kwargs):
+                ctx.guard.check.side_effect = guard.UserInput("input during enumeration")
+                return [element]
+            real = common_checks.overlay_drag_snapshot
+            with mock.patch.object(uia, "find_all", side_effect=enumerate_candidates), \
+                 mock.patch.object(overlay_checks, "overlay_drag_snapshot",
+                                   side_effect=lambda c, b, d: real(c, b, d, timeout=0)), \
+                 mock.patch.object(win32, "mouse_up") as up:
+                with self.assertRaises(guard.UserInput):
+                    overlay_checks._o8_drag(ctx, "cold", 71, None, -1, [])
+            drag.assert_not_called()
+            up.assert_not_called()
+
+    def test_o8_real_selector_requires_two_fresh_matching_geometry_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx, _session, drag = self._o8_readiness_context(directory)
+            element = object()
+            self._selector(ctx, {element: (uia.GROUP, (938, 968, 982, 1000), 0)})
+            bounds = [(970, 999, 1059, 1024), (938, 968, 982, 1000), (938, 968, 982, 1000)]
+            real = common_checks.overlay_drag_snapshot
+            history = []
+            with mock.patch.object(uia, "rect", side_effect=lambda _e: bounds.pop(0)), \
+                 mock.patch.object(overlay_checks, "overlay_drag_snapshot",
+                                   side_effect=lambda c, b, d: real(c, b, d, timeout=0)):
+                result = overlay_checks._o8_ready_drag_point(ctx, "cold", 71, 44, None, (0, 0), history)
+            self.assertEqual(result, ((960, 984), (938, 968, 982, 1000), (934, 964, 986, 1004)))
+            self.assertEqual([row["result"] for row in history],
+                             ["UIA candidates rejected", "awaiting matching snapshot", "verified"])
+            self.assertEqual(history[0]["uia_candidates"][0]["bounds"], (970, 999, 1059, 1024))
+            self.assertEqual(history[2]["uia_selected"]["bounds"], (938, 968, 982, 1000))
+            drag.assert_not_called()
+
     def test_full_travel_fits_after_cold_failure_or_partial_movement(self):
         work = (0, 0, 1920, 1040)
         for start, rect in (((960, 984), (934, 964, 986, 1004)),
@@ -1807,7 +1921,7 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
             sample("moving", 25)
         valid = ((960, 984), (938, 968, 982, 1000))
         snapshots = [((1014, 1011), (970, 999, 1059, 1024)), valid, valid, valid, valid]
-        def snapshot(_ctx):
+        def snapshot(_ctx, _native, _details):
             read = 5 - len(snapshots)
             self.assertEqual(injected.call_count, 0 if read < 3 else 1)
             return snapshots.pop(0)
@@ -1875,7 +1989,7 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
             invalid = ((1014, 1011), (970, 999, 1059, 1024))
             valid = ((960, 984), (938, 968, 982, 1000))
             rows = [invalid, valid, valid]
-            def snapshot(_ctx):
+            def snapshot(_ctx, _native, _details):
                 self.assertEqual(drag.call_count, 0)
                 return rows.pop(0)
             history = []
@@ -1930,7 +2044,7 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
     def test_o8_guard_trip_during_uia_read_stops_before_input(self):
         with tempfile.TemporaryDirectory() as directory:
             ctx, _session, drag = self._o8_readiness_context(directory)
-            def snapshot(_ctx):
+            def snapshot(_ctx, _native, _details):
                 ctx.guard.check.side_effect = guard.UserInput("owner touched input during UIA")
                 return (960, 984), (938, 968, 982, 1000)
             cases = []
@@ -1950,7 +2064,7 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
                 ctx, session, drag = self._o8_readiness_context(directory)
                 cases = []
-                def snapshot(_ctx):
+                def snapshot(_ctx, _native, _details):
                     if changed == "owner":
                         session.overlay_hwnd = lambda: 55
                     if changed == "process":

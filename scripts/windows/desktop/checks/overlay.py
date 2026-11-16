@@ -209,7 +209,7 @@ def _o8_ready_drag_point(ctx, label, pid, hwnd, expected_foreground, original, h
         try:
             point = bounds = None
             try:
-                point, bounds = overlay_drag_snapshot(ctx)
+                point, bounds = overlay_drag_snapshot(ctx, before, row)
                 row.update(uia_drag_bounds=bounds, point=point)
             except uia.NotFound as error:
                 row["uia_error"] = str(error)
@@ -237,7 +237,8 @@ def _o8_ready_drag_point(ctx, label, pid, hwnd, expected_foreground, original, h
                     row["result"] = "UIA handle outside native overlay or unusable"
             else:
                 previous = None
-                row["result"] = "UIA handle not found"
+                row["result"] = ("UIA candidates rejected" if row.get("uia_candidates")
+                                 else "UIA handle not found")
         except BaseException as error:
             row["error"] = f"{type(error).__name__}: {error}"
             raise

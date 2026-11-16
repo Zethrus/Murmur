@@ -56,12 +56,65 @@ def overlay_drag_point(ctx, return_bounds=False):
     return (point, handle) if return_bounds else point
 
 
-def overlay_drag_snapshot(ctx, timeout=0.5):
-    """One fresh UIA bounds read for O8's guarded gesture-time comparison."""
-    element = uia.find(ctx.murmur.overlay(), name_="Drag to move", timeout=timeout, sleep=ctx.sleep)
-    bounds = uia.rect(element)
-    point = ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
-    return point, bounds
+def overlay_drag_snapshot(ctx, native_bounds, details, timeout=0.5):
+    """Find O8's visible icon pill, recording every same-named UIA candidate."""
+    deadline = time.monotonic() + timeout
+    hwnd = ctx.murmur.overlay_hwnd()
+    while True:
+        root = ctx.murmur.overlay()  # from_handle(hwnd), never the desktop UIA root
+        root_hwnd = uia.handle(root)
+        details["uia_root_hwnd"] = root_hwnd
+        if not hwnd or root_hwnd != hwnd:
+            raise Fail(f"O8 UIA root is not the owned overlay: {root_hwnd}, expected {hwnd}")
+        elements = uia.find_all(root, name_="Drag to move")
+        candidates = []
+        valid = []
+        for element in elements:
+            kind = uia.control_type(element)
+            native_hwnd = uia.handle(element)
+            native_root = (win32.user32.GetAncestor(native_hwnd, win32.GA_ROOT)
+                           if native_hwnd else 0)
+            candidate = {"name": uia.name(element), "control_type": kind,
+                         "control_type_name": uia.TYPE_NAMES.get(kind, str(kind)),
+                         "native_hwnd": native_hwnd, "native_root_hwnd": native_root,
+                         "uia_root_hwnd": root_hwnd,
+                         "native_association": ("overlay UIA subtree" if not native_hwnd else
+                                                "overlay window" if native_root == hwnd else "foreign window")}
+            reasons = []
+            if candidate["name"] != "Drag to move":
+                reasons.append("name changed during enumeration")
+            try:
+                bounds = uia.rect(element)
+                candidate["bounds"] = bounds
+            except Exception as error:  # noqa: BLE001 - stale UIA element must not become a click
+                bounds = None
+                candidate["bounds_error"] = f"{type(error).__name__}: {error}"
+                reasons.append("bounds unreadable")
+            if kind != uia.GROUP:  # icon pill has role=status; hidden handle has role=img
+                reasons.append("not status group")
+            if native_hwnd and native_root != hwnd:
+                reasons.append("foreign native root")
+            if bounds is not None:
+                left, top, right, bottom = native_bounds
+                if not (left <= bounds[0] < bounds[2] <= right and
+                        top <= bounds[1] < bounds[3] <= bottom):
+                    reasons.append("outside native overlay or unusable")
+            candidate["rejections"] = reasons
+            candidates.append(candidate)
+            if not reasons:
+                valid.append(candidate)
+        details["uia_candidates"] = candidates
+        ctx.guard.check()  # enumeration and property reads can block in COM
+        if len(valid) > 1:
+            raise Fail(f"O8 drag affordance is ambiguous: {len(valid)} valid UIA candidates")
+        if valid:
+            selected = valid[0]
+            details["uia_selected"] = selected
+            bounds = selected["bounds"]
+            return ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2), bounds
+        if time.monotonic() >= deadline:
+            raise uia.NotFound("No unique visible status-group drag affordance in owned overlay")
+        ctx.sleep(0.25)
 
 
 def wait_held(ctx, timeout=30):
