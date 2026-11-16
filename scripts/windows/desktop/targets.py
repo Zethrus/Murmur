@@ -36,7 +36,7 @@ def run_target_app(title, state_path, role):
     area = tk.Text(root, wrap="word", font=font, undo=False)
     area.pack(fill="both", expand=True)
     record = {"title": title, "role": role, "pid": os.getpid(), "hwnd": 0, "text": "", "keys": [], "focus": [],
-              "updated": time.time()}
+              "editor_focused": False, "updated": time.time()}
 
     def save():
         record["text"] = area.get("1.0", "end-1c")
@@ -57,6 +57,10 @@ def run_target_app(title, state_path, role):
 
     def on_focus(kind):
         record["focus"].append({"event": kind, "t": time.time()})
+        save()
+
+    def on_editor_focus(focused):
+        record["editor_focused"] = focused
         save()
 
     def on_modified(_):
@@ -80,6 +84,8 @@ def run_target_app(title, state_path, role):
         root.after(100, poll)
 
     area.bind("<Key>", on_key, add="+")
+    area.bind("<FocusIn>", lambda _: on_editor_focus(True), add="+")
+    area.bind("<FocusOut>", lambda _: on_editor_focus(False), add="+")
     root.bind("<FocusIn>", lambda _: on_focus("in"))
     root.bind("<FocusOut>", lambda _: on_focus("out"))
     area.bind("<<Modified>>", on_modified)
@@ -155,6 +161,7 @@ class TargetApp:
         self.guard = guard
         self.process = None
         self.hwnd = 0
+        self._startup_handoff = None
 
     def start(self, timeout=20):
         for path in (self.state_path, self.state_path.with_suffix(".cmd")):
@@ -193,6 +200,20 @@ class TargetApp:
             ok = self.win32.activate(self.hwnd, click_at=self.text_point())
         if not ok:
             raise RuntimeError(f"Could not focus {self.title}")
+        handoff = getattr(self, "_startup_handoff", None)
+        if handoff is not None:
+            handoff(self)
+
+    @property
+    def handoff_owner_pid(self):
+        return self.process.pid if self.process is not None else 0
+
+    def handoff_ready(self):
+        """The live target process still reports this exact window and text destination."""
+        state = self.state()
+        return (self.process is not None and self.process.poll() is None and
+                state.get("pid") == self.process.pid and state.get("hwnd") == self.hwnd and
+                state.get("title") == self.title and state.get("editor_focused") is True)
 
     def clear(self, timeout=5):
         self.state_path.with_suffix(".cmd").write_text("clear", encoding="utf-8")
@@ -251,6 +272,7 @@ class Notepad:
         self.hwnd = 0
         self.owner_pid = 0
         self.owned_tab = False
+        self._startup_handoff = None
 
     def _title_is_document(self, title):
         title = title.lower().lstrip("*● ")
@@ -301,6 +323,18 @@ class Notepad:
             raise RuntimeError(f"Notepad foreground is active but editor focus is {self.uia.describe(self.uia.focused())}")
         if self.owned_tab and not self.active_document():
             raise RuntimeError(f"Notepad switched away from {self.path.name}")
+        handoff = getattr(self, "_startup_handoff", None)
+        if handoff is not None:
+            handoff(self)
+
+    @property
+    def handoff_owner_pid(self):
+        return self.owner_pid
+
+    def handoff_ready(self):
+        """The named document, live Notepad owner and editor focus all still agree."""
+        return (self.owner_pid in self.win32.pids("Notepad.exe") and
+                self.active_document() and self.editor_focused())
 
     def save_owned(self):
         """Save the settled H8 document while keeping its tab and window alive."""

@@ -86,11 +86,73 @@ def remove_tree(path, attempts=10):
     return False
 
 
+class StartupProbeLease:
+    """Keep the H8 startup window passive until a registered target owns keyboard focus."""
+
+    def __init__(self, window, guard, win32, startup):
+        self.window, self.guard, self.win32, self.startup = window, guard, win32, startup
+        self.closed = False
+
+    def _target_ready(self, target):
+        try:
+            hwnd, pid = target.hwnd, target.handoff_owner_pid
+            if not hwnd or not pid or not self.win32.is_window(hwnd) or self.win32.window_pid(hwnd) != pid:
+                return False
+            context = self.win32.foreground_context()
+            focus = context.get("focus_hwnd")
+            if (context.get("input_desktop") != "Default" or context.get("hwnd") != hwnd or
+                    context.get("process_id") != pid or context.get("gui_status") != "ok" or
+                    context.get("active_hwnd") != hwnd or not focus or
+                    (focus != hwnd and self.win32.user32.GetAncestor(focus, self.win32.GA_ROOT) != hwnd)):
+                return False
+            return target.handoff_ready()
+        except Exception:  # noqa: BLE001 - a failed ownership read cannot authorize handoff
+            # A rebuilding UIA element or an unknown owner cannot justify retirement.
+            return False
+
+    def complete_handoff(self, target):
+        """Observe the target after its normal focus call; never activate a window here."""
+        if self.closed:
+            return True
+        self.guard.check()
+        if not self._target_ready(target):
+            self.startup["handoff"] = "awaiting_verified_target"
+            return False
+        # Re-read ownership immediately before destruction; focus may have moved in between.
+        if not self._target_ready(target):
+            self.startup["handoff"] = "ownership_changed_before_close"
+            return False
+        self.guard.check()
+        self.close()
+        self.guard.check()
+        self.startup["handoff"] = "verified_target"
+        return True
+
+    def close(self):
+        if self.closed:
+            return
+        try:
+            closed = self.window.close(restore=False)
+        except Exception as error:  # noqa: BLE001 - teardown must fail closed
+            self.startup["probe_window"] = self.window.diagnostics()
+            raise self._cleanup_error(f"{type(error).__name__}: {error}") from error
+        if not closed:
+            self.startup["probe_window"] = self.window.diagnostics()
+            raise self._cleanup_error(self.window.restoration)
+        self.closed = True
+        self.startup["probe_window"] = self.window.diagnostics()
+
+    @staticmethod
+    def _cleanup_error(detail):
+        from guard import GuardUnavailable
+        return GuardUnavailable(f"H8 owned probe window cleanup failed: {detail}")
+
+
 def start_input_guard(guard, selected, win32, meta):
     """For H8, prove the first probe with a focused, message-pumped owned window."""
     if not any(check.id == "H8" for check in selected):
         guard.start()
-        return
+        return None
 
     from guard import GuardUnavailable
     from guard_diagnostic import _OwnedProbeWindow, _wait_for_safe_desktop
@@ -98,11 +160,11 @@ def start_input_guard(guard, selected, win32, meta):
     startup = meta["guard_startup"]
     startup["after_banner_desktop_context"] = win32.desktop_context()
     startup["phase"] = "window_open"
-    window = _OwnedProbeWindow()
-    if not window.open():
-        startup["probe_window"] = window.diagnostics()
-        raise GuardUnavailable(f"H8 owned probe window unavailable: {window.status}")
+    window = _OwnedProbeWindow(restore_on_close=False)
+    lease = StartupProbeLease(window, guard, win32, startup)
     try:
+        if not window.open():
+            raise GuardUnavailable(f"H8 owned probe window unavailable: {window.status}")
         startup["phase"] = "focus_and_idle_wait"
         focus_started = time.monotonic()
         try:
@@ -130,12 +192,17 @@ def start_input_guard(guard, selected, win32, meta):
                                   "owned_probe_messages": hook.get("owned_probe_messages")}
         if not window.focused():
             raise GuardUnavailable("H8 owned probe window lost focus during guard startup")
-    finally:
-        window.close()
+        startup["phase"] = "passive_transition"
+        if not window.enter_passive():
+            raise GuardUnavailable(f"H8 owned probe window passive transition failed: {window.diagnostics()}")
+        guard.check()
         startup["probe_window"] = window.diagnostics()
-    if "window_thread_stop_timeout" in window.restoration or "destroy_failed" in window.restoration:
-        raise GuardUnavailable(f"H8 owned probe window cleanup failed: {window.restoration}")
-    startup["phase"] = "ready"
+        startup["phase"] = "ready"
+        return lease
+    except BaseException:
+        # Even when readiness or the first probe fails, this window never restores prior focus.
+        lease.close()
+        raise
 
 
 def run_checks(ctx, selected, repeat, lookup, log=print):
@@ -278,6 +345,7 @@ def main(argv=None):
     guard = Guard(diagnostic=True)
     h8_selected = any(check.id == "H8" for check in selected)
     session = None
+    startup_lease = None
     try:
         print("Preparing fixtures and the test profile (no input yet)...")
         speech = fixtures.build(cache / "fixtures")
@@ -298,10 +366,11 @@ def main(argv=None):
             meta["guard_startup"]["banner_elapsed_s"] = round(time.monotonic() - banner_started, 3)
         if win32.idle_seconds() < BANNER_SECONDS:
             raise UserInput("input during the start countdown")
-        start_input_guard(guard, selected, win32, meta)
+        startup_lease = start_input_guard(guard, selected, win32, meta)
         meta["parent_desktop_context"] = win32.desktop_context()
         ctx = Context(build=build, session=session, fixtures=speech, goldens=golden.GoldenStore(), restorer=restorer,
-                      guard=guard, out=out, work=work, hotkey=args.hotkey, cache=cache)
+                      guard=guard, out=out, work=work, hotkey=args.hotkey, cache=cache,
+                      startup_probe_lease=startup_lease)
         results, aborted = run_checks(ctx, selected, args.repeat, checks.lookup)
         meta["goldens"] = ctx.goldens.as_dict()
     except UserInput as error:
@@ -316,7 +385,17 @@ def main(argv=None):
         results += [report.Result(c.id, report.ABORTED, aborted, c.title, c.group, c.best_effort, [str(trace)])
                     for c in selected if c.id not in {r.id for r in results}]
     finally:
-        guard.stop()
+        try:
+            guard.stop()
+        except Exception as error:  # noqa: BLE001 - still retire our window and restore the run
+            meta["guard_stop_error"] = f"{type(error).__name__}: {error}"
+            aborted = aborted or f"aborted: input guard unavailable (guard stop failed: {error})"
+        if startup_lease is not None:
+            try:
+                startup_lease.close()
+            except GuardUnavailable as error:
+                meta["guard_startup"]["cleanup_error"] = str(error)
+                aborted = aborted or f"aborted: input guard unavailable ({error})"
         meta["input_guard"] = guard.diagnostics()
         win32.release_all()
         failures = restorer.restore_all()

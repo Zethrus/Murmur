@@ -23,6 +23,8 @@ WS_EX_TOOLWINDOW, WS_EX_TOPMOST = 0x80, 0x08
 WS_OVERLAPPEDWINDOW, WS_VISIBLE, ES_READONLY = 0x00CF0000, 0x10000000, 0x0800
 PM_REMOVE = 1
 SWP_SHOW_NO_ACTIVATE = 0x40 | 0x10 | 0x04 | 0x02 | 0x01
+SWP_KEEP_SIZE_POSITION_NO_ACTIVATE = 0x10 | 0x02 | 0x01
+HWND_NOTOPMOST = -2
 FOCUS_WAIT_SECONDS = 180
 IDLE_WAIT_SECONDS = 65
 IDLE_SECONDS = 60
@@ -32,7 +34,7 @@ TEARDOWN_DEADLINE_SECONDS = 12
 class _OwnedProbeWindow:
     """A small, short-lived input target; its thread consumes key messages without translation."""
 
-    def __init__(self):
+    def __init__(self, restore_on_close=True):
         self.hwnd = None
         self.status = "pending"
         self.initial_focus = "not_attempted"
@@ -44,7 +46,11 @@ class _OwnedProbeWindow:
         self._thread = None
         self._clear_focus = threading.Event()
         self._clear_done = threading.Event()
-        self._restore_on_close = True
+        self._passive = threading.Event()
+        self._passive_done = threading.Event()
+        self._passive_status = "not_requested"
+        self._allow_restoration = restore_on_close
+        self._restore_on_close = restore_on_close
         self._handoff_window = False
         self._destroyed = False
 
@@ -99,6 +105,20 @@ class _OwnedProbeWindow:
             if self.hwnd and not self.status.startswith(("handoff_unsafe", "show_failed")):
                 while not self._stop.wait(0.01):
                     self._drain_messages(user32)
+                    if self._passive.is_set():
+                        if not self._passive_done.is_set():
+                            # The owning GUI thread alone changes the window's z-order.
+                            # Once requested, no later pump iteration repairs its focus.
+                            self._restore_on_close = False
+                            if self.status != "ready":
+                                self._passive_status = "focus_lost"
+                            elif user32.SetWindowPos(self.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                                                     SWP_KEEP_SIZE_POSITION_NO_ACTIVATE):
+                                self.status = self._passive_status = "passive"
+                            else:
+                                self._passive_status = f"notopmost_failed:{ctypes.get_last_error()}"
+                            self._passive_done.set()
+                        continue
                     if self._clear_focus.is_set() and not self._clear_done.is_set():
                         if user32.GetForegroundWindow() == self.hwnd:
                             user32.SetFocus(None)  # only this owning GUI thread may clear its focus
@@ -162,19 +182,27 @@ class _OwnedProbeWindow:
         self._clear_focus.set()
         return self._clear_done.wait(2) and self.status == "focus_cleared"
 
+    def enter_passive(self):
+        """Acknowledge no focus repair or restoration and remove TOPMOST on the GUI thread."""
+        self._restore_on_close = False
+        self._passive.set()
+        return (self._passive_done.wait(2) and self._passive_status == "passive" and
+                bool(self._thread and self._thread.is_alive()) and win32.is_window(self.hwnd))
+
     def close(self, restore=True):
-        self._restore_on_close = restore and not self._handoff_window
+        self._restore_on_close = restore and self._allow_restoration and not self._handoff_window \
+            and not self._passive.is_set()
         self._stop.set()
         if self._thread:
             self._thread.join(3)
             if self._thread.is_alive():
                 self.restoration = "window_thread_stop_timeout"
-        return bool(self._thread and not self._thread.is_alive() and self._destroyed and
+        return bool(self._thread and not self._thread.is_alive() and (self._destroyed or not self.hwnd) and
                     not win32.user32.IsWindow(self.hwnd))
 
     def diagnostics(self):
         return {"status": self.status, "initial_focus": self.initial_focus,
-                "restoration": self.restoration,
+                "restoration": self.restoration, "passive_transition": self._passive_status,
                 "received_probe_events": list(self.received_events)}
 
     def focused(self):

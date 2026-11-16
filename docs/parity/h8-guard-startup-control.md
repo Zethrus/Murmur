@@ -1,5 +1,9 @@
 # H8 guard startup control (November 15, 2026)
 
+The post-startup close described below is the original control at this commit.
+The later [startup window lease](startup-window-lease.md) changes that lifecycle;
+this page remains the historical baseline.
+
 The H8-only desktop run at `908923a31bc373c453ee1fee70239a37335e1fb1`
 aborted before its first check (`/tmp/murmur-desktop-43763669497`). The initial
 guard probe had `SendInput=1`, two hooks installed, a running message pump and

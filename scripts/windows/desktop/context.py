@@ -32,7 +32,8 @@ HOLD_MARGIN = 0.8  # seconds held after the spoken sentence ends
 
 
 class Context:
-    def __init__(self, *, build, session, fixtures, goldens, restorer, guard, out, work, hotkey, cache):
+    def __init__(self, *, build, session, fixtures, goldens, restorer, guard, out, work, hotkey, cache,
+                 startup_probe_lease=None):
         self.build = build
         self.murmur = session
         self.fixtures = fixtures
@@ -43,6 +44,7 @@ class Context:
         self.work = Path(work)
         self.hotkey = hotkey
         self.cache = Path(cache)
+        self.startup_probe_lease = startup_probe_lease
         self.artifacts = []
         self.notes = []
         self.check_id = ""
@@ -90,6 +92,8 @@ class Context:
         """A fresh TargetApp, closed by the restore stack."""
         import targets
         app = targets.TargetApp(self.work, f"{self.check_id}-{name}", role, guard=self.guard).start()
+        if getattr(self, "startup_probe_lease", None) is not None:
+            app._startup_handoff = self.startup_probe_lease.complete_handoff
         self.restorer.push(f"close {app.title}", app.close)
         self._targets.append(app)
         return app
@@ -98,6 +102,8 @@ class Context:
         import targets
         pad = targets.Notepad(self.work, f"{self.check_id}-{name}").start(
             reuse_hwnd=reuse_hwnd, owned_tab=owned_tab)
+        if getattr(self, "startup_probe_lease", None) is not None:
+            pad._startup_handoff = self.startup_probe_lease.complete_handoff
         self.restorer.push(f"close Notepad {pad.path.name}", pad.close_owned if owned_tab else pad.close)
         return pad
 

@@ -1,6 +1,6 @@
 """Pure parts of the Windows desktop harness (scripts/windows/desktop), runnable on any OS."""
 import ast
-from contextlib import closing
+from contextlib import closing, ExitStack
 import hashlib
 import json
 import multiprocessing
@@ -2124,30 +2124,41 @@ class OwnedProbeWindowTests(unittest.TestCase):
         observer.start.assert_called_once_with()
         window_factory.assert_not_called()
 
-    def test_h8_guard_start_keeps_one_guard_through_owned_window_cleanup(self):
+    def test_h1_first_and_h8_only_keep_one_guard_and_window_until_target_focus(self):
+        for selection in ("H1,H8", "H8"):
+            with self.subTest(selection=selection):
+                self._assert_startup_lease(selection)
+
+    def _assert_startup_lease(self, selection):
         events = []
         observer = mock.Mock()
         observer.start.side_effect = lambda **_kwargs: events.append("guard_start")
         observer.diagnostics.return_value = {"probes_seen": 1, "hook_state": {
             "owned_probe_status": "both_hook_callbacks", "owned_probe_messages": [256, 257]}}
-        window = mock.Mock(hwnd=55, restoration="restored")
+        window = mock.Mock(hwnd=55, restoration="not_started")
         window.open.return_value = True
         window.focused.return_value = True
-        window.close.side_effect = lambda: events.append("window_close")
-        window.diagnostics.return_value = {"status": "ready", "restoration": "restored"}
+        window.enter_passive.side_effect = lambda: events.append("passive") or True
+        window.close.side_effect = lambda **_kwargs: events.append("window_close") or True
+        window.diagnostics.return_value = {"status": "passive", "restoration": "not_started"}
         desktop = SimpleNamespace(desktop_context=lambda: {"thread_desktop": "Default"},
                                   idle_seconds=lambda: 61.0)
         meta = {"guard_startup": {"phase": "banner"}}
         with mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", return_value=window), \
              mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])) as wait, \
              mock.patch.object(run.os, "getpid", return_value=123):
-            run.start_input_guard(observer, catalog.select("H8"), desktop, meta)
-        self.assertEqual(events, ["guard_start", "window_close"])
+            lease = run.start_input_guard(observer, catalog.select(selection), desktop, meta)
+        self.assertEqual(events, ["guard_start", "passive"])
         wait.assert_called_once_with(window)
         observer.start.assert_called_once_with(owned_probe_target=(55, 123))
+        window.close.assert_not_called()
         observer.stop.assert_not_called()
         self.assertEqual(meta["guard_startup"]["phase"], "ready")
         self.assertEqual(meta["guard_startup"]["first_probe"]["probes_seen"], 1)
+        lease.close()
+        lease.close()
+        self.assertEqual(events, ["guard_start", "passive", "window_close"])
+        window.close.assert_called_once_with(restore=False)
 
     def test_h8_guard_start_refuses_lost_focus_without_starting_observer(self):
         observer = mock.Mock()
@@ -2161,25 +2172,264 @@ class OwnedProbeWindowTests(unittest.TestCase):
             with self.assertRaisesRegex(guard.GuardUnavailable, "focus_lost"):
                 run.start_input_guard(observer, catalog.select("H8"), mock.Mock(), meta)
         observer.start.assert_not_called()
-        window.close.assert_called_once_with()
+        window.close.assert_called_once_with(restore=False)
         self.assertEqual(meta["guard_startup"]["phase"], "focus_and_idle_wait")
 
-    def test_h8_guard_start_fails_closed_if_owned_window_does_not_close(self):
+    def test_h8_guard_start_fails_closed_if_passive_transition_fails(self):
         observer = mock.Mock()
         observer.diagnostics.return_value = {"probes_seen": 1}
         window = mock.Mock(hwnd=55, restoration="window_thread_stop_timeout")
         window.open.return_value = True
         window.focused.return_value = True
+        window.enter_passive.return_value = False
         window.diagnostics.return_value = {"restoration": "window_thread_stop_timeout"}
         meta = {"guard_startup": {"phase": "banner"}}
         with mock.patch.object(guard_diagnostic, "_OwnedProbeWindow", return_value=window), \
              mock.patch.object(guard_diagnostic, "_wait_for_safe_desktop", return_value=("ready", [])):
-            with self.assertRaisesRegex(guard.GuardUnavailable, "cleanup failed"):
+            with self.assertRaisesRegex(guard.GuardUnavailable, "passive transition failed"):
                 run.start_input_guard(observer, catalog.select("H8"),
                                       SimpleNamespace(desktop_context=lambda: {}, idle_seconds=lambda: 61), meta)
         observer.start.assert_called_once()
-        window.close.assert_called_once_with()
-        self.assertEqual(meta["guard_startup"]["phase"], "guard_start")
+        window.close.assert_called_once_with(restore=False)
+        self.assertEqual(meta["guard_startup"]["phase"], "passive_transition")
+
+    def test_startup_lease_retires_once_only_for_verified_keyboard_target(self):
+        context = {"input_desktop": "Default", "hwnd": 77, "process_id": 800,
+                   "gui_status": "ok", "active_hwnd": 77, "focus_hwnd": 91}
+        native = SimpleNamespace(is_window=mock.Mock(return_value=True),
+                                 window_pid=mock.Mock(return_value=800),
+                                 foreground_context=mock.Mock(return_value=context),
+                                 user32=SimpleNamespace(GetAncestor=mock.Mock(return_value=77)),
+                                 GA_ROOT=2)
+        window = mock.Mock(restoration="skipped_focus_changed")
+        window.close.return_value = True
+        window.diagnostics.return_value = {"status": "passive"}
+        observer = mock.Mock()
+        target = SimpleNamespace(hwnd=77, handoff_owner_pid=800, handoff_ready=mock.Mock(return_value=True))
+        meta = {}
+        lease = run.StartupProbeLease(window, observer, native, meta)
+        self.assertTrue(lease.complete_handoff(target))
+        self.assertTrue(lease.complete_handoff(target))
+        window.close.assert_called_once_with(restore=False)
+        self.assertEqual(observer.check.call_count, 3)
+        self.assertEqual(native.foreground_context.call_count, 2)
+        self.assertEqual(meta["handoff"], "verified_target")
+
+    def test_startup_lease_rejects_wrong_owner_focus_desktop_document_and_editor(self):
+        good = {"input_desktop": "Default", "hwnd": 77, "process_id": 800,
+                "gui_status": "ok", "active_hwnd": 77, "focus_hwnd": 91}
+        cases = (("wrong hwnd", {**good, "hwnd": 42}, 800, True),
+                 ("wrong foreground pid", {**good, "process_id": 801}, 800, True),
+                 ("wrong window pid", good, 801, True),
+                 ("secure desktop", {**good, "input_desktop": "Winlogon"}, 800, True),
+                 ("wrong focus", {**good, "focus_hwnd": 0}, 800, True),
+                 ("wrong document or editor", good, 800, False))
+        for label, context, owner, ready in cases:
+            with self.subTest(label=label):
+                native = SimpleNamespace(is_window=lambda _: True, window_pid=lambda _: owner,
+                                         foreground_context=lambda: context,
+                                         user32=SimpleNamespace(GetAncestor=lambda *_: 77), GA_ROOT=2)
+                window = mock.Mock()
+                target = SimpleNamespace(hwnd=77, handoff_owner_pid=800,
+                                         handoff_ready=lambda: ready)
+                lease = run.StartupProbeLease(window, mock.Mock(), native, {})
+                self.assertFalse(lease.complete_handoff(target))
+                window.close.assert_not_called()
+                self.assertFalse(lease.closed)
+
+    def test_startup_lease_rechecks_owner_and_guard_before_close(self):
+        good = {"input_desktop": "Default", "hwnd": 77, "process_id": 800,
+                "gui_status": "ok", "active_hwnd": 77, "focus_hwnd": 77}
+        native = SimpleNamespace(is_window=lambda _: True, window_pid=lambda _: 800,
+                                 foreground_context=mock.Mock(side_effect=[good, {**good, "hwnd": 42}]),
+                                 user32=SimpleNamespace(GetAncestor=mock.Mock()), GA_ROOT=2)
+        target = SimpleNamespace(hwnd=77, handoff_owner_pid=800, handoff_ready=lambda: True)
+        window = mock.Mock()
+        lease = run.StartupProbeLease(window, mock.Mock(), native, {})
+        self.assertFalse(lease.complete_handoff(target))
+        window.close.assert_not_called()
+        self.assertEqual(lease.startup["handoff"], "ownership_changed_before_close")
+        tripped = mock.Mock()
+        tripped.check.side_effect = guard.GuardUnavailable("missed probe")
+        lease = run.StartupProbeLease(window, tripped, native, {})
+        with self.assertRaises(guard.GuardUnavailable):
+            lease.complete_handoff(target)
+        window.close.assert_not_called()
+
+    def test_context_registers_handoff_only_after_normal_target_focus(self):
+        ctx = Context.__new__(Context)
+        ctx.work, ctx.check_id = Path("work"), "H1"
+        ctx.guard = mock.Mock()
+        ctx.restorer = restore.Restorer(log=lambda _: None)
+        ctx.startup_probe_lease = mock.Mock()
+        ctx._targets = []
+        app = targets.TargetApp.__new__(targets.TargetApp)
+        app.title, app.hwnd = "Desktop Target H1-A", 77
+        app.win32 = SimpleNamespace(activate=mock.Mock(), click=mock.Mock(),
+                                    wait_for=lambda predicate, _: predicate(), foreground=lambda: 77)
+        app.text_point = lambda: (100, 200)
+        app.close = mock.Mock()
+        app.start = mock.Mock(return_value=app)
+        with mock.patch.object(targets, "TargetApp", return_value=app):
+            self.assertIs(ctx.target("A"), app)
+        ctx.startup_probe_lease.complete_handoff.assert_not_called()
+        app.focus()
+        ctx.startup_probe_lease.complete_handoff.assert_called_once_with(app)
+        pad = targets.Notepad.__new__(targets.Notepad)
+        pad.hwnd, pad.owned_tab = 88, False
+        pad.path = Path("notepad-H1-doc.txt")
+        pad.win32 = SimpleNamespace(activate=mock.Mock(), click=mock.Mock(),
+                                    wait_for=lambda predicate, _: predicate(), foreground=lambda: 88)
+        document = object()
+        pad.document = lambda: document
+        pad.uia = SimpleNamespace(center=lambda _: (100, 200))
+        pad.editor_focused = lambda _: True
+        pad.close = mock.Mock()
+        pad.start = mock.Mock(return_value=pad)
+        with mock.patch.object(targets, "Notepad", return_value=pad):
+            self.assertIs(ctx.notepad(), pad)
+        pad.focus()
+        ctx.startup_probe_lease.complete_handoff.assert_called_with(pad)
+
+    def test_outer_run_closes_no_target_lease_before_restore_on_repeat_or_abort(self):
+        cases = (("H1,H8", 2, ([], ""), False, False),
+                 ("H8", 1, guard.UserInput("owner touched input"), False, False),
+                 ("H8", 1, RuntimeError("check setup failed"), False, False),
+                 ("H8", 1, ([], ""), True, False),
+                 ("H8", 1, ([], ""), False, True))
+        for selection, repeat, outcome, stop_error, close_error in cases:
+            with self.subTest(selection=selection, repeat=repeat, outcome=outcome,
+                              stop_error=stop_error, close_error=close_error):
+                with tempfile.TemporaryDirectory() as temporary:
+                    events = []
+                    observer = mock.Mock()
+                    def stop():
+                        events.append("guard_stop")
+                        if stop_error:
+                            raise RuntimeError("stop failed")
+                    observer.stop.side_effect = stop
+                    observer.diagnostics.return_value = {}
+                    lease = mock.Mock()
+                    def close():
+                        events.append("lease_close")
+                        if close_error:
+                            raise guard.GuardUnavailable("destroy failed")
+                    lease.close.side_effect = close
+                    session = mock.Mock()
+                    session.prepare.return_value = session
+                    session.stop.side_effect = lambda: events.append("restore_murmur")
+                    build = SimpleNamespace(record={}, version="test")
+                    result = outcome if isinstance(outcome, tuple) else None
+                    failure = outcome if isinstance(outcome, Exception) else None
+                    patches = [
+                        mock.patch.object(run, "preflight", return_value=[]),
+                        mock.patch.object(run, "start_input_guard", return_value=lease),
+                        mock.patch.object(run, "run_checks", return_value=result, side_effect=failure),
+                        mock.patch.object(run, "remove_tree", return_value=True),
+                        mock.patch.object(run.sys, "getwindowsversion", create=True, return_value=(10, 0, 26200)),
+                        mock.patch.object(run.tempfile, "mkdtemp", return_value=str(Path(temporary) / "work")),
+                        mock.patch.object(win32, "require_windows"),
+                        mock.patch.object(win32, "set_dpi_aware"),
+                        mock.patch.object(win32, "long_path", side_effect=lambda path: path),
+                        mock.patch.object(win32, "clipboard_text", return_value=""),
+                        mock.patch.object(win32, "set_clipboard_text"),
+                        mock.patch.object(win32, "idle_seconds", return_value=61),
+                        mock.patch.object(win32, "desktop_context", return_value={}),
+                        mock.patch.object(win32, "release_all", side_effect=lambda: events.append("release")),
+                        mock.patch.object(murmur, "Build", return_value=build),
+                        mock.patch.object(murmur, "MurmurSession", return_value=session),
+                        mock.patch.object(murmur, "fetch_model", return_value="model"),
+                        mock.patch.object(fixtures, "build", return_value={}),
+                        mock.patch.object(targets, "show_banner"),
+                        mock.patch.object(guard, "Guard", return_value=observer),
+                        mock.patch.object(report, "write", return_value=SimpleNamespace(read_text=lambda **_: "{}")),
+                    ]
+                    with ExitStack() as stack:
+                        start = stack.enter_context(patches[1])
+                        for patch in patches[:1] + patches[2:]:
+                            stack.enter_context(patch)
+                        code = run.main(["--build", temporary, "--out", temporary,
+                                         "--only", selection, "--repeat", str(repeat)])
+                    self.assertEqual(code, 0 if isinstance(outcome, tuple) and
+                                     not stop_error and not close_error else 1)
+                    self.assertEqual(start.call_count, 1)
+                    lease.close.assert_called_once_with()
+                    self.assertLess(events.index("guard_stop"), events.index("lease_close"))
+                    self.assertLess(events.index("lease_close"), events.index("restore_murmur"))
+
+    def test_startup_lease_close_failure_is_fail_closed_and_retryable(self):
+        window = mock.Mock(restoration="window_thread_stop_timeout")
+        window.close.side_effect = [False, True]
+        window.diagnostics.return_value = {"restoration": "window_thread_stop_timeout"}
+        lease = run.StartupProbeLease(window, mock.Mock(), mock.Mock(), {})
+        with self.assertRaisesRegex(guard.GuardUnavailable, "cleanup failed"):
+            lease.close()
+        self.assertFalse(lease.closed)
+        lease.close()
+        self.assertTrue(lease.closed)
+        self.assertEqual(window.close.call_count, 2)
+        self.assertEqual(lease.startup["probe_window"], window.diagnostics.return_value)
+
+    def test_notepad_handoff_requires_live_owner_document_and_editor(self):
+        pad = targets.Notepad.__new__(targets.Notepad)
+        pad.owner_pid = 800
+        pad.win32 = SimpleNamespace(pids=lambda _: [800])
+        pad.active_document = mock.Mock(return_value=True)
+        pad.editor_focused = mock.Mock(return_value=True)
+        self.assertTrue(pad.handoff_ready())
+        pad.editor_focused.return_value = False
+        self.assertFalse(pad.handoff_ready())
+        pad.editor_focused.return_value = True
+        pad.active_document.return_value = False
+        self.assertFalse(pad.handoff_ready())
+        pad.active_document.return_value = True
+        pad.win32.pids = lambda _: [801]
+        self.assertFalse(pad.handoff_ready())
+
+    def test_target_app_handoff_requires_live_process_registered_hwnd_and_editor(self):
+        app = targets.TargetApp.__new__(targets.TargetApp)
+        app.hwnd, app.title = 77, "Desktop Target H2-A"
+        app.process = SimpleNamespace(pid=800, poll=lambda: None)
+        state = {"pid": 800, "hwnd": 77, "title": app.title, "editor_focused": True}
+        app.state = lambda: state
+        self.assertTrue(app.handoff_ready())
+        for key, value in (("pid", 801), ("hwnd", 42), ("title", "other"),
+                           ("editor_focused", False)):
+            with self.subTest(key=key):
+                app.state = lambda key=key, value=value: {**state, key: value}
+                self.assertFalse(app.handoff_ready())
+        app.state = lambda: state
+        app.process.poll = lambda: 0
+        self.assertFalse(app.handoff_ready())
+
+    def test_passive_window_removes_topmost_without_focus_or_restoration(self):
+        window = guard_diagnostic._OwnedProbeWindow(restore_on_close=False)
+        calls = [0]
+        def wait(_seconds):
+            calls[0] += 1
+            if calls[0] == 2:
+                window._passive.set()
+            return calls[0] == 3
+        user32 = SimpleNamespace(GetForegroundWindow=mock.Mock(side_effect=[40, 55, 55, 55]),
+                                 CreateWindowExW=mock.Mock(return_value=55),
+                                 SetForegroundWindow=mock.Mock(return_value=True),
+                                 SetFocus=mock.Mock(), GetFocus=mock.Mock(return_value=55),
+                                 SetWindowPos=mock.Mock(return_value=True),
+                                 PeekMessageW=mock.Mock(return_value=False),
+                                 IsWindow=mock.Mock(return_value=True),
+                                 DestroyWindow=mock.Mock(return_value=True))
+        kernel32 = SimpleNamespace(GetModuleHandleW=mock.Mock(return_value=1))
+        with mock.patch.object(win32, "user32", user32), \
+             mock.patch.object(win32, "kernel32", kernel32), \
+             mock.patch.object(window._stop, "wait", side_effect=wait):
+            window._run()
+        self.assertEqual(window._passive_status, "passive")
+        self.assertEqual(user32.SetForegroundWindow.call_args_list, [mock.call(55)])
+        user32.SetFocus.assert_not_called()
+        user32.SetWindowPos.assert_called_once_with(
+            55, guard_diagnostic.HWND_NOTOPMOST, 0, 0, 0, 0,
+            guard_diagnostic.SWP_KEEP_SIZE_POSITION_NO_ACTIVATE)
+        self.assertEqual(window.restoration, "skipped_teardown_stage")
 
     def test_window_stays_visible_after_focus_denial_until_user_clicks(self):
         window = guard_diagnostic._OwnedProbeWindow()
