@@ -1,5 +1,6 @@
-"""O1-O4, O6, O7: overlay states, drag and restore, B7 focus, scale, subclass log line."""
+"""O1-O4, O6-O8: overlay states, drag and restore, B7 focus, diagnostics."""
 import ctypes
+import json
 import re
 import time
 
@@ -152,6 +153,216 @@ def o2_drag(ctx):
     ctx.note(f"before {before}, dragged {after}, after restart {restored}")
     if max(abs(a - b) for a, b in zip(after[:2], restored[:2])) > 2:
         raise Fail(f"Position not restored within 2 px: dragged to {after[:2]}, restarted at {restored[:2]}")
+
+
+def _o8_window(hwnd):
+    """Read-only native state at one point in time; no activation or focus repair."""
+    win32.user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    return {"hwnd": hwnd, "pid": win32.window_pid(hwnd), "class": win32.class_name(hwnd),
+            "visible": bool(win32.user32.IsWindowVisible(hwnd)),
+            "enabled": bool(win32.user32.IsWindowEnabled(hwnd)),
+            "style": win32.user32.GetWindowLongPtrW(hwnd, -16),
+            "exstyle": win32.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE),
+            "rect": win32.window_rect(hwnd), "outer": win32.outer_rect(hwnd),
+            "client_origin": win32.client_origin(hwnd), "client_size": win32.client_size(hwnd),
+            "dpi_scale": win32.dpi_scale(hwnd)}
+
+
+def _o8_settings(pid):
+    windows = win32.find_windows(title="Murmur Settings", pid=pid, visible_only=False)
+    return [{"hwnd": hwnd, "pid": win32.window_pid(hwnd),
+             "visible": bool(win32.user32.IsWindowVisible(hwnd))} for hwnd in windows]
+
+
+def _o8_owned_foreground(hwnd, pid):
+    context = win32.foreground_context()
+    root = win32.user32.GetAncestor(context["hwnd"], win32.GA_ROOT) if context["hwnd"] else 0
+    return (context, root, context["input_desktop"] == "Default" and context["gui_status"] == "ok"
+            and root == hwnd and context["process_id"] == pid)
+
+
+def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
+    """One O2 held gesture, with the same 300x200 travel and movement oracle."""
+    ctx.guard.check()
+    if not ctx.murmur.running() or ctx.murmur.process.pid != pid:
+        raise Fail("Murmur process changed before the gesture")
+    hwnd = ctx.murmur.overlay_hwnd()
+    if not hwnd or win32.window_pid(hwnd) != pid:
+        raise Fail("Murmur overlay ownership changed before the gesture")
+    start, bounds = overlay_drag_point(ctx, return_bounds=True)
+    context = win32.foreground_context()
+    foreground_root = (win32.user32.GetAncestor(context["hwnd"], win32.GA_ROOT)
+                       if context["hwnd"] else 0)
+    allowed_status = ("ok", "no_foreground") if expected_foreground is None else ("ok",)
+    if context["input_desktop"] != "Default" or context["gui_status"] not in allowed_status:
+        raise Fail(f"Unsafe desktop or foreground context before {label}: {context}")
+    if expected_foreground is not None and (foreground_root, context["process_id"]) != expected_foreground:
+        raise Fail(f"Foreground ownership changed before {label}: {context}, root={foreground_root}")
+    hit = win32.user32.WindowFromPoint(win32.POINT(*start))
+    hit_root = win32.user32.GetAncestor(hit, win32.GA_ROOT) if hit else 0
+    # WebView2 can host its hit child in a different renderer process. The
+    # top-level root, rather than the child's PID, establishes overlay ownership.
+    if not hit or hit_root != hwnd:
+        raise Fail(f"Drag point is not owned by the overlay: hit={hit}, root={hit_root}, overlay={hwnd}")
+    before = win32.window_rect(hwnd)
+    sample_rows = []
+    original_foreground = (foreground_root, context["process_id"])
+
+    def sample(stage, step):
+        ctx.guard.check()
+        if not ctx.murmur.running() or ctx.murmur.process.pid != pid or \
+                ctx.murmur.overlay_hwnd() != hwnd or win32.window_pid(hwnd) != pid or \
+                win32.input_desktop() != "Default":
+            raise Fail(f"Overlay ownership or desktop changed during {label}")
+        focus = win32.foreground_context()
+        focus_root = (win32.user32.GetAncestor(focus["hwnd"], win32.GA_ROOT)
+                      if focus["hwnd"] else 0)
+        sample_rows.append({"monotonic_s": round(time.monotonic(), 3), "stage": stage, "step": step,
+                            "cursor": win32.cursor(),
+                            "left_down": bool(win32.user32.GetAsyncKeyState(0x01) & 0x8000),
+                            "overlay_rect": win32.window_rect(hwnd),
+                            "foreground": focus, "foreground_root": focus_root})
+        if (focus["input_desktop"] != "Default" or focus["gui_status"] not in allowed_status or
+                (focus_root, focus["process_id"]) != original_foreground):
+            raise Fail(f"Foreground or desktop changed during {label}: {focus}, root={focus_root}")
+
+    log_before = len(ctx.murmur.log())
+    observation = {"case": label, "process_pid": pid, "start": start,
+                   "end": (start[0] + direction * 300, start[1] + direction * 200),
+                   "uia_drag_bounds": bounds, "before": before,
+                   "foreground_before": context, "foreground_root": foreground_root,
+                   "settings_before": _o8_settings(pid), "overlay_before": _o8_window(hwnd),
+                   "hit_before": _o8_window(hit),
+                   "click_in_overlay_client": tuple(start[i] - win32.client_origin(hwnd)[i] for i in (0, 1)),
+                   "click_in_hit_client": tuple(start[i] - win32.client_origin(hit)[i] for i in (0, 1)),
+                   "held_samples": sample_rows}
+    try:
+        try:
+            win32.drag(start, observation["end"], steps=25, release=False, sample=sample)
+            observation["held"] = win32.window_rect(hwnd)
+        finally:
+            win32.mouse_up()
+        ctx.sleep(1.5)
+        observation["after"] = win32.window_rect(hwnd)
+        observation["foreground_after"] = win32.foreground_context()
+        after_hwnd = observation["foreground_after"]["hwnd"]
+        observation["foreground_after_root"] = (win32.user32.GetAncestor(after_hwnd, win32.GA_ROOT)
+                                                if after_hwnd else 0)
+        observation["settings_after"] = _o8_settings(pid)
+        observation["overlay_after"] = _o8_window(hwnd)
+        observation["hit_after"] = _o8_window(hit) if win32.is_window(hit) else None
+        observation["moved_while_held"] = not (abs(observation["held"][0] - before[0]) < 100 and
+                                                abs(observation["held"][1] - before[1]) < 100)
+        if expected_foreground is not None:
+            _, root, owned = _o8_owned_foreground(*expected_foreground)
+            if not owned:
+                raise Fail(f"Foreground ownership changed during {label}: root={root}")
+        return observation
+    except BaseException as error:
+        observation["error"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        try:
+            delta = ctx.murmur.log()[log_before:]
+            observation["log_delta"] = delta.splitlines()
+            observation["drag_log_delta"] = [line for line in delta.splitlines() if "drag" in line.lower()]
+        except Exception as error:  # noqa: BLE001 - preserve the gesture's original outcome
+            observation["log_read_error"] = f"{type(error).__name__}: {error}"
+        observations.append(observation)
+
+
+def o8_foreground_drag(ctx):
+    """Opt-in, four-observation foreground comparison; a pass cannot clear O2."""
+    artifact = ctx.artifact("foreground-drag-diagnostic.json")
+    record = {"status": "running", "interpretation": "Diagnostic only; O2 remains the release oracle",
+              "cases": [], "failures": [], "restart": None}
+    try:
+        ctx.murmur.ensure(ctx.fixtures["A"].path, {"overlay": {"idle_view": "icon"}})
+        ctx.restorer.push("reset the overlay placement", lambda: _reset_placement(ctx))
+        pid = ctx.murmur.process.pid
+        record["initial_pid"] = pid
+        record["settings_hide_on_launch"] = ctx.murmur.settings_hide_observation
+        armed = win32.wait_for(lambda: _qa_drag_ready(ctx.murmur.log(since_launch=True)),
+                               5, 0.1, sleep=ctx.sleep)
+        record["launch_dom_probes"] = [line for line in ctx.murmur.log(since_launch=True).splitlines()
+                                       if "QA overlay drag probe" in line]
+        if not armed:
+            raise Fail("QA overlay capture listener, settled icon or post-size viewport probe did not arm")
+        if not record["settings_hide_on_launch"] or not record["settings_hide_on_launch"]["wait_succeeded"] \
+                or record["settings_hide_on_launch"]["visible_after_wait"]:
+            record["failures"].append("Settings hide after cold launch did not complete")
+        ctx.restorer.push("release the mouse button", win32.mouse_up)
+        # The first gesture precedes any Notepad creation, activation or handoff.
+        cold = _o8_drag(ctx, "cold foreground untouched", pid, None, -1, record["cases"])
+        if not cold["moved_while_held"]:
+            record["failures"].append("cold foreground untouched: no held movement")
+        if (cold["foreground_root"], cold["foreground_before"]["process_id"]) != \
+                (cold["foreground_after_root"], cold["foreground_after"]["process_id"]):
+            record["failures"].append("cold gesture changed foreground ownership")
+            raise Fail("Cold gesture changed foreground ownership")
+        last_success = cold["after"] if cold["moved_while_held"] else None
+        position_clean = True
+
+        ctx.guard.check()
+        pad = ctx.notepad("foreground")
+        if not (pad.owned_tab and pad.hwnd and pad.owner_pid in win32.pids("Notepad.exe") and
+                win32.window_pid(pad.hwnd) == pad.owner_pid and pad.active_document()):
+            raise Fail("Notepad ownership was not verified before activation")
+        pad.focus()
+        if ctx.startup_probe_lease is not None and not ctx.startup_probe_lease.closed:
+            raise Fail("Passive startup probe did not hand off to the first verified Notepad target")
+        for label, expected, direction in (
+                ("owned Notepad foreground", (pad.hwnd, pad.owner_pid), 1),
+                ("owned Murmur Settings foreground", (None, pid), -1),
+                ("same owned Notepad foreground", (pad.hwnd, pad.owner_pid), 1)):
+            ctx.guard.check()
+            if label == "owned Murmur Settings foreground":
+                settings = ctx.murmur.show_settings()
+                if not settings or win32.window_pid(settings) != pid or not win32.is_window(settings):
+                    raise Fail("Murmur Settings ownership was not verified before activation")
+                ctx.guard.check()
+                if not win32.activate(settings):
+                    raise Fail("Could not activate verified Murmur Settings")
+                expected = (settings, pid)
+            elif label == "same owned Notepad foreground":
+                if not (pad.owned_tab and pad.hwnd and pad.owner_pid in win32.pids("Notepad.exe") and
+                        win32.window_pid(pad.hwnd) == pad.owner_pid and pad.active_document()):
+                    raise Fail("Notepad ownership changed before reactivation")
+                pad.focus()
+            if label != "owned Murmur Settings foreground" and not pad.owns_keyboard_focus():
+                raise Fail(f"Owned Notepad editor lost keyboard focus before {label}")
+            observed = _o8_drag(ctx, label, pid, expected, direction, record["cases"])
+            if label != "owned Murmur Settings foreground" and not pad.owns_keyboard_focus():
+                raise Fail(f"Owned Notepad editor lost keyboard focus during {label}")
+            if not observed["moved_while_held"]:
+                record["failures"].append(f"{label}: no held movement")
+                if last_success is not None and observed["after"] != last_success:
+                    position_clean = False
+            else:
+                last_success, position_clean = observed["after"], True
+        if last_success is not None and position_clean:
+            ctx.guard.check()
+            ctx.murmur.restart()
+            restored = win32.window_rect(ctx.murmur.overlay_hwnd())
+            difference = max(abs(a - b) for a, b in zip(last_success[:2], restored[:2]))
+            record["restart"] = {"last_successful_position": last_success, "restored": restored,
+                                 "max_origin_difference_px": difference, "within_2px": difference <= 2}
+            if difference > 2:
+                record["failures"].append(f"Last successful position was not restored within 2 px: {difference}")
+        else:
+            record["restart"] = {"verified": False, "reason": "no meaningful last successful position"}
+        record["status"] = "fail" if record["failures"] else "inconclusive"
+        ctx.note("Four foreground observations are diagnostic; even four passes do not clear O2")
+        if record["failures"]:
+            raise Fail("; ".join(record["failures"]))
+    except BaseException as error:
+        if record["status"] == "running":
+            from guard import UserInput
+            record["status"] = "aborted" if isinstance(error, UserInput) else "fail"
+            record["stop_reason"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        artifact.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
 
 def _notepad_with_word(ctx):

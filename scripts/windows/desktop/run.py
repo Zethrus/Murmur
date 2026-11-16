@@ -30,7 +30,7 @@ DEFAULT_HOTKEY = "Ctrl+Alt+Shift+F9"
 IDLE_SECONDS = 60
 BANNER_SECONDS = 10
 # Checks that drive Notepad: Windows 11 Notepad restores its tabs, so it must not be running.
-NOTEPAD_CHECKS = {"O3", "O4", "H1", "H8", "I1", "I4", "I5", "I6"}
+NOTEPAD_CHECKS = {"O3", "O4", "O8", "H1", "H8", "I1", "I4", "I5", "I6"}
 
 
 def base_config(hotkey):
@@ -152,8 +152,9 @@ class StartupProbeLease:
 
 
 def start_input_guard(guard, selected, win32, meta):
-    """For H8, prove the first probe with a focused, message-pumped owned window."""
-    if not any(check.id == "H8" for check in selected):
+    """For H8 or O8 alone, keep the first probe passive until a verified target focuses."""
+    if not (any(check.id == "H8" for check in selected) or
+            len(selected) == 1 and selected[0].id == "O8"):
         guard.start()
         return None
 
@@ -315,6 +316,8 @@ def main(argv=None):
         selected = catalog.select(args.only or None, args.group or None)
     except catalog.SelectionError as error:
         parser.error(str(error))
+    if any(check.id == "O8" for check in selected) and (len(selected) != 1 or args.repeat != 1):
+        parser.error("O8 requires --only O8 and --repeat 1 (four observations maximum)")
 
     import win32
     win32.require_windows()
@@ -349,7 +352,7 @@ def main(argv=None):
     results, aborted = [], ""
     # Include hook/pump state in the actual suite report, where P4 has lost the probe.
     guard = Guard(diagnostic=True)
-    h8_selected = any(check.id == "H8" for check in selected)
+    probe_lease_selected = any(check.id == "H8" for check in selected) or selected[0].id == "O8"
     session = None
     startup_lease = None
     ctx = None
@@ -363,13 +366,13 @@ def main(argv=None):
         restorer.push("restore the clipboard text", lambda: win32.set_clipboard_text(clipboard_before))
         session.install_engine()
         session.install(fetch_model(build, cache / "models"))
-        if h8_selected:
+        if probe_lease_selected:
             meta["guard_startup"] = {"phase": "banner", "banner_shown": not args.no_banner,
                                      "pre_banner_desktop_context": win32.desktop_context()}
         banner_started = time.monotonic()
         if not args.no_banner:
             targets.show_banner(BANNER_SECONDS)
-        if h8_selected:
+        if probe_lease_selected:
             meta["guard_startup"]["banner_elapsed_s"] = round(time.monotonic() - banner_started, 3)
         if win32.idle_seconds() < BANNER_SECONDS:
             raise UserInput("input during the start countdown")

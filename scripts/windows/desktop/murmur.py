@@ -112,6 +112,7 @@ class MurmurSession:
         self._log_offset = 0
         self._launch_count = 0
         self._launch_output = None
+        self.settings_hide_observation = None
 
     # ------------------------------------------------------------ profile
     @property
@@ -231,7 +232,12 @@ class MurmurSession:
                 if not keep_settings:
                     self.guard.sleep(1.0)
                     win32.close_window(hwnd)
-                    win32.wait_for(lambda: not self.settings_hwnd(), 5, sleep=self.guard.sleep)
+                    hidden = win32.wait_for(lambda: not self.settings_hwnd(), 5, sleep=self.guard.sleep)
+                    # Preserve the existing launch behavior, including a timeout. O8 reports
+                    # this lifecycle outcome rather than hiding Settings a second time.
+                    self.settings_hide_observation = {
+                        "hwnd": hwnd, "wait_succeeded": bool(hidden),
+                        "visible_after_wait": bool(self.settings_hwnd())}
                     mark("Murmur:settings-hidden")
             self.guard.sleep(1.5)  # engine and hotkeys come up
             mark("Murmur:startup-wait-complete")

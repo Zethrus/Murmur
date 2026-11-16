@@ -26,6 +26,7 @@ from checks import insertion as insertion_checks  # noqa: E402
 from checks import hotkeys as hotkey_checks  # noqa: E402
 from checks import microphone as microphone_checks  # noqa: E402
 from checks import common as common_checks  # noqa: E402
+from checks import overlay as overlay_checks  # noqa: E402
 import fixtures  # noqa: E402
 import golden  # noqa: E402
 import guard  # noqa: E402
@@ -1413,6 +1414,7 @@ class DesktopFollowupTests(unittest.TestCase):
             self.assertIn("click relative to overlay/hit client (physical px): (26, 20); (26, 20)", evidence)
             self.assertIn("stage=6", evidence)
 
+
     def test_h4_failure_records_exact_fixture_boundary_and_app_qa_log(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixture.wav"
@@ -1675,6 +1677,256 @@ class DesktopFollowupTests(unittest.TestCase):
                 with self.assertRaisesRegex(Fail, "Sounds mute.*did not set"):
                     tray.t2_tray_menu(ctx)
             self.assertEqual(invoke.call_count, 4)
+
+
+class O8ForegroundDiagnosticTests(unittest.TestCase):
+    def test_launch_records_settings_hide_timeout_without_retrying_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = murmur.MurmurSession(SimpleNamespace(), directory,
+                                           SimpleNamespace(sleep=lambda _seconds: None), {})
+            session.home.mkdir()
+            session.prepare = mock.Mock(return_value=session)
+            session.env = mock.Mock(return_value={})
+            session._wait_for_window = mock.Mock(side_effect=[44, 33])
+            session.settings_hwnd = mock.Mock(return_value=33)
+            with mock.patch.object(murmur.subprocess, "Popen", return_value=SimpleNamespace(pid=71)), \
+                 mock.patch.object(murmur.win32, "close_window") as close, \
+                 mock.patch.object(murmur.win32, "wait_for", return_value=None) as wait:
+                session.launch(wav="a.wav")
+            close.assert_called_once_with(33)
+            wait.assert_called_once()
+            self.assertEqual(session.settings_hide_observation,
+                             {"hwnd": 33, "wait_succeeded": False, "visible_after_wait": True})
+
+    def test_o8_one_held_gesture_keeps_o2_movement_oracle_and_renderer_hit(self):
+        rect = [(934, 964, 986, 1004)]
+        session = SimpleNamespace(process=SimpleNamespace(pid=71), running=lambda: True,
+                                  overlay_hwnd=lambda: 44, log=lambda: "drag started\n")
+        ctx = SimpleNamespace(murmur=session, guard=SimpleNamespace(check=mock.Mock()),
+                              restorer=SimpleNamespace(push=mock.Mock()), sleep=lambda _: None)
+        context = {"hwnd": 52, "process_id": 99, "input_desktop": "Default", "gui_status": "ok"}
+        def ancestor(hwnd, _kind):
+            return {45: 44, 52: 52}.get(hwnd, hwnd)
+        long_ptr = mock.Mock(return_value=0)
+        user32 = SimpleNamespace(GetAncestor=ancestor, WindowFromPoint=lambda _point: 45,
+                                 GetWindowLongPtrW=long_ptr, IsWindowVisible=lambda _h: 1,
+                                 IsWindowEnabled=lambda _h: 1, GetAsyncKeyState=lambda _key: 0x8000)
+        def drag(_start, _end, *, steps, release, sample):
+            self.assertEqual((steps, release), (25, False))
+            sample("at-start", 0)
+            rect[0] = (634, 764, 686, 804)
+            sample("moving", 25)
+        with mock.patch.object(overlay_checks, "overlay_drag_point", return_value=((960, 984),
+                                                                                      (938, 968, 982, 1000))), \
+             mock.patch.object(win32, "foreground_context", return_value=context), \
+             mock.patch.object(win32, "window_pid", side_effect=lambda hwnd: {44: 71, 45: 200}[hwnd]), \
+             mock.patch.object(win32, "window_rect", side_effect=lambda _hwnd: rect[0]), \
+             mock.patch.object(win32, "outer_rect", side_effect=lambda _hwnd: rect[0]), \
+             mock.patch.object(win32, "client_origin", return_value=(934, 964)), \
+             mock.patch.object(win32, "client_size", return_value=(52, 40)), \
+             mock.patch.object(win32, "dpi_scale", return_value=1), \
+             mock.patch.object(win32, "class_name", return_value="renderer"), \
+             mock.patch.object(win32, "find_windows", return_value=[]), \
+             mock.patch.object(win32, "input_desktop", return_value="Default"), \
+             mock.patch.object(win32, "cursor", return_value=(660, 784)), \
+             mock.patch.object(win32, "is_window", return_value=True), \
+             mock.patch.object(win32, "user32", user32), \
+             mock.patch.object(win32, "drag", side_effect=drag) as injected, \
+             mock.patch.object(win32, "mouse_up") as up:
+            observations = []
+            row = overlay_checks._o8_drag(ctx, "owned Notepad foreground", 71, (52, 99),
+                                          -1, observations)
+        injected.assert_called_once()
+        up.assert_called_once()
+        self.assertTrue(row["moved_while_held"])
+        self.assertEqual(row["hit_before"]["pid"], 200)
+        self.assertEqual(row["click_in_hit_client"], (26, 20))
+        self.assertEqual(len(row["held_samples"]), 2)
+        self.assertEqual(observations, [row])
+
+    def make_context(self, directory, events, *, movements=(True, True, True, True)):
+        pad = SimpleNamespace(hwnd=52, owner_pid=99, owned_tab=True,
+                              active_document=lambda: True, owns_keyboard_focus=lambda: True)
+        pad.focus = mock.Mock()
+        session = SimpleNamespace(process=SimpleNamespace(pid=71), running=lambda: True,
+                                  overlay_hwnd=lambda: 44,
+                                  ensure=mock.Mock(side_effect=lambda *_a: events.append("ensure")),
+                                  log=lambda **_kw: "QA overlay drag probe stage=4\nstage=5\nstage=6",
+                                  settings_hide_observation={"wait_succeeded": True, "visible_after_wait": False},
+                                  restart=mock.Mock(side_effect=lambda: events.append("restart")),
+                                  show_settings=mock.Mock(side_effect=lambda: events.append("show_settings") or 33))
+        ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav")},
+                              restorer=SimpleNamespace(push=mock.Mock()), guard=SimpleNamespace(check=mock.Mock()),
+                              startup_probe_lease=SimpleNamespace(closed=False),
+                              artifact=lambda suffix: Path(directory) / suffix, note=mock.Mock(),
+                              sleep=lambda _seconds: None)
+        def focus():
+            events.append("notepad_focus")
+            ctx.startup_probe_lease.closed = True
+        pad.focus.side_effect = focus
+        def notepad(*_args):
+            events.append("create_notepad")
+            return pad
+        ctx.notepad = notepad
+        positions = [(634, 764, 686, 804), (934, 964, 986, 1004),
+                     (634, 764, 686, 804), (934, 964, 986, 1004)]
+        def drag(_ctx, label, pid, expected, direction, observations):
+            index = len(observations)
+            events.append(("drag", label, pid, expected, direction, ctx.startup_probe_lease.closed))
+            row = {"case": label, "moved_while_held": movements[index], "after": positions[index],
+                   "foreground_before": {"hwnd": 8, "process_id": 8},
+                   "foreground_root": 8, "foreground_after": {"hwnd": 8, "process_id": 8},
+                   "foreground_after_root": 8}
+            observations.append(row)
+            return row
+        return ctx, session, pad, drag
+
+    def test_o8_order_one_process_and_first_cold_gesture_precedes_notepad(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            ctx, session, pad, drag = self.make_context(directory, events)
+            with mock.patch.object(overlay_checks, "_o8_drag", side_effect=drag), \
+                 mock.patch.object(overlay_checks.win32, "wait_for", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "pids", return_value=[99]), \
+                 mock.patch.object(overlay_checks.win32, "window_pid", side_effect=lambda hwnd: {52: 99, 33: 71}[hwnd]), \
+                 mock.patch.object(overlay_checks.win32, "is_window", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "activate", side_effect=lambda *_: events.append("activate_settings") or True), \
+                 mock.patch.object(overlay_checks.win32, "window_rect", return_value=(934, 964, 986, 1004)):
+                overlay_checks.o8_foreground_drag(ctx)
+            drags = [row for row in events if isinstance(row, tuple)]
+            self.assertEqual([row[1] for row in drags], ["cold foreground untouched",
+                             "owned Notepad foreground", "owned Murmur Settings foreground",
+                             "same owned Notepad foreground"])
+            self.assertEqual([row[2] for row in drags], [71] * 4)
+            self.assertEqual([row[4] for row in drags], [-1, 1, -1, 1])
+            self.assertFalse(drags[0][5])
+            self.assertLess(events.index(("drag", "cold foreground untouched", 71, None, -1, False)),
+                            events.index("create_notepad"))
+            self.assertEqual(pad.focus.call_count, 2)
+            self.assertEqual(session.ensure.call_count, 1)
+            self.assertEqual(session.restart.call_count, 1)
+            record = json.loads((Path(directory) / "foreground-drag-diagnostic.json").read_text())
+            self.assertEqual(record["status"], "inconclusive")
+            self.assertTrue(record["restart"]["within_2px"])
+
+    def test_o8_latches_early_failure_even_after_later_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            ctx, session, _pad, drag = self.make_context(directory, events,
+                                                          movements=(False, True, True, True))
+            with mock.patch.object(overlay_checks, "_o8_drag", side_effect=drag), \
+                 mock.patch.object(overlay_checks.win32, "wait_for", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "pids", return_value=[99]), \
+                 mock.patch.object(overlay_checks.win32, "window_pid", side_effect=lambda hwnd: {52: 99, 33: 71}[hwnd]), \
+                 mock.patch.object(overlay_checks.win32, "is_window", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "activate", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "window_rect", return_value=(934, 964, 986, 1004)):
+                with self.assertRaisesRegex(Fail, "cold foreground untouched: no held movement"):
+                    overlay_checks.o8_foreground_drag(ctx)
+            record = json.loads((Path(directory) / "foreground-drag-diagnostic.json").read_text())
+            self.assertEqual(len(record["cases"]), 4)
+            self.assertEqual(record["status"], "fail")
+            session.restart.assert_called_once()
+
+    def test_o8_retains_every_movement_failure_and_makes_no_persistence_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            ctx, session, _pad, drag = self.make_context(directory, events,
+                                                          movements=(False, False, False, False))
+            with mock.patch.object(overlay_checks, "_o8_drag", side_effect=drag), \
+                 mock.patch.object(overlay_checks.win32, "wait_for", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "pids", return_value=[99]), \
+                 mock.patch.object(overlay_checks.win32, "window_pid", side_effect=lambda hwnd: {52: 99, 33: 71}[hwnd]), \
+                 mock.patch.object(overlay_checks.win32, "is_window", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "activate", return_value=True):
+                with self.assertRaises(Fail):
+                    overlay_checks.o8_foreground_drag(ctx)
+            record = json.loads((Path(directory) / "foreground-drag-diagnostic.json").read_text())
+            self.assertEqual(len(record["failures"]), 4)
+            self.assertEqual(len(record["cases"]), 4)
+            self.assertFalse(record["restart"]["verified"])
+            session.restart.assert_not_called()
+
+    def test_o8_records_settings_hide_timeout_without_treating_later_drags_as_clean(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            ctx, session, _pad, drag = self.make_context(directory, events)
+            session.settings_hide_observation = {"wait_succeeded": False, "visible_after_wait": True}
+            with mock.patch.object(overlay_checks, "_o8_drag", side_effect=drag), \
+                 mock.patch.object(overlay_checks.win32, "wait_for", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "pids", return_value=[99]), \
+                 mock.patch.object(overlay_checks.win32, "window_pid", side_effect=lambda hwnd: {52: 99, 33: 71}[hwnd]), \
+                 mock.patch.object(overlay_checks.win32, "is_window", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "activate", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "window_rect", return_value=(934, 964, 986, 1004)):
+                with self.assertRaisesRegex(Fail, "Settings hide after cold launch"):
+                    overlay_checks.o8_foreground_drag(ctx)
+            record = json.loads((Path(directory) / "foreground-drag-diagnostic.json").read_text())
+            self.assertEqual(record["status"], "fail")
+            self.assertEqual(len(record["cases"]), 4)
+            self.assertFalse(record["settings_hide_on_launch"]["wait_succeeded"])
+
+    def test_o8_refuses_notepad_activation_when_window_owner_changed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            ctx, session, pad, drag = self.make_context(directory, events)
+            pad.owner_pid = 100
+            with mock.patch.object(overlay_checks, "_o8_drag", side_effect=drag), \
+                 mock.patch.object(overlay_checks.win32, "wait_for", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "pids", return_value=[99]):
+                with self.assertRaisesRegex(Fail, "Notepad ownership was not verified"):
+                    overlay_checks.o8_foreground_drag(ctx)
+            self.assertEqual(pad.focus.call_count, 0)
+            self.assertNotIn("show_settings", events)
+            session.restart.assert_not_called()
+            record = json.loads((Path(directory) / "foreground-drag-diagnostic.json").read_text())
+            self.assertEqual(len(record["cases"]), 1)
+
+    def test_o8_skips_restart_claim_when_failed_later_drag_changes_position(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            ctx, session, _pad, drag = self.make_context(directory, events,
+                                                          movements=(True, False, False, False))
+            with mock.patch.object(overlay_checks, "_o8_drag", side_effect=drag), \
+                 mock.patch.object(overlay_checks.win32, "wait_for", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "pids", return_value=[99]), \
+                 mock.patch.object(overlay_checks.win32, "window_pid", side_effect=lambda hwnd: {52: 99, 33: 71}[hwnd]), \
+                 mock.patch.object(overlay_checks.win32, "is_window", return_value=True), \
+                 mock.patch.object(overlay_checks.win32, "activate", return_value=True):
+                with self.assertRaisesRegex(Fail, "owned Notepad foreground: no held movement"):
+                    overlay_checks.o8_foreground_drag(ctx)
+            record = json.loads((Path(directory) / "foreground-drag-diagnostic.json").read_text())
+            self.assertEqual(len(record["cases"]), 4)
+            self.assertFalse(record["restart"]["verified"])
+            session.restart.assert_not_called()
+
+    def test_o8_guard_abort_and_notepad_setup_failure_stop_without_settings(self):
+        for failure in (guard.UserInput("real input"), RuntimeError("Notepad spawn failed")):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                events = []
+                ctx, session, _pad, drag = self.make_context(directory, events)
+                if isinstance(failure, guard.UserInput):
+                    def aborting_drag(*args):
+                        if len(args[-1]) == 1:
+                            raise failure
+                        return drag(*args)
+                    trial = aborting_drag
+                else:
+                    trial = drag
+                    def broken_notepad(*_args):
+                        events.append("create_notepad")
+                        raise failure
+                    ctx.notepad = broken_notepad
+                with mock.patch.object(overlay_checks, "_o8_drag", side_effect=trial), \
+                     mock.patch.object(overlay_checks.win32, "wait_for", return_value=True), \
+                     mock.patch.object(overlay_checks.win32, "pids", return_value=[99]), \
+                     mock.patch.object(overlay_checks.win32, "window_pid", return_value=99):
+                    with self.assertRaises(type(failure)):
+                        overlay_checks.o8_foreground_drag(ctx)
+                record = json.loads((Path(directory) / "foreground-drag-diagnostic.json").read_text())
+                self.assertIn(record["status"], ("aborted", "fail"))
+                self.assertNotIn("show_settings", events)
+                session.restart.assert_not_called()
 
 
 class ReportTests(unittest.TestCase):
@@ -1997,6 +2249,9 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(listed - covered, set())
 
     def test_selection(self):
+        self.assertNotIn("O8", [check.id for check in catalog.select()])
+        self.assertEqual([check.id for check in catalog.select("O8")], ["O8"])
+        self.assertIn("O8", run.NOTEPAD_CHECKS)
         self.assertEqual([c.id for c in catalog.select("f2, h1")], ["H1", "F2"])
         self.assertEqual([c.group for c in catalog.select(group="focus")], ["focus"] * 11)
         self.assertEqual([c.id for c in catalog.select("H1,F2", "focus")], ["F2"])
@@ -2009,6 +2264,12 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(catalog.SelectionError, "matches no checks"):
             catalog.select("H1", "focus")
         self.assertEqual(catalog.parse_ids(" h1 ;H1, f13 "), ["H1", "F13"])
+
+    def test_o8_refuses_mixed_or_repeated_selection_before_input(self):
+        for extra in (("--only", "O8,O2"), ("--only", "O8", "--repeat", "2")):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit) as error:
+                run.main(["--build", "unused", "--out", "unused", *extra])
+            self.assertEqual(error.exception.code, 2)
 
     def test_overlay_error_state_check_is_ordered_before_the_drag(self):
         overlay = [c.id for c in catalog.select(group="overlay")]
@@ -3031,7 +3292,7 @@ class OwnedProbeWindowTests(unittest.TestCase):
         window_factory.assert_not_called()
 
     def test_h1_first_and_h8_only_keep_one_guard_and_window_until_target_focus(self):
-        for selection in ("H1,H8", "H8"):
+        for selection in ("H1,H8", "H8", "O8"):
             with self.subTest(selection=selection):
                 self._assert_startup_lease(selection)
 
@@ -3249,7 +3510,8 @@ class OwnedProbeWindowTests(unittest.TestCase):
                  ("H8", 1, RuntimeError("check setup failed"), False, False, False),
                  ("H8", 1, ([], ""), True, False, False),
                  ("H8", 1, ([], ""), False, True, False),
-                 ("H1,H8", 1, ([], ""), False, False, True))
+                 ("H1,H8", 1, ([], ""), False, False, True),
+                 ("O8", 1, ([], ""), False, False, False))
         for selection, repeat, outcome, stop_error, close_error, cleanup_error in cases:
             with self.subTest(selection=selection, repeat=repeat, outcome=outcome,
                               stop_error=stop_error, close_error=close_error, cleanup_error=cleanup_error):
