@@ -11,6 +11,7 @@ SHIFT_HOTKEY = "Ctrl+Shift+F9"          # H3 (B8): a hotkey that includes Shift
 BLOCKED_HOTKEY = "Ctrl+Alt+Shift+F10"   # H6: registered by the harness, so Murmur cannot have it
 D_HOTKEY = "Ctrl+Alt+D"                 # F13: Murmur's default, contains "d"
 HOLD_FOR_SECONDS = 120                  # src-tauri/src/held.rs HOLD_FOR
+NOTEPAD_OUTPUT_TIMEOUT = 45             # Notepad's existing completion/readback allowance
 SIZE = re.compile(r"\b\d+(?:\.\d+)? ?(?:KB|MB|GB)\b")
 # Component badges (src/settings/widgets/component.ts, STATE).
 BADGE = r"^(Not installed|Queued|Installing|Installed|Active|Paused|Failed|Unverified|Damaged)$"
@@ -101,11 +102,16 @@ def require_empty(*targets_):
 def confirm_notepad_output(ctx, pad):
     """Wait for this utterance's history before querying Notepad during delivery."""
     try:
-        ctx.observed_text()
+        ctx.observed_text(timeout=NOTEPAD_OUTPUT_TIMEOUT)
     except Fail:
-        # No output (including a held refusal) remains a failure. Capture the
-        # document only after the overlay has settled or entered held state.
+        # The history gate never reads Notepad. Let the app finish before any
+        # diagnostic UIA access, and record its resulting state with the log.
         state = ctx.settle()
+        try:
+            ctx.capture_output_failure(terminal_state=state)
+        except Exception as error:  # noqa: BLE001 - preserve the output failure
+            ctx.note(f"output diagnostics failed: {type(error).__name__}: {error}")
+        # No output (including a held refusal) remains a failure.
         if state not in ("done", "idle", "held"):
             ctx.note(f"Notepad diagnostics skipped while overlay state was {state!r}")
             raise

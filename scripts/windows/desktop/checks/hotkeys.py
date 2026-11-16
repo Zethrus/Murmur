@@ -6,7 +6,8 @@ import time
 import golden
 import guard
 import win32
-from checks.common import BLOCKED_HOTKEY, CODE_HOTKEY, SHIFT_HOTKEY, confirm_notepad_output
+from checks.common import (BLOCKED_HOTKEY, CODE_HOTKEY, SHIFT_HOTKEY, NOTEPAD_OUTPUT_TIMEOUT,
+                           confirm_notepad_output)
 from context import Fail, OutputCount
 
 
@@ -113,20 +114,33 @@ def _notepad_focus_trial(ctx, spec, name, phases, previous_hwnd=None):
         for modifier in reversed(modifiers):
             win32.key_up(modifier)
             timestamp(f"after {modifier} up")
+        ctx.mark_delivery_released()
         timestamp("before delivery wait")
         try:
-            expected = ctx.observed_text()
+            expected = ctx.observed_text(timeout=NOTEPAD_OUTPUT_TIMEOUT)
             output_error = None
             timestamp("history confirmed")
         except OutputCount as error:
             expected = None
             output_error = error
             timestamp("history unavailable")
-        actual = pad.wait_text(timeout=8, stable=1.2, sleep=ctx.sleep)
-        ctx.settle()
+        if output_error:
+            state = ctx.settle()
+            try:
+                ctx.capture_output_failure(f"{name}-output-failure", terminal_state=state)
+            except Exception as diagnostic_error:  # noqa: BLE001 - retain the output failure
+                ctx.note(f"output diagnostics failed: {type(diagnostic_error).__name__}: {diagnostic_error}")
+            overlay = ctx.murmur.overlay_state()
+            # A timed-out producer may still be delivering. Do not query the editor until
+            # the app reaches a terminal state; the missing history is already a failure.
+            actual = (pad.wait_text(timeout=8, stable=1.2, sleep=ctx.sleep)
+                      if overlay in ("done", "idle", "held") else "")
+        else:
+            actual = pad.wait_text(timeout=8, stable=1.2, sleep=ctx.sleep)
+            ctx.settle()
+            overlay = ctx.murmur.overlay_state()
         if expected is not None:
             sample("after delivery wait")
-        overlay = ctx.murmur.overlay_state()
         status = ("held_refused" if output_error and output_error.count == 0 and overlay == "held"
                   else "no_output" if output_error and output_error.count == 0
                   else "multiple_outputs" if output_error else "output")
@@ -222,6 +236,9 @@ def h8_focus_phases(ctx):
                     log_artifact = ctx.artifact(f"{name}-app-log.txt")
                     log_artifact.write_text(ctx.murmur.log()[log_start:], encoding="utf-8")
                     results[name]["app_log_artifact"] = log_artifact.name
+            if (observation.get("output_error") and observation.get("overlay") not in
+                    ("done", "idle", "held")):
+                raise Fail(f"{name}: {observation['output_error']} (overlay: {observation['overlay']})")
             _capture_notepad_trial(ctx, name, results[name], pad, expected)
             previous_hwnd = pad.hwnd
             if name == "no-alt" and any(results[name][key] for key in

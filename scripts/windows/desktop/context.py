@@ -6,6 +6,7 @@ focus the target, hold the hotkey for the length of the spoken sentence, release
 order, then wait for the text to settle.
 """
 from pathlib import Path
+import json
 import time
 
 import golden
@@ -59,6 +60,8 @@ class Context:
         self._targets = []
         self._delivery_cursor = None
         self._delivery_fixture = None
+        self._delivery_released_at = None
+        self._delivery_wait_elapsed = None
 
     # ------------------------------------------------------------ bookkeeping
     def begin(self, check_id, attempt=1):
@@ -66,6 +69,7 @@ class Context:
         self.attempt = attempt
         self.artifacts, self.notes = [], []
         self._delivery_cursor = self._delivery_fixture = None
+        self._delivery_released_at = self._delivery_wait_elapsed = None
         # Only dictation checks opt into the app's existing history in this disposable profile.
         # Settings/Privacy screenshots retain the default-off setting. The next ensure() applies
         # this base configuration before the check drives Murmur.
@@ -222,7 +226,9 @@ class Context:
             self.sleep(speech + HOLD_MARGIN)
             if during:
                 during(self)
-            return self.release(hotkey, order)
+            released = self.release(hotkey, order)
+            self.mark_delivery_released()
+            return released
         self.tap_hotkey(hotkey)
         if not self.murmur.wait_state("listening", 5):
             raise Fail(f"Toggle dictation did not start (overlay: {self.murmur.overlay_state()})")
@@ -230,19 +236,29 @@ class Context:
         if during:
             during(self)
         self.tap_hotkey(hotkey)
+        self.mark_delivery_released()
         return time.time()
 
     def observe_delivery(self, fixture):
         """Start an exact observation before a manually driven or ordinary utterance."""
         self._delivery_cursor = self.murmur.history_cursor()
         self._delivery_fixture = fixture
+        self._delivery_released_at = self._delivery_wait_elapsed = None
 
-    def observed_text(self):
+    def mark_delivery_released(self):
+        """Record when the last hotkey key went up for failure timing evidence."""
+        self._delivery_released_at = time.monotonic()
+
+    def observed_text(self, timeout=5):
         """Exactly one output for the current utterance, saved before target readback."""
         if self._delivery_cursor is None:
             raise Fail("No per-utterance output observation was started")
-        rows = win32.wait_for(lambda: self.murmur.history_after(self._delivery_cursor), 5, 0.1,
-                              sleep=self.sleep) or []
+        started = time.monotonic()
+        try:
+            rows = win32.wait_for(lambda: self.murmur.history_after(self._delivery_cursor), timeout, 0.1,
+                                  sleep=self.sleep) or []
+        finally:
+            self._delivery_wait_elapsed = round(time.monotonic() - started, 3)
         if len(rows) != 1:
             raise OutputCount(len(rows))
         text = rows[0][1]
@@ -250,6 +266,23 @@ class Context:
         if fidelity:
             raise Fail(fidelity)
         return text
+
+    def capture_output_failure(self, suffix="output-failure", terminal_state=None):
+        """Preserve synthetic-profile app evidence without reading the target during delivery."""
+        state = {"history_cursor_before": self._delivery_cursor,
+                 "history_wait_elapsed_s": self._delivery_wait_elapsed,
+                 "settle_state": terminal_state,
+                 "seconds_since_release": (round(time.monotonic() - self._delivery_released_at, 3)
+                                           if self._delivery_released_at is not None else None)}
+        for label, read in (("history_count_after", lambda: len(self.murmur.history_after(self._delivery_cursor))),
+                            ("history_cursor_after", self.murmur.history_cursor),
+                            ("overlay_state", self.murmur.overlay_state)):
+            try:
+                state[label] = read()
+            except Exception as error:  # noqa: BLE001 - diagnostics must preserve the original failure
+                state[label + "_error"] = f"{type(error).__name__}: {error}"
+        self.artifact(f"{suffix}-state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+        self.artifact(f"{suffix}-app-log.txt").write_text(self.murmur.log(since_launch=True), encoding="utf-8")
 
     def expect_delivery(self, actual, where):
         expected = self.observed_text()

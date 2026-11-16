@@ -252,7 +252,8 @@ class ImportTests(unittest.TestCase):
                                   overlay_state=lambda: "done")
         ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
                               notepad=lambda *_, **__: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
-                              observed_text=lambda: "full", settle=mock.Mock(),
+                              observed_text=lambda **_: "full", mark_delivery_released=mock.Mock(),
+                              settle=mock.Mock(),
                               guard=SimpleNamespace(start_key_trace=mock.Mock(),
                                                     stop_key_trace=lambda: {"events": [], "overflow": False}))
         with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
@@ -315,6 +316,7 @@ class ImportTests(unittest.TestCase):
         ctx.fixtures = {"A": SimpleNamespace(path="a.wav", speech_seconds=0)}
         ctx.notepad = lambda *_, **__: pad
         ctx.sleep = lambda _: None
+        ctx.mark_delivery_released = lambda: None
         ctx.settle = lambda: events.append(("settled", None))
         ctx.guard = SimpleNamespace(start_key_trace=mock.Mock(),
                                     stop_key_trace=mock.Mock(return_value={"events": [], "overflow": False}))
@@ -368,6 +370,7 @@ class ImportTests(unittest.TestCase):
         ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
                               notepad=lambda *_, **__: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
                               observed_text=mock.Mock(side_effect=OutputCount(0)), settle=mock.Mock(),
+                              mark_delivery_released=mock.Mock(), capture_output_failure=mock.Mock(),
                               guard=SimpleNamespace(start_key_trace=mock.Mock(),
                                                     stop_key_trace=lambda: {"events": [], "overflow": False}))
         with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}) as focus, \
@@ -384,6 +387,29 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(focus.call_count, 5)
         release.assert_called_once_with()
 
+    def test_h8_missing_history_does_not_read_notepad_while_app_is_transcribing(self):
+        pad = SimpleNamespace(focus=mock.Mock(), wait_text=mock.Mock())
+        ctx = SimpleNamespace(murmur=SimpleNamespace(ensure=mock.Mock(), wait_state=lambda *_: True,
+                                                     overlay_state=lambda: "transcribing"),
+                              fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
+                              notepad=lambda *_, **__: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
+                              mark_delivery_released=mock.Mock(),
+                              observed_text=mock.Mock(side_effect=OutputCount(0)),
+                              capture_output_failure=mock.Mock(), settle=mock.Mock(return_value="transcribing"),
+                              guard=SimpleNamespace(start_key_trace=mock.Mock(),
+                                                    stop_key_trace=lambda: {"events": [], "overflow": False}))
+        with mock.patch.object(hotkey_checks, "_focus_phase", side_effect=lambda _pad, stage: {"stage": stage}), \
+             mock.patch.object(win32, "key_down"), mock.patch.object(win32, "key_up"), \
+             mock.patch.object(win32, "release_all"):
+            _, _, expected, observation = hotkey_checks._notepad_focus_trial(
+                ctx, "Ctrl+Alt+Shift+F9", "alt", [])
+        self.assertIsNone(expected)
+        self.assertEqual(observation["status"], "no_output")
+        self.assertEqual(observation["target_chars"], 0)
+        ctx.observed_text.assert_called_once_with(timeout=45)
+        ctx.capture_output_failure.assert_called_once_with("alt-output-failure", terminal_state="transcribing")
+        pad.wait_text.assert_not_called()
+
     def test_h8_history_error_cleans_up_without_post_release_focus_read(self):
         phases = []
         pad = SimpleNamespace(focus=mock.Mock(), wait_text=mock.Mock())
@@ -391,6 +417,7 @@ class ImportTests(unittest.TestCase):
                               fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
                               notepad=lambda *_, **__: pad, observe_delivery=mock.Mock(), sleep=lambda _: None,
                               observed_text=mock.Mock(side_effect=RuntimeError("history unavailable")),
+                              mark_delivery_released=mock.Mock(),
                               guard=SimpleNamespace(start_key_trace=mock.Mock(),
                                                     stop_key_trace=mock.Mock(return_value={
                                                         "events": [], "overflow": False})))
@@ -488,7 +515,7 @@ class ImportTests(unittest.TestCase):
                                    return_value=(pads[0], None, "full", {"probes_during_input": 1})), \
                  mock.patch.object(hotkey_checks, "_notepad_focus_trial",
                                    side_effect=[(pads[1], None, None,
-                                                 {"status": "held_refused", "output_error":
+                                                 {"status": "held_refused", "overlay": "held", "output_error":
                                                   "Expected one output for this utterance, found 0"}),
                                                 (pads[2], None, "full",
                                                  {"status": "output", "output_error": None})]) as trial:
@@ -498,6 +525,26 @@ class ImportTests(unittest.TestCase):
             evidence = json.loads((Path(directory) / "focus-phases.json").read_text())
             self.assertEqual(evidence["alt"]["observation"]["status"], "held_refused")
             self.assertIn("no-alt", evidence)
+
+    def test_hotkey_probe_stops_before_target_capture_if_output_never_settles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix,
+                                  murmur=SimpleNamespace(log=lambda: "synthetic log"))
+            with mock.patch.object(hotkey_checks, "_notepad_direct_control",
+                                   return_value=(SimpleNamespace(hwnd=1), None, "control",
+                                                 {"probes_during_input": 1})), \
+                 mock.patch.object(hotkey_checks, "_notepad_focus_trial",
+                                   return_value=(object(), None, None,
+                                                 {"status": "no_output", "output_error": "found 0",
+                                                  "overlay": "transcribing"})) as trial, \
+                 mock.patch.object(hotkey_checks, "_capture_notepad_trial") as capture:
+                with self.assertRaisesRegex(Fail, "alt: found 0"):
+                    hotkey_checks.h8_focus_phases(ctx)
+            trial.assert_called_once()
+            self.assertEqual(capture.call_count, 1)  # direct control only
+            evidence = json.loads((Path(directory) / "focus-phases.json").read_text())
+            self.assertEqual(evidence["alt"]["observation"]["overlay"], "transcribing")
+            self.assertNotIn("no-alt", evidence)
 
     def test_h8_keeps_three_owned_tabs_through_ensure_and_captures_each_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -538,7 +585,8 @@ class ImportTests(unittest.TestCase):
             ctx = SimpleNamespace(artifact=lambda suffix: root / suffix, screenshot=mock.Mock(),
                                   murmur=session, notepad=notepad, restorer=restorer,
                                   fixtures={"A": SimpleNamespace(path="a.wav", speech_seconds=0)},
-                                  observe_delivery=lambda _: None, observed_text=lambda: "full",
+                                  observe_delivery=lambda _: None, observed_text=lambda **_: "full",
+                                  mark_delivery_released=lambda: None,
                                   settle=lambda: None, sleep=lambda _: None,
                                   guard=SimpleNamespace(check=lambda: None,
                                                         diagnostics=lambda: {"probes_seen": 1},
@@ -1097,6 +1145,75 @@ class GoldenTests(unittest.TestCase):
         outputs.append((3, second))
         with self.assertRaisesRegex(Fail, "Expected one output"):
             ctx.observed_text()
+
+    def test_notepad_completion_wait_accepts_history_after_five_seconds_without_early_uia(self):
+        now = [0.0]
+        expected = fixtures.SENTENCES["A"] + " "
+        reads = []
+
+        def history_after(cursor):
+            reads.append(now[0])
+            return [(1, expected)] if now[0] >= 6.0 and cursor == 0 else []
+
+        ctx = Context.__new__(Context)
+        ctx.murmur = SimpleNamespace(history_cursor=lambda: 0, history_after=history_after)
+        ctx.sleep = lambda duration: now.__setitem__(0, now[0] + duration)
+        pad = SimpleNamespace(focus_diagnostic=mock.Mock(), hwnd=42)
+        with mock.patch.object(win32.time, "monotonic", side_effect=lambda: now[0]):
+            ctx.observe_delivery("A")
+            ctx.mark_delivery_released()
+            from checks.common import confirm_notepad_output
+            confirm_notepad_output(ctx, pad)
+        self.assertGreaterEqual(now[0], 6.0)
+        self.assertLess(now[0], 45.0)
+        self.assertTrue(any(sample >= 5.0 for sample in reads))
+        pad.focus_diagnostic.assert_not_called()
+
+    def test_notepad_completion_timeout_preserves_count_state_timing_and_app_log(self):
+        now = [0.0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ctx = Context.__new__(Context)
+            ctx.murmur = SimpleNamespace(history_cursor=lambda: 0, history_after=lambda _: [],
+                                          overlay_state=lambda: "held", log=lambda **_: "synthetic app log")
+            ctx.sleep = lambda duration: now.__setitem__(0, now[0] + duration)
+            ctx.settle = lambda: "held"
+            ctx.note = mock.Mock()
+            ctx.artifact = lambda suffix: root / suffix
+            ctx.screenshot = mock.Mock()
+            pad = SimpleNamespace(focus_diagnostic=lambda: "synthetic focus", hwnd=42)
+            with mock.patch.object(win32.time, "monotonic", side_effect=lambda: now[0]):
+                ctx.observe_delivery("A")
+                ctx.mark_delivery_released()
+                from checks.common import confirm_notepad_output
+                with self.assertRaises(OutputCount) as failure:
+                    confirm_notepad_output(ctx, pad)
+            self.assertEqual(failure.exception.count, 0)
+            self.assertGreaterEqual(now[0], 45.0)
+            state = json.loads((root / "output-failure-state.json").read_text())
+            self.assertEqual(state["history_count_after"], 0)
+            self.assertEqual(state["overlay_state"], "held")
+            self.assertEqual(state["settle_state"], "held")
+            self.assertGreaterEqual(state["history_wait_elapsed_s"], 45.0)
+            self.assertGreaterEqual(state["seconds_since_release"], 45.0)
+            self.assertEqual((root / "output-failure-app-log.txt").read_text(), "synthetic app log")
+            ctx.screenshot.assert_called_once_with(42, "notepad.png")
+
+    def test_notepad_completion_rejects_duplicate_history_and_propagates_guard_loss(self):
+        expected = fixtures.SENTENCES["A"] + " "
+        ctx = Context.__new__(Context)
+        ctx.murmur = SimpleNamespace(history_cursor=lambda: 0,
+                                      history_after=lambda _: [(1, expected), (2, expected)])
+        ctx.sleep = lambda _: None
+        ctx.observe_delivery("A")
+        with self.assertRaises(OutputCount) as failure:
+            ctx.observed_text(timeout=45)
+        self.assertEqual(failure.exception.count, 2)
+
+        ctx.murmur.history_after = lambda _: []
+        ctx.sleep = lambda _: (_ for _ in ()).throw(guard.GuardUnavailable("probe lost"))
+        with self.assertRaises(guard.GuardUnavailable):
+            ctx.observed_text(timeout=45)
 
     def test_history_oracle_reads_disposable_profile_without_creating_database(self):
         import sqlite3
@@ -2824,7 +2941,7 @@ class NormalNotepadReadbackTests(unittest.TestCase):
                         fixtures.SENTENCES[fixture] + " ")
             target_text = expected if target_text is None else target_text
 
-            def observed_text():
+            def observed_text(**_):
                 events.append("history")
                 if not output:
                     raise OutputCount(0)
@@ -2847,6 +2964,7 @@ class NormalNotepadReadbackTests(unittest.TestCase):
             ctx.notepad = lambda: pad
             ctx.dictate = lambda *_a, **_kw: events.append("dictate")
             ctx.observed_text = observed_text
+            ctx.capture_output_failure = lambda *_, **__: events.append("output-diagnostics")
             ctx.settle = lambda: events.append("settle") or (settled_state or ("done" if output else "held"))
             ctx.screenshot = lambda *_: events.append("screenshot")
             ctx.artifact = lambda suffix: Path(directory) / f"{check_id}-{suffix}"
