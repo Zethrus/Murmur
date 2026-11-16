@@ -20,10 +20,11 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   let state: DictationState = "idle", config: Config | undefined, receivedState = false, receivedConfig = false, lastError = "Dictation unavailable", disposed = false;
   let enhancement: Enhancement = NONE, revision = -1, busy = false, acting = false, dragging = false, localMessage = "";
   let timer: ReturnType<typeof setTimeout> | undefined, expiry: ReturnType<typeof setTimeout> | undefined, noticeTimer: ReturnType<typeof setTimeout> | undefined;
-  let qaDragProbeEnabled = false;
+  let qaDragProbeEnabled = false, qaDragProbeArmed = false, qaSettledReported = false;
   const disposers: (()=>void)[] = [];
   const qaDragProbe = (stage: number, event?: MouseEvent): Promise<boolean> => {
     if (typeof document.elementFromPoint !== "function") return Promise.resolve(false);
+    // The icon hides .drag-handle; its visible pill is the native drag target.
     const box = pill.getBoundingClientRect();
     const x = event?.clientX ?? (box.left + box.right) / 2;
     const y = event?.clientY ?? (box.top + box.bottom) / 2;
@@ -36,7 +37,14 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
       idleIcon: root.dataset.idle === "icon", busy, dragging, button: event?.button ?? -1,
       pillRect: rect(pill), handleRect: rect(handle), targetPointerEvents: pointer(hit),
       pillPointerEvents: pointer(pill), handlePointerEvents: pointer(handle),
+      rootPointerEvents: pointer(root), pillHidden: pill.hidden,
     }});
+  };
+  const reportSettledIcon = (): void => {
+    if (!qaDragProbeArmed || qaSettledReported || disposed || state !== "idle" ||
+        root.dataset.idle !== "icon" || pill.hidden) return;
+    qaSettledReported = true;
+    void qaDragProbe(5).catch(()=>{});
   };
   panel.hidden = true;
   const idleView = (): IdleView => config?.overlay.idle_view ?? "icon";
@@ -46,7 +54,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   const collapse = (): void => {
     if (dragging || active(enhancement) || held.active()) return;
     const view = idleView();
-    if (view === "icon") { root.dataset.idle = "icon"; pill.title = "Drag to move"; pill.hidden = !config?.overlay.enabled; return; }
+    if (view === "icon") { root.dataset.idle = "icon"; pill.title = "Drag to move"; pill.hidden = !config?.overlay.enabled; reportSettledIcon(); return; }
     expand(); if (view === "hidden") pill.hidden = true;
   };
   const scheduleCollapse = (ms: number): void => { clearTimeout(timer); timer = setTimeout(collapse,ms); };
@@ -214,5 +222,8 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     const onDown = (event: MouseEvent): void => { void qaDragProbe(1, event).catch(()=>{}); };
     root.addEventListener("mousedown", onDown, true);
     disposers.push(() => root.removeEventListener("mousedown", onDown, true));
+    // Stage 4 is logged by Rust only after the capture listener exists. A stage 0
+    // response alone is not evidence that the listener is armed.
+    void qaDragProbe(4).then(armed => { if (armed && !disposed) { qaDragProbeArmed = true; reportSettledIcon(); } }).catch(()=>{});
   }).catch(() => {});
 }

@@ -461,7 +461,7 @@ pub async fn start_overlay_drag(app: AppHandle, window: WebviewWindow) -> Reply<
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QaOverlayDragProbe {
-    stage: u8, // 0 mounted, 1 mouse down, 2 handler accepted, 3 handler refused
+    stage: u8, // 0 mounted, 1 mouse down, 2 accepted, 3 refused, 4 listener armed, 5 settled icon
     x: f64,
     y: f64,
     target_kind: u8, // 0 other, 1 pill, 2 handle, 3 bars
@@ -476,6 +476,18 @@ pub struct QaOverlayDragProbe {
     target_pointer_events: bool,
     pill_pointer_events: bool,
     handle_pointer_events: bool,
+    root_pointer_events: bool,
+    pill_hidden: bool,
+}
+
+fn valid_qa_overlay_drag_probe(probe: &QaOverlayDragProbe) -> bool {
+    probe.stage <= 5
+        && probe.target_kind <= 3
+        && [probe.x, probe.y]
+            .into_iter()
+            .chain(probe.pill_rect)
+            .chain(probe.handle_rect)
+            .all(f64::is_finite)
 }
 
 #[tauri::command]
@@ -484,14 +496,7 @@ pub fn qa_overlay_drag_probe(window: WebviewWindow, probe: QaOverlayDragProbe) -
     if std::env::var_os("MURMUR_QA_WAV").is_none() {
         return Ok(false);
     }
-    if probe.stage > 3
-        || probe.target_kind > 3
-        || ![probe.x, probe.y]
-            .into_iter()
-            .chain(probe.pill_rect)
-            .chain(probe.handle_rect)
-            .all(f64::is_finite)
-    {
+    if !valid_qa_overlay_drag_probe(&probe) {
         return Err("Invalid QA overlay drag probe".into());
     }
     tracing::info!(target: "murmur::qa_overlay_drag", stage = probe.stage,
@@ -503,6 +508,47 @@ pub fn qa_overlay_drag_probe(window: WebviewWindow, probe: QaOverlayDragProbe) -
                    target_pointer_events = probe.target_pointer_events,
                    pill_pointer_events = probe.pill_pointer_events,
                    handle_pointer_events = probe.handle_pointer_events,
+                   root_pointer_events = probe.root_pointer_events, pill_hidden = probe.pill_hidden,
                    "QA overlay drag probe");
     Ok(true)
+}
+
+#[cfg(test)]
+mod qa_overlay_drag_tests {
+    use super::*;
+
+    #[test]
+    fn only_fixed_finite_qa_stages_are_valid() {
+        let mut probe = QaOverlayDragProbe {
+            stage: 0,
+            x: 1.0,
+            y: 2.0,
+            target_kind: 0,
+            hit_pill: false,
+            hit_handle: false,
+            idle_icon: false,
+            busy: false,
+            dragging: false,
+            button: -1,
+            pill_rect: [0.0; 4],
+            handle_rect: [0.0; 4],
+            target_pointer_events: false,
+            pill_pointer_events: false,
+            handle_pointer_events: false,
+            root_pointer_events: false,
+            pill_hidden: false,
+        };
+        for stage in 0..=5 {
+            probe.stage = stage;
+            assert!(valid_qa_overlay_drag_probe(&probe));
+        }
+        probe.stage = 6;
+        assert!(!valid_qa_overlay_drag_probe(&probe));
+        probe.stage = 5;
+        probe.target_kind = 4;
+        assert!(!valid_qa_overlay_drag_probe(&probe));
+        probe.target_kind = 0;
+        probe.handle_rect[0] = f64::NAN;
+        assert!(!valid_qa_overlay_drag_probe(&probe));
+    }
 }

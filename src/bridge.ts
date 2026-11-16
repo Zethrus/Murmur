@@ -19,6 +19,7 @@ export interface QaOverlayDragProbe {
   idleIcon: boolean; busy: boolean; dragging: boolean; button: number;
   pillRect: [number, number, number, number]; handleRect: [number, number, number, number];
   targetPointerEvents: boolean; pillPointerEvents: boolean; handlePointerEvents: boolean;
+  rootPointerEvents: boolean; pillHidden: boolean;
 }
 export interface OverlayPlacement {
   monitor_name: string; monitor_x: number; monitor_y: number; monitor_width: number; monitor_height: number;

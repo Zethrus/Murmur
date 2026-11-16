@@ -1280,6 +1280,19 @@ class DesktopFollowupTests(unittest.TestCase):
             drag.assert_not_called()
             self.assertIn("did not arm", (Path(directory) / "drag-diagnostic.txt").read_text())
 
+    def test_o2_requires_armed_listener_then_settled_visible_icon(self):
+        from checks import overlay
+        stage0 = "QA overlay drag probe stage=0 idle_icon=false"
+        armed = "QA overlay drag probe stage=4 idle_icon=false"
+        settled = "QA overlay drag probe stage=5 idle_icon=true pill_hidden=false"
+        self.assertFalse(overlay._qa_drag_ready(stage0))
+        self.assertFalse(overlay._qa_drag_ready(stage0 + "\n" + settled))
+        self.assertFalse(overlay._qa_drag_ready(stage0 + "\n" + armed))
+        self.assertFalse(overlay._qa_drag_ready(settled + "\n" + armed))
+        self.assertFalse(overlay._qa_drag_ready(armed + "\n" + settled.replace("false", "true")))
+        self.assertFalse(overlay._qa_drag_ready(armed + "\n" + settled.replace("idle_icon=true", "idle_icon=false")))
+        self.assertTrue(overlay._qa_drag_ready(stage0 + "\n" + armed + "\n" + settled))
+
     def test_h4_failure_records_exact_fixture_boundary_and_app_qa_log(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixture.wav"

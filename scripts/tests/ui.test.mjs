@@ -541,19 +541,48 @@ test("the whole idle icon is the drag handle and stays an icon while moving",asy
   release();await settle();h.timers.tick(1500);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);h.unload();
 });
 test("QA drag probe records DOM hit and handler receipt only when enabled",async()=>{
-  const h=await harness({qa_overlay_drag_probe:async()=>true});
+  let h;h=await harness({qa_overlay_drag_probe:async({probe})=>{
+    if(probe.stage===4)assert.equal(h.root.listeners.get("mousedown")?.length,1,"stage 4 follows listener installation");
+    return true;
+  }});
   h.document.elementFromPoint=()=>h.root;
   await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);await settle();
   const pill=h.root.querySelector(".pill"),bar=h.root.querySelector(".bars i");
+  pill.rect={left:10,top:20,right:50,bottom:60,width:40,height:40};
   h.document.elementFromPoint=()=>bar;
   h.timers.tick(1500);
   await h.root.dispatch("mousedown",{button:0,clientX:12,clientY:13});
   await pill.dispatch("mousedown",{button:0,clientX:12,clientY:13});
   const probes=h.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>plain(c.args.probe));
-  assert.deepEqual(probes.map(p=>p.stage),[0,1,2]);
-  assert.equal(probes[1].targetKind,3);assert.equal(probes[1].hitPill,true);
-  assert.equal(probes[1].idleIcon,true);assert.equal(probes[2].dragging,true);
+  assert.deepEqual(probes.map(p=>p.stage),[0,4,5,1,2]);
+  assert.equal(probes[2].idleIcon,true);assert.equal(probes[2].pillHidden,false);
+  assert.equal(probes[2].rootPointerEvents,true);assert.equal(probes[2].targetKind,3);
+  assert.deepEqual(probes[2].pillRect,[10,20,50,60]);assert.deepEqual([probes[2].x,probes[2].y],[30,40]);
+  assert.equal(probes[3].targetKind,3);assert.equal(probes[3].hitPill,true);
+  assert.equal(probes[3].idleIcon,true);assert.equal(probes[4].dragging,true);
   assert.equal(h.drags.length,1);h.unload();
+});
+test("QA icon sample waits for listener acknowledgment and does not alter normal mounts",async()=>{
+  let acknowledge;const h=await harness({qa_overlay_drag_probe:async({probe})=>
+    probe.stage===4?new Promise(resolve=>{acknowledge=resolve;}):true});
+  h.document.elementFromPoint=()=>h.root;
+  await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);await settle();
+  h.timers.tick(1500);
+  assert.deepEqual(h.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>c.args.probe.stage),[0,4]);
+  acknowledge(true);await settle();
+  assert.deepEqual(h.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>c.args.probe.stage),[0,4,5]);
+  h.timers.tick(5000);
+  assert.equal(h.calls.filter(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===5).length,1);
+  h.unload();
+
+  const normal=await harness({qa_overlay_drag_probe:async()=>false});
+  normal.document.elementFromPoint=()=>normal.root;
+  await (await normal.module("overlay/overlay.ts")).mountOverlay(normal.root);await settle();
+  normal.timers.tick(1500);
+  await normal.root.querySelector(".pill").dispatch("mousedown",{button:0});
+  assert.deepEqual(normal.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>c.args.probe.stage),[0]);
+  assert.equal(normal.drags.length,1,"QA disabled leaves the normal drag handler active");
+  assert.equal(normal.root.dataset.idle,"icon");normal.unload();
 });
 test("suggestions, held text and drag errors use the full pill over the idle icon",async()=>{
   const h=await overlay({startOverlayDrag:async()=>{throw new Error("permission denied");}}),pill=h.root.querySelector(".pill"),label=h.root.querySelector(".pill-label");

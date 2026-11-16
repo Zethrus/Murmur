@@ -23,6 +23,16 @@ def _reset_placement(ctx):
     ctx.murmur.config = {}
 
 
+def _qa_drag_ready(log):
+    """A stage-0 handshake precedes listener setup and the icon's final layout."""
+    lines = [line for line in log.splitlines() if "QA overlay drag probe" in line]
+    armed = next((index for index, line in enumerate(lines) if re.search(r"\bstage=4(?:\s|$)", line)), None)
+    return armed is not None and any(
+        re.search(r"\bstage=5(?:\s|$)", line) and "idle_icon=true" in line
+        and "pill_hidden=false" in line for line in lines[armed + 1:]
+    )
+
+
 def o1_states(ctx):
     long = ctx.fixtures["LONG"]
     ctx.murmur.ensure(long.path, {"overlay": {"idle_view": "pill"}})
@@ -72,12 +82,12 @@ def o1_states(ctx):
 def o2_drag(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"overlay": {"idle_view": "icon"}})
     ctx.restorer.push("reset the overlay placement", lambda: _reset_placement(ctx))
-    if not win32.wait_for(lambda: "QA overlay drag probe" in ctx.murmur.log(since_launch=True),
+    if not win32.wait_for(lambda: _qa_drag_ready(ctx.murmur.log(since_launch=True)),
                           5, 0.1, sleep=ctx.sleep):
         ctx.artifact("drag-diagnostic.txt").write_text(
-            "QA overlay DOM probe did not arm before the gesture.\n"
+            "QA overlay capture listener or settled idle icon did not arm before the gesture.\n"
             + ctx.murmur.log(since_launch=True), encoding="utf-8")
-        raise Fail("QA overlay DOM probe did not arm")
+        raise Fail("QA overlay capture listener or settled idle icon did not arm")
     hwnd = ctx.murmur.overlay_hwnd()
     log_before = len(ctx.murmur.log())
     before = win32.window_rect(hwnd)
@@ -112,7 +122,8 @@ def o2_drag(ctx):
         f"{win32.window_text(win32.foreground())!r}\n"
         f"overlay names: {ctx.murmur.overlay_names()!r}\n"
         f"new drag log: {[line for line in ctx.murmur.log()[log_before:].splitlines() if 'drag' in line.lower()]!r}\n"
-        f"QA DOM hit probes: {[line for line in ctx.murmur.log(since_launch=True).splitlines() if 'QA overlay drag probe' in line]!r}\n",
+        f"QA DOM hit probes: {[line for line in ctx.murmur.log(since_launch=True).splitlines() if 'QA overlay drag probe' in line]!r}\n"
+        f"QA native mouse boundary: {[line for line in ctx.murmur.log()[log_before:].splitlines() if 'QA overlay native mouse' in line]!r}\n",
         encoding="utf-8")
     if abs(held[0] - before[0]) < 100 and abs(held[1] - before[1]) < 100:
         raise Fail(f"Overlay did not move while the button was held: {before} -> {held}")

@@ -23,6 +23,8 @@
 /// `WM_MOUSEACTIVATE` / `MA_NOACTIVATE` / `WM_ACTIVATE` / `WA_INACTIVE` (winuser.h), local so the
 /// decision logic is testable on every platform.
 pub const WM_MOUSEACTIVATE: u32 = 0x0021;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
 pub const MA_NOACTIVATE: isize = 3;
 pub const WM_ACTIVATE: u32 = 0x0006;
 pub const WA_INACTIVE: usize = 0;
@@ -31,6 +33,16 @@ pub const WA_INACTIVE: usize = 0;
 /// `None` passes it on unchanged.
 pub fn mouse_activate_reply(message: u32) -> Option<isize> {
     (message == WM_MOUSEACTIVATE).then_some(MA_NOACTIVATE)
+}
+
+/// QA observation only. It never supplies a message result or intercepts renderer windows.
+fn qa_mouse_message(message: u32) -> Option<&'static str> {
+    match message {
+        WM_MOUSEACTIVATE => Some("WM_MOUSEACTIVATE"),
+        WM_LBUTTONDOWN => Some("WM_LBUTTONDOWN"),
+        WM_LBUTTONUP => Some("WM_LBUTTONUP"),
+        _ => None,
+    }
 }
 
 /// Whether an activation of the overlay should hand the foreground back: it was activated
@@ -72,6 +84,8 @@ mod native {
     const SUBCLASS_ID: usize = 0x4D52_4E41;
     /// Last logged `log_key`, so the info line appears once per change rather than on every show.
     static LOGGED: AtomicUsize = AtomicUsize::new(usize::MAX);
+    const QA_MOUSE_LOG_LIMIT: usize = 64;
+    static QA_MOUSE_LOGGED: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "system" fn overlay_proc(
         window: HWND,
@@ -81,6 +95,16 @@ mod native {
         id: usize,
         _data: usize,
     ) -> LRESULT {
+        if let Some(name) = qa_mouse_message(message) {
+            if std::env::var_os("MURMUR_QA_WAV").is_some() {
+                if QA_MOUSE_LOGGED.fetch_add(1, Ordering::Relaxed) < QA_MOUSE_LOG_LIMIT {
+                    // Only this process/thread's already-subclassed HWNDs reach this callback.
+                    // WebView2 renderer mouse messages are outside this observation boundary.
+                    tracing::info!(target: "murmur::qa_overlay_drag", hwnd = ?window,
+                                   message = name, "QA overlay native mouse");
+                }
+            }
+        }
         if let Some(reply) = mouse_activate_reply(message) {
             return reply;
         }
@@ -160,8 +184,24 @@ mod tests {
     fn mouse_activation_is_answered_without_activating() {
         assert_eq!(mouse_activate_reply(WM_MOUSEACTIVATE), Some(MA_NOACTIVATE));
         // Clicks themselves (WM_LBUTTONDOWN = 0x0201) still reach the page.
-        assert_eq!(mouse_activate_reply(0x0201), None);
+        assert_eq!(mouse_activate_reply(WM_LBUTTONDOWN), None);
+        assert_eq!(mouse_activate_reply(WM_LBUTTONUP), None);
         assert_eq!(mouse_activate_reply(WM_ACTIVATE), None);
+    }
+
+    #[test]
+    fn qa_mouse_observation_does_not_change_message_replies() {
+        for (message, name) in [
+            (WM_MOUSEACTIVATE, "WM_MOUSEACTIVATE"),
+            (WM_LBUTTONDOWN, "WM_LBUTTONDOWN"),
+            (WM_LBUTTONUP, "WM_LBUTTONUP"),
+        ] {
+            assert_eq!(qa_mouse_message(message), Some(name));
+        }
+        assert_eq!(qa_mouse_message(WM_ACTIVATE), None);
+        assert_eq!(mouse_activate_reply(WM_MOUSEACTIVATE), Some(MA_NOACTIVATE));
+        assert_eq!(mouse_activate_reply(WM_LBUTTONDOWN), None);
+        assert_eq!(mouse_activate_reply(WM_LBUTTONUP), None);
     }
 
     #[test]
