@@ -246,6 +246,13 @@ def focus_field(ctx, repro):
     ctx.sleep(0.4)
     if not uia.same(uia.focused(), field):
         raise Fail("Reproducer field did not take keyboard focus")
+    # The click puts the caret where it lands; the exact-text oracle appends at the end
+    # (run 44041874181 inserted mid-text in both modes). End goes only to the verified field.
+    ctx.guard.check()
+    if not repro.owned() or not uia.same(uia.focused(), field):
+        raise Fail("Reproducer field lost keyboard focus before moving the caret")
+    win32.tap("end")
+    ctx.sleep(0.1)
     return field
 
 

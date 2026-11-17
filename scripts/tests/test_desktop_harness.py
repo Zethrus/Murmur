@@ -2904,6 +2904,7 @@ class WebView2ReproTests(unittest.TestCase):
                 mock.patch.object(win32, "mouse_move"), mock.patch.object(win32, "click"),
                 mock.patch.object(win32, "close_window"),
                 mock.patch.object(win32, "type_unicode", side_effect=typed),
+                mock.patch.object(win32, "tap"),
                 mock.patch.object(uia, "from_handle", return_value="settings"),
                 mock.patch.object(uia, "find", return_value="field"),
                 mock.patch.object(uia, "rect", return_value=(100, 100, 300, 130)),
