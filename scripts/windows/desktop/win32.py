@@ -140,6 +140,7 @@ def _declare():
         ("GetWindowRect", (wintypes.HWND, ctypes.POINTER(RECT)), wintypes.BOOL),
         ("WindowFromPoint", (POINT,), wintypes.HWND),
         ("GetAncestor", (wintypes.HWND, wintypes.UINT), wintypes.HWND),
+        ("GetWindow", (wintypes.HWND, wintypes.UINT), wintypes.HWND),
         ("SendMessageW", (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM), ctypes.c_ssize_t),
         ("GetClientRect", (wintypes.HWND, ctypes.POINTER(RECT)), wintypes.BOOL),
         ("ClientToScreen", (wintypes.HWND, ctypes.POINTER(POINT)), wintypes.BOOL),
@@ -469,6 +470,20 @@ def enum_windows(visible_only=True):
 
     user32.EnumWindows.argtypes = (callback_type, wintypes.LPARAM)
     user32.EnumWindows(callback_type(each), 0)
+    return found
+
+
+def child_windows(hwnd, limit):
+    """At most `limit` descendant handles of `hwnd` (EnumChildWindows is recursive). Read-only."""
+    found = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def each(child, _):
+        found.append(child or 0)
+        return len(found) < limit
+
+    user32.EnumChildWindows.argtypes = (wintypes.HWND, callback_type, wintypes.LPARAM)
+    user32.EnumChildWindows(hwnd, callback_type(each), 0)
     return found
 
 

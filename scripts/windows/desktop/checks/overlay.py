@@ -4,6 +4,7 @@ import re
 import time
 
 import fixtures
+import topology
 import uia
 import win32
 from checks.common import click_overlay, overlay_drag_snapshot, produce_held, wait_not_held
@@ -392,6 +393,83 @@ def _o8_show_settings(ctx, pid):
     return hwnd
 
 
+def _o8_topology(ctx, pid, hwnd, hit):
+    """Read-only owner boundary of the hit renderer (plan Batch A); never retried or repaired."""
+    try:
+        snap = topology.snapshot(hwnd, hit)
+        host = topology.parse_host_log(ctx.murmur.log(since_launch=True))
+        snap["app_host"] = host
+        snap["classification"] = topology.classify(snap, pid, win32.window_thread(hwnd), host)
+    except Exception as error:  # noqa: BLE001 - topology is evidence; it must not alter the gesture
+        snap = {"complete": False, "errors": [f"{type(error).__name__}: {error}"],
+                "classification": {"result": "inconclusive", "reason": "snapshot failed"}}
+    ctx.guard.check()  # enumeration reads foreign windows; the guard decides before any input
+    return snap
+
+
+def _o8_focus_changes(before, context, stage, step):
+    """Same-root keyboard focus moves are failures that foreground ownership cannot see."""
+    if context.get("gui_status") != "ok" or before.get("gui_status") != "ok":
+        return []
+    if context.get("focus_hwnd") == before.get("focus_hwnd"):
+        return []
+    return [{"stage": stage, "step": step, "expected_focus_hwnd": before.get("focus_hwnd"),
+             "focus_hwnd": context.get("focus_hwnd"), "active_hwnd": context.get("active_hwnd")}]
+
+
+def _o8_settings_field(ctx, pid, settings):
+    """Preselect Settings' read-only history search field before the gesture, by a real click."""
+    def verify():
+        ctx.guard.check()
+        _context, root, owned = _o8_owned_foreground(settings, pid)
+        if (not ctx.murmur.running() or ctx.murmur.process.pid != pid or not owned or
+                win32.window_text(settings) != "Murmur Settings"):
+            raise Fail(f"Murmur Settings ownership changed while preselecting its text field: root={root}")
+    verify()
+    window = ctx.murmur.page("Privacy")  # UIA invoke; no pointer input
+    verify()
+    field = uia.find(window, name_="Search history", control_type_=uia.EDIT, timeout=10, sleep=ctx.sleep)
+    bounds = uia.rect(field)
+    left, top, right, bottom = win32.window_rect(settings)
+    if not (left <= bounds[0] < bounds[2] <= right and top <= bounds[1] < bounds[3] <= bottom):
+        raise Fail(f"Settings search field {bounds} is not inside Settings {(left, top, right, bottom)}")
+    verify()
+    win32.click(*uia.center(field))
+    ctx.sleep(0.4)
+    verify()
+    if not uia.same(uia.focused(), field):
+        raise Fail("Settings search field did not take keyboard focus before the gesture")
+    return field
+
+
+def _o8_type_after_release(ctx, observed, expected_foreground, read_text, token):
+    """Type into the preselected target without clicking or refocusing it; exact text decides."""
+    probe = {"token": token, "attempted": False, "landed": False}
+    observed["typing"] = probe
+    focus_before = observed["foreground_before"].get("focus_hwnd")
+
+    def target_verified():
+        ctx.guard.check()
+        context, root, owned = _o8_owned_foreground(*expected_foreground)
+        if owned and context.get("focus_hwnd") == focus_before:
+            return True
+        probe["reason"] = (f"keyboard target not verified: root={root}, "
+                           f"focus={context.get('focus_hwnd')}, expected={focus_before}")
+        return False
+
+    if not target_verified():
+        return probe
+    before = read_text()
+    if not target_verified():  # the UIA read can block while focus or input changes
+        return probe
+    probe["attempted"] = True
+    win32.type_unicode(token)
+    ctx.sleep(0.6)
+    after = read_text()
+    probe.update(expected=before + token, actual=after, landed=after == before + token)
+    return probe
+
+
 def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
     """One O2 held gesture, with the same 300x200 travel and movement oracle."""
     geometry_history = []
@@ -427,7 +505,8 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
                                                          for i in (0, 1)),
                            click_in_hit_client=tuple(start[i] - win32.client_origin(hit)[i]
                                                      for i in (0, 1)),
-                           held_samples=[])
+                           held_samples=[], keyboard_focus_changes=[])
+        observation["topology"] = _o8_topology(ctx, pid, hwnd, hit)
     except BaseException as error:
         observation["error"] = f"{type(error).__name__}: {error}"
         raise
@@ -446,6 +525,8 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
                                              "left_down": bool(win32.user32.GetAsyncKeyState(0x01) & 0x8000),
                                              "overlay_rect": win32.window_rect(hwnd),
                                              "foreground": focus, "foreground_root": focus_root})
+        observation["keyboard_focus_changes"] += _o8_focus_changes(
+            observation["foreground_before"], focus, stage, step)
         if (focus["input_desktop"] != "Default" or focus["gui_status"] not in allowed_status or
                 (focus_root, focus["process_id"]) != original_foreground):
             raise Fail(f"Foreground or desktop changed during {label}: {focus}, root={focus_root}")
@@ -472,6 +553,8 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
         after_hwnd = observation["foreground_after"]["hwnd"]
         observation["foreground_after_root"] = (win32.user32.GetAncestor(after_hwnd, win32.GA_ROOT)
                                                 if after_hwnd else 0)
+        observation["keyboard_focus_changes"] += _o8_focus_changes(
+            observation["foreground_before"], observation["foreground_after"], "after-release", None)
         observation["settings_after"] = _o8_settings(pid)
         observation["overlay_after"] = _o8_window(hwnd)
         observation["hit_after"] = _o8_window(hit) if win32.is_window(hit) else None
@@ -520,6 +603,8 @@ def o8_foreground_drag(ctx):
         cold = _o8_drag(ctx, "cold foreground untouched", pid, None, -1, record["cases"])
         if not cold["moved_while_held"]:
             record["failures"].append("cold foreground untouched: no held movement")
+        if cold["keyboard_focus_changes"]:
+            record["failures"].append("cold foreground untouched: keyboard focus changed")
         if (cold["foreground_root"], cold["foreground_before"]["process_id"]) != \
                 (cold["foreground_after_root"], cold["foreground_after"]["process_id"]):
             record["failures"].append("cold gesture changed foreground ownership")
@@ -532,14 +617,17 @@ def o8_foreground_drag(ctx):
         _o8_focus_notepad(ctx, pad)
         if ctx.startup_probe_lease is not None and not ctx.startup_probe_lease.closed:
             raise Fail("Passive startup probe did not hand off to the first verified Notepad target")
-        for label, expected, direction in (
+        for index, (label, expected, direction) in enumerate((
                 ("owned Notepad foreground", (pad.hwnd, pad.owner_pid), 1),
                 ("owned Murmur Settings foreground", (None, pid), -1),
-                ("same owned Notepad foreground", (pad.hwnd, pad.owner_pid), 1)):
+                ("same owned Notepad foreground", (pad.hwnd, pad.owner_pid), 1))):
             ctx.guard.check()
+            read_text = pad.text
             if label == "owned Murmur Settings foreground":
                 settings = _o8_show_settings(ctx, pid)
                 expected = (settings, pid)
+                field = _o8_settings_field(ctx, pid, settings)
+                read_text = lambda field=field: uia.value(field)  # noqa: E731
             elif label == "same owned Notepad foreground":
                 _o8_focus_notepad(ctx, pad)
             if label != "owned Murmur Settings foreground" and not pad.owns_keyboard_focus():
@@ -547,6 +635,12 @@ def o8_foreground_drag(ctx):
             observed = _o8_drag(ctx, label, pid, expected, direction, record["cases"])
             if label != "owned Murmur Settings foreground" and not pad.owns_keyboard_focus():
                 raise Fail(f"Owned Notepad editor lost keyboard focus during {label}")
+            if observed["keyboard_focus_changes"]:
+                record["failures"].append(f"{label}: keyboard focus changed")
+            typed = _o8_type_after_release(ctx, observed, expected, read_text, f"o8k{index + 1}")
+            if not typed["landed"]:
+                record["failures"].append(f"{label}: typing after release did not land exactly "
+                                          f"({typed.get('reason') or 'text mismatch'})")
             if not observed["moved_while_held"]:
                 record["failures"].append(f"{label}: no held movement")
                 if last_success is not None and observed["after"] != last_success:
@@ -676,6 +770,11 @@ def o7_subclass_log(ctx):
     lines = [line for line in log.splitlines() if "Overlay no-activate subclass" in line]
     path = ctx.artifact("subclass-log.txt")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Read-only Batch A evidence for every full run: who owns each renderer's parent.
+    snap = topology.snapshot(ctx.murmur.overlay_hwnd(), 0)
+    snap["app_host"] = topology.parse_host_log(ctx.murmur.log(since_launch=True))
+    snap["renderer_parents"] = topology.renderer_parents(snap)
+    ctx.artifact("webview-topology.json").write_text(json.dumps(snap, indent=2) + "\n", encoding="utf-8")
     if not lines:
         raise Fail("murmur.log has no 'Overlay no-activate subclass' line")
     if not any("top_level=true" in line for line in lines):

@@ -39,6 +39,7 @@ import report  # noqa: E402
 import restore  # noqa: E402
 import run  # noqa: E402
 import tomlconfig  # noqa: E402
+import topology  # noqa: E402
 import targets  # noqa: E402
 import uia  # noqa: E402
 import win32  # noqa: E402
@@ -1976,6 +1977,10 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
         injected.assert_called_once()
         up.assert_called_once()
         self.assertTrue(row["moved_while_held"])
+        self.assertEqual(row["keyboard_focus_changes"], [])
+        # The mocked user32 cannot answer GetWindow: topology is inconclusive, never fatal.
+        self.assertFalse(row["topology"]["complete"])
+        self.assertEqual(row["topology"]["classification"]["result"], "inconclusive")
         self.assertEqual(row["hit_before"]["pid"], 200)
         self.assertEqual(row["click_in_hit_client"], (26, 20))
         self.assertEqual(len(row["held_samples"]), 2)
@@ -2182,12 +2187,22 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
                 self.assertEqual(len(cases), 1)
                 self.assertEqual(len(cases[0]["readiness_geometry_history"]), 1)
 
-    def make_context(self, directory, events, *, movements=(True, True, True, True)):
+    def make_context(self, directory, events, *, movements=(True, True, True, True),
+                     focus_changes=None, typing_failures=()):
+        focus_changes = focus_changes or {}
         self.enterContext(mock.patch.object(overlay_checks, "_o8_settings", return_value=[{"hwnd": 33, "pid": 71}]))
         self.enterContext(mock.patch.object(win32, "window_text", return_value="Murmur Settings"))
-        pad = SimpleNamespace(hwnd=52, owner_pid=99, owned_tab=True,
+        pad = SimpleNamespace(hwnd=52, owner_pid=99, owned_tab=True, text=lambda: "",
                               active_document=lambda: True, owns_keyboard_focus=lambda: True)
         pad.focus = mock.Mock()
+        self.settings_field = self.enterContext(mock.patch.object(
+            overlay_checks, "_o8_settings_field", side_effect=lambda *_a: events.append("settings_field") or "field"))
+        self.typed = []
+        def type_after(_ctx, observed, expected, _read, token):
+            self.typed.append((observed["case"], expected, token))
+            observed["typing"] = {"token": token, "landed": not observed.get("typing_fails")}
+            return observed["typing"]
+        self.enterContext(mock.patch.object(overlay_checks, "_o8_type_after_release", side_effect=type_after))
         session = SimpleNamespace(process=SimpleNamespace(pid=71), running=lambda: True,
                                   overlay_hwnd=lambda: 44,
                                   ensure=mock.Mock(side_effect=lambda *_a: events.append("ensure")),
@@ -2217,7 +2232,8 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
             row = {"case": label, "moved_while_held": movements[index], "after": positions[index],
                    "foreground_before": {"hwnd": 8, "process_id": 8},
                    "foreground_root": 8, "foreground_after": {"hwnd": 8, "process_id": 8},
-                   "foreground_after_root": 8}
+                   "foreground_after_root": 8, "keyboard_focus_changes": list(focus_changes.get(index, [])),
+                   "typing_fails": index in typing_failures}
             observations.append(row)
             return row
         return ctx, session, pad, drag
@@ -2384,6 +2400,286 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
              mock.patch.object(common_checks.time, "monotonic", side_effect=[0, 0, 10]):
             with self.assertRaisesRegex(Fail, "No unique visible status drag affordance"):
                 overlay_checks._icon_drag_point(ctx, 44, {})
+
+    def test_o8_focus_change_within_same_root_is_detected_but_unknown_focus_is_not(self):
+        before = {"gui_status": "ok", "focus_hwnd": 0x480cc2, "active_hwnd": 0x24117c}
+        self.assertEqual(overlay_checks._o8_focus_changes(before, dict(before), "moving", 3), [])
+        changed = dict(before, focus_hwnd=0x660bd4)
+        self.assertEqual(overlay_checks._o8_focus_changes(before, changed, "moving", 3),
+                         [{"stage": "moving", "step": 3, "expected_focus_hwnd": 0x480cc2,
+                           "focus_hwnd": 0x660bd4, "active_hwnd": 0x24117c}])
+        for unknown in ({"gui_status": "no_foreground"}, {"gui_status": "error"}):
+            self.assertEqual(overlay_checks._o8_focus_changes(before, unknown, "moving", 3), [])
+            self.assertEqual(overlay_checks._o8_focus_changes(unknown, changed, "moving", 3), [])
+
+    def _typing_context(self, contexts):
+        ctx = SimpleNamespace(guard=SimpleNamespace(check=mock.Mock()), sleep=lambda _s: None)
+        self.enterContext(mock.patch.object(win32, "foreground_context", side_effect=contexts))
+        self.enterContext(mock.patch.object(win32, "user32", SimpleNamespace(
+            GetAncestor=lambda hwnd, _kind: {0x660bd4: 52}.get(hwnd, hwnd))))
+        return ctx
+
+    def test_o8_typing_after_release_requires_unchanged_target_and_exact_text(self):
+        owned = {"hwnd": 52, "process_id": 99, "input_desktop": "Default", "gui_status": "ok",
+                 "focus_hwnd": 61}
+        observed = {"foreground_before": dict(owned)}
+        text = ["start", "starto8k1"]
+        ctx = self._typing_context([owned, owned])
+        with mock.patch.object(win32, "type_unicode") as typed:
+            probe = overlay_checks._o8_type_after_release(ctx, observed, (52, 99), lambda: text.pop(0), "o8k1")
+        typed.assert_called_once_with("o8k1")
+        self.assertTrue(probe["landed"])
+        self.assertIs(observed["typing"], probe)
+        self.assertEqual((probe["expected"], probe["actual"]), ("starto8k1", "starto8k1"))
+        # Extra or missing characters are a failure, not a near match.
+        text = ["start", "starto8k1o8k1"]
+        ctx = self._typing_context([owned, owned])
+        with mock.patch.object(win32, "type_unicode"):
+            self.assertFalse(overlay_checks._o8_type_after_release(
+                ctx, {"foreground_before": dict(owned)}, (52, 99), lambda: text.pop(0), "o8k1")["landed"])
+
+    def test_o8_typing_is_never_sent_when_focus_or_owner_changed(self):
+        owned = {"hwnd": 52, "process_id": 99, "input_desktop": "Default", "gui_status": "ok",
+                 "focus_hwnd": 61}
+        for label, contexts in (("focus moved", [dict(owned, focus_hwnd=0x660bd4)]),
+                                ("foreign owner", [dict(owned, process_id=7)]),
+                                ("changed during UIA read", [owned, dict(owned, focus_hwnd=0x660bd4)])):
+            with self.subTest(label=label):
+                ctx = self._typing_context(contexts)
+                with mock.patch.object(win32, "type_unicode") as typed:
+                    probe = overlay_checks._o8_type_after_release(
+                        ctx, {"foreground_before": dict(owned)}, (52, 99), lambda: "start", "o8k2")
+                typed.assert_not_called()
+                self.assertFalse(probe["attempted"])
+                self.assertFalse(probe["landed"])
+                self.assertIn("keyboard target not verified", probe["reason"])
+
+    def test_o8_settings_field_is_clicked_only_inside_owned_settings_and_must_take_focus(self):
+        owned = {"hwnd": 33, "process_id": 71, "input_desktop": "Default", "gui_status": "ok"}
+        session = SimpleNamespace(running=lambda: True, process=SimpleNamespace(pid=71),
+                                  page=mock.Mock(return_value="settings-window"))
+        ctx = SimpleNamespace(murmur=session, guard=SimpleNamespace(check=mock.Mock()), sleep=lambda _s: None)
+        self.enterContext(mock.patch.object(win32, "foreground_context", return_value=owned))
+        self.enterContext(mock.patch.object(win32, "user32", SimpleNamespace(GetAncestor=lambda h, _k: h)))
+        self.enterContext(mock.patch.object(win32, "window_text", return_value="Murmur Settings"))
+        self.enterContext(mock.patch.object(win32, "window_rect", return_value=(0, 0, 1000, 780)))
+        self.enterContext(mock.patch.object(uia, "find", return_value="field"))
+        self.enterContext(mock.patch.object(uia, "center", return_value=(500, 100)))
+        for bounds, focused, error in (((400, 90, 600, 110), True, None),
+                                       ((400, 90, 1200, 110), True, "not inside Settings"),
+                                       ((400, 90, 600, 110), False, "did not take keyboard focus")):
+            with self.subTest(error=error), \
+                 mock.patch.object(uia, "rect", return_value=bounds), \
+                 mock.patch.object(uia, "focused", return_value="focus"), \
+                 mock.patch.object(uia, "same", return_value=focused), \
+                 mock.patch.object(win32, "click") as click:
+                if error:
+                    with self.assertRaisesRegex(Fail, error):
+                        overlay_checks._o8_settings_field(ctx, 71, 33)
+                else:
+                    self.assertEqual(overlay_checks._o8_settings_field(ctx, 71, 33), "field")
+                if "inside" in (error or ""):
+                    click.assert_not_called()
+                else:
+                    click.assert_called_once_with(500, 100)
+        session.page.assert_called_with("Privacy")
+        with mock.patch.object(win32, "foreground_context", return_value=dict(owned, process_id=5)), \
+             mock.patch.object(win32, "click") as click:
+            with self.assertRaisesRegex(Fail, "ownership changed"):
+                overlay_checks._o8_settings_field(ctx, 71, 33)
+            click.assert_not_called()
+
+    def _run_o8(self, directory, **options):
+        events = []
+        ctx, session, _pad, drag = self.make_context(directory, events, **options)
+        with mock.patch.object(overlay_checks, "_o8_drag", side_effect=drag), \
+             mock.patch.object(overlay_checks.win32, "wait_for", return_value=True), \
+             mock.patch.object(overlay_checks.win32, "pids", return_value=[99]), \
+             mock.patch.object(overlay_checks.win32, "window_pid", side_effect=lambda hwnd: {52: 99, 33: 71}[hwnd]), \
+             mock.patch.object(overlay_checks.win32, "is_window", return_value=True), \
+             mock.patch.object(overlay_checks.win32, "activate", return_value=True), \
+             mock.patch.object(overlay_checks.win32, "window_rect", return_value=(934, 964, 986, 1004)):
+            try:
+                overlay_checks.o8_foreground_drag(ctx)
+            except Fail:
+                pass
+        return events, json.loads((Path(directory) / "foreground-drag-diagnostic.json").read_text())
+
+    def test_o8_types_into_each_preselected_target_but_never_the_cold_hidden_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events, record = self._run_o8(directory)
+        self.assertEqual(self.typed, [("owned Notepad foreground", (52, 99), "o8k1"),
+                                      ("owned Murmur Settings foreground", (33, 71), "o8k2"),
+                                      ("same owned Notepad foreground", (52, 99), "o8k3")])
+        self.assertLess(events.index("settings_field"),
+                        events.index(("drag", "owned Murmur Settings foreground", 71, (33, 71), -1, True)))
+        self.assertEqual(record["status"], "inconclusive")
+
+    def test_o8_records_focus_and_typing_failures_without_hiding_later_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _events, record = self._run_o8(
+                directory, focus_changes={0: [{"stage": "moving"}], 2: [{"stage": "moving"}]},
+                typing_failures=(2,))
+        self.assertEqual(record["status"], "fail")
+        self.assertEqual(len(record["cases"]), 4)
+        self.assertEqual(record["failures"], [
+            "cold foreground untouched: keyboard focus changed",
+            "owned Murmur Settings foreground: keyboard focus changed",
+            "owned Murmur Settings foreground: typing after release did not land exactly (text mismatch)"])
+
+
+class FakeTopology:
+    """Window tree for topology tests: hwnd -> node fields; reads can mutate between passes."""
+
+    def __init__(self, nodes, children=None):
+        self.nodes, self.child_list, self.reads = nodes, children, {}
+
+    def is_window(self, hwnd):
+        return hwnd in self.nodes
+
+    def node(self, hwnd):
+        self.reads[hwnd] = self.reads.get(hwnd, 0) + 1
+        value = self.nodes[hwnd]
+        if callable(value):
+            value = value(self.reads[hwnd])
+        base = {"hwnd": hwnd, "parent": 0, "owner": 0, "pid": 1, "tid": 1, "class": "x", "style": 0,
+                "exstyle": 0, "visible": True, "enabled": True, "rect": (0, 0, 1, 1)}
+        base.update(value)
+        return base
+
+    def children(self, hwnd, limit):
+        handles = self.child_list if self.child_list is not None else \
+            [h for h in self.nodes if h != hwnd]
+        return handles[:limit]
+
+
+class TopologyTests(unittest.TestCase):
+    # Murmur pid 71 / UI thread 7; WebView2 browser pid 200.
+    def tree(self, renderer_parent_pid=200, noactivate=False, **extra):
+        nodes = {0x44: {"parent": 0x10010, "pid": 71, "tid": 7, "class": "Tauri Window",
+                        "exstyle": topology.WS_EX_NOACTIVATE},
+                 0x50: {"parent": 0x44, "pid": 71, "tid": 7, "class": "WRY_WEBVIEW"},
+                 0x60: {"parent": 0x50, "pid": renderer_parent_pid, "tid": 9 if renderer_parent_pid == 200 else 7,
+                        "class": "Chrome_WidgetWin_0",
+                        "exstyle": topology.WS_EX_NOACTIVATE if noactivate else 0},
+                 0x70: {"parent": 0x60, "pid": 200, "tid": 9, "class": "Chrome_RenderWidgetHostHWND"}}
+        nodes.update(extra)
+        return nodes
+
+    def test_foreign_immediate_parent_is_classified_with_owned_wry_host(self):
+        snap = topology.snapshot(0x44, 0x70, FakeTopology(self.tree()))
+        self.assertTrue(snap["complete"], snap["errors"])
+        self.assertEqual([n["hwnd"] for n in snap["ancestors"]], [0x70, 0x60, 0x50, 0x44])
+        result = topology.classify(snap, 71, 7)
+        self.assertEqual(result["result"], "foreign-immediate-parent")
+        self.assertEqual(result["owned_wry_hosts"], [0x50])
+        self.assertFalse(result["renderer_parent_noactivate"])
+        self.assertEqual(result["chain_classes"][-1], "Tauri Window")
+
+    def test_owned_immediate_parent_requires_same_process_and_ui_thread(self):
+        snap = topology.snapshot(0x44, 0x70, FakeTopology(self.tree(renderer_parent_pid=71)))
+        self.assertEqual(topology.classify(snap, 71, 7)["result"], "owned-immediate-parent")
+        self.assertEqual(topology.classify(snap, 71, 8)["result"], "foreign-immediate-parent")
+
+    def test_cycle_overflow_destroyed_and_changed_identity_are_inconclusive(self):
+        cyclic = self.tree()
+        cyclic[0x50] = {"parent": 0x70, "pid": 71, "tid": 7, "class": "WRY_WEBVIEW"}
+        ended = self.tree()
+        ended[0x60] = {"parent": 0, "pid": 200, "tid": 9, "class": "Chrome_WidgetWin_0"}
+        destroyed = self.tree()
+        destroyed[0x60] = {"parent": 0x99, "pid": 200, "tid": 9, "class": "Chrome_WidgetWin_0"}
+        reparented = self.tree()
+        reparented[0x60] = lambda count: {"parent": 0x50 if count == 1 else 0x44, "pid": 200, "tid": 9,
+                                          "class": "Chrome_WidgetWin_0"}
+        deep = {0x44: {"parent": 0x10010, "pid": 71, "tid": 7}}
+        for hwnd in range(0x100, 0x100 + topology.MAX_ANCESTORS + 2):
+            deep[hwnd] = {"parent": hwnd + 1 if hwnd < 0x100 + topology.MAX_ANCESTORS + 1 else 0x44}
+        for label, nodes, hit, children, error in (
+                ("cycle", cyclic, 0x70, None, "cycle"),
+                ("ended", ended, 0x70, None, "ended before the overlay root"),
+                ("destroyed", destroyed, 0x70, None, "not a live window"),
+                ("reparented", reparented, 0x70, None, "identity changed"),
+                ("deep", deep, 0x100, [], "exceeds"),
+                ("overflow", self.tree(), 0x70, [0x50] * (topology.MAX_DESCENDANTS + 1), "exceed"),
+                ("repeated", self.tree(), 0x70, [0x50, 0x50], "repeated")):
+            with self.subTest(label=label):
+                snap = topology.snapshot(0x44, hit, FakeTopology(nodes, children))
+                self.assertFalse(snap["complete"])
+                self.assertTrue(any(error in item for item in snap["errors"]), snap["errors"])
+                self.assertEqual(topology.classify(snap, 71, 7)["result"], "inconclusive")
+
+    def test_unreadable_property_is_recorded_not_raised(self):
+        class Broken(FakeTopology):
+            def node(self, hwnd):
+                if hwnd == 0x60:
+                    raise OSError("access denied")
+                return super().node(hwnd)
+        snap = topology.snapshot(0x44, 0x70, Broken(self.tree()))
+        self.assertIn("access denied", " ".join(snap["errors"]))
+        self.assertEqual(topology.classify(snap, 71, 7)["result"], "inconclusive")
+
+    def test_app_host_record_is_correlated_and_malformed_records_are_flagged(self):
+        line = ("2026-11-17T01:34:20Z INFO murmur::qa_overlay_topology: QA overlay webview host "
+                "overlay=0x44 controller_parent=0x50 controller_parent_parent=0x44 "
+                "controller_parent_pid=71 controller_parent_tid=7 process=71 thread=7 "
+                "parent_hresult=0x0 version_hresult=0x0 browser_version=157.0.4341.46\n")
+        host = topology.parse_host_log("noise\n" + line)
+        self.assertTrue(host["valid"])
+        self.assertEqual((host["controller_parent"], host["browser_version"]), (0x50, "157.0.4341.46"))
+        snap = topology.snapshot(0x44, 0x70, FakeTopology(self.tree()))
+        result = topology.classify(snap, 71, 7, host)
+        self.assertEqual(result["controller_host"], {"hwnd": 0x50, "in_hit_chain": True,
+                                                     "is_renderer_parent": False, "owned": True,
+                                                     "browser_version": "157.0.4341.46"})
+        self.assertIsNone(topology.parse_host_log("nothing here"))
+        broken = topology.parse_host_log(line.replace("controller_parent=0x50", "controller_parent=50"))
+        self.assertFalse(broken["valid"])
+        failed = topology.parse_host_log(line.replace("parent_hresult=0x0", "parent_hresult=0x80004005"))
+        self.assertFalse(failed["valid"])
+        self.assertEqual(failed["parent_hresult"], 0x80004005)
+        self.assertEqual(topology.classify(snap, 71, 7, broken)["controller_host"], "malformed app record")
+
+    def test_snapshot_never_writes_window_state(self):
+        api = FakeTopology(self.tree())
+        for forbidden in ("SetWindowLongPtrW", "SetFocus", "SetForegroundWindow", "SetWindowPos"):
+            setattr(api, forbidden, mock.Mock(side_effect=AssertionError(forbidden)))
+        topology.snapshot(0x44, 0x70, api)
+        source = (HARNESS / "topology.py").read_text()
+        for forbidden in ("SetWindow", "SetFocus", "SetForeground", "SendMessage", "PostMessage",
+                          "GetWindowText", "AttachThreadInput"):
+            self.assertNotIn(forbidden, source)
+
+    def test_renderer_parent_summary_reads_descendants_only(self):
+        snap = topology.snapshot(0x44, 0, FakeTopology(self.tree()))
+        self.assertTrue(snap["complete"], snap["errors"])
+        self.assertEqual(topology.renderer_parents(snap), [
+            {"renderer": 0x70, "renderer_pid": 200, "parent": 0x60, "parent_pid": 200, "parent_tid": 9,
+             "parent_class": "Chrome_WidgetWin_0", "parent_noactivate": False}])
+
+    def test_o7_writes_topology_evidence_without_changing_its_oracle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = "INFO Overlay no-activate subclass: top_level=true children=1\n"
+            session = SimpleNamespace(ensure=mock.Mock(), log=lambda **_kw: log, overlay_hwnd=lambda: 0x44)
+            ctx = SimpleNamespace(murmur=session, fixtures={"A": SimpleNamespace(path="a.wav")},
+                                  artifact=lambda suffix: Path(directory) / suffix, note=mock.Mock())
+            with mock.patch.object(topology, "Native", return_value=FakeTopology(self.tree())):
+                overlay_checks.o7_subclass_log(ctx)
+            evidence = json.loads((Path(directory) / "webview-topology.json").read_text())
+            self.assertTrue(evidence["complete"])
+            self.assertIsNone(evidence["app_host"])
+            self.assertEqual(evidence["renderer_parents"][0]["parent_class"], "Chrome_WidgetWin_0")
+            ctx.note.assert_called_once_with("children=1")
+
+    def test_win32_topology_declarations_preserve_pointer_width(self):
+        from ctypes import wintypes
+        api = mock.Mock()
+        with mock.patch.object(win32, "IS_WINDOWS", True), \
+             mock.patch.object(win32, "user32", api), \
+             mock.patch.object(win32, "kernel32", mock.Mock()), \
+             mock.patch.object(win32, "dwmapi", mock.Mock()):
+            win32._declare()
+        self.assertEqual(api.GetWindow.argtypes, (wintypes.HWND, wintypes.UINT))
+        self.assertEqual(api.GetWindow.restype, wintypes.HWND)
 
 
 class ReportTests(unittest.TestCase):
