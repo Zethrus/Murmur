@@ -242,7 +242,8 @@ jobs:
   # draft so the evidence is tied to exactly what users get.
   linux-gpu:
     needs: linux
-    if: needs.linux.result == 'success'
+    # always(): with Windows disabled its skipped jobs would otherwise skip this one too.
+    if: always() && needs.linux.result == 'success'
     runs-on: [self-hosted, Linux, X64, gpu, nvidia]
     timeout-minutes: 60
     steps:

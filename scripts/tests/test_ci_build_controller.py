@@ -534,6 +534,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn('GPU-VALIDATION.json', linux)
         gpu = job('linux-gpu')
         self.assertIn('runs-on: [self-hosted, Linux, X64, gpu, nvidia]', gpu)
+        # Skipped Windows ancestors (ENABLE_WINDOWS off) must not skip Linux GPU validation.
+        self.assertIn("    if: always() && needs.linux.result == 'success'\n", gpu)
         self.assertNotIn('environment:', gpu)
         self.assertNotIn('secrets.', gpu)
         self.assertIn('test-linux-inference.py --artifacts "$assets" --components "$assets"', gpu)
