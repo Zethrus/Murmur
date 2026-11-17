@@ -384,3 +384,24 @@ the Wry update (instrumentation and hardening, Wry 0.57.1), then O7 and
 `--only O8 --repeat 1` for topology plus the stronger oracle; (2) exact build of the
 Wry commit and the same O8 run to isolate the Wry change; (3) read both, then choose one
 Batch C row. Ordinary O2, the 48-check suite and Linux regression follow.
+
+## 9. Outcome, 2026-11-17
+
+Batch C selected the host-input route. Evidence chain:
+[topology](desktop-44030456571-o8-topology.md) → [O9 reproducer](desktop-44041874181-o9-host-input.md)
+→ [O8 after the repair](desktop-44053826670-o8-fixed.md). The product change has three
+parts:
+
+- **Overlay host input:** vendored Wry 0.57.2 with an overlay-only
+  `AllowHostInputProcessing` patch (`src-tauri/vendor/README.md`).
+- **Activation veto:** a UI-thread `WH_CBT` veto of the overlay's programmatic activation.
+- **Settings rebuild:** Settings defers external-config rebuilds while a text field is
+  focused.
+
+Harness corrections along the way: O9 now uses the startup lease and the build's root
+path. Final cleanup gains a hit-tested editor click, and S4 fits Settings into the work
+area before its drag.
+
+**Results on `faf54085`:** 48/48 automated checks passed and O8 passed. Final-head Linux
+and Windows PR checks, the manual checklist, and the release gates in section 6 remain.
+
