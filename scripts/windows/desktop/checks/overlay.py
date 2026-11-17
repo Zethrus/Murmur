@@ -596,6 +596,8 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
             delta = ctx.murmur.log()[log_before:]
             observation["log_delta"] = delta.splitlines()
             observation["drag_log_delta"] = [line for line in delta.splitlines() if "drag" in line.lower()]
+            observation["activation_vetoes"] = sum("QA overlay activation veto" in line
+                                                   for line in delta.splitlines())
             observation["activation_trace"] = _o8_activation_trace_evidence(
                 ctx.murmur.log(since_launch=True), delta)
         except Exception as error:  # noqa: BLE001 - preserve the gesture's original outcome

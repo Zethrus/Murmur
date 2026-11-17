@@ -8,6 +8,10 @@
 //!    on the window that lost activation and consumes that activation message.
 //! 3. The overlay page prevents `mousedown`'s default on its buttons so the DOM never moves focus
 //!    (src/overlay/no-focus.ts).
+//! 4. With WebView2 host input processing (vendored Wry patch, src-tauri/vendor/README.md), a
+//!    thread-local `WH_CBT` hook refuses the overlay root's programmatic activation, which
+//!    WebView2's own focus change would otherwise cause while Settings is active. The hook is
+//!    local to the UI thread, forwards every other code, and is removed when the overlay goes away.
 //!
 //! The `WM_MOUSEACTIVATE` → `MA_NOACTIVATE` subclass is kept because it is harmless, but expect
 //! it to cover only the top-level window: with default WebView2 hosting the `Chrome_WidgetWin_*`
@@ -138,6 +142,15 @@ fn qa_version_token(version: &str) -> String {
     }
 }
 
+/// `HCBT_ACTIVATE` (winuser.h), local so the decision is testable on every platform.
+pub const HCBT_ACTIVATE: i32 = 5;
+
+/// Thread-local CBT veto: refuse only the activation of the overlay root itself. Negative
+/// codes and every other hook code, window or activation pass on unchanged.
+pub fn veto_activation(code: i32, target: usize, overlay: usize) -> bool {
+    code == HCBT_ACTIVATE && overlay != 0 && target == overlay
+}
+
 /// Only windows owned by this thread can be subclassed (`SetWindowSubclass` refuses others).
 /// WebView2's renderer windows belong to `msedgewebview2.exe`, so in practice this excludes all
 /// of them; see the module documentation.
@@ -163,8 +176,9 @@ mod native {
             Input::KeyboardAndMouse::GetFocus,
             Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::{
-                EnumChildWindows, GetAncestor, GetForegroundWindow, GetWindowThreadProcessId,
-                IsWindow, SetForegroundWindow, GA_PARENT, WM_NCDESTROY,
+                CallNextHookEx, EnumChildWindows, GetAncestor, GetForegroundWindow,
+                GetWindowThreadProcessId, IsWindow, SetForegroundWindow, SetWindowsHookExW,
+                UnhookWindowsHookEx, GA_PARENT, WH_CBT, WM_NCDESTROY,
             },
         },
     };
@@ -173,11 +187,74 @@ mod native {
     const SUBCLASS_ID: usize = 0x4D52_4E41;
     /// Last logged `log_key`, so the info line appears once per change rather than on every show.
     static LOGGED: AtomicUsize = AtomicUsize::new(usize::MAX);
+    /// Last logged veto outcome (0/1); `usize::MAX` until the first install.
+    static VETO_LOGGED: AtomicUsize = AtomicUsize::new(usize::MAX);
     const QA_MOUSE_LOG_LIMIT: usize = 64;
     static QA_MOUSE_LOGGED: AtomicUsize = AtomicUsize::new(0);
     static QA_TRACE_MESSAGES: AtomicUsize = AtomicUsize::new(0);
     static QA_TRACE_ARMED: AtomicBool = AtomicBool::new(false);
     thread_local! { static QA_TRACE_CURRENT: Cell<usize> = const { Cell::new(0) }; }
+    /// The overlay root and the UI thread's CBT hook (0 when not installed).
+    static VETO_OVERLAY: AtomicUsize = AtomicUsize::new(0);
+    static VETO_HOOK: AtomicUsize = AtomicUsize::new(0);
+    const QA_VETO_LOG_LIMIT: usize = 64;
+    static QA_VETO_LOGGED: AtomicUsize = AtomicUsize::new(0);
+
+    /// With WebView2 host input processing (vendored Wry patch), a click reaches the overlay's
+    /// in-process WebView2 window, and WebView2 then focuses it. On a UI thread whose active
+    /// window is Settings, that SetFocus activates the overlay programmatically, past
+    /// `WS_EX_NOACTIVATE`. The hand-back then deactivates and reactivates Settings, which
+    /// costs its focused field DOM focus (run 44045203286). The overlay is never meant to be
+    /// active, so refuse exactly that activation here. The hook is local to this thread (no
+    /// DLL, no other process), and it forwards every other code.
+    unsafe extern "system" fn cbt_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if veto_activation(code, wparam, VETO_OVERLAY.load(Ordering::Relaxed)) {
+            if std::env::var_os("MURMUR_QA_WAV").is_some()
+                && QA_VETO_LOGGED.fetch_add(1, Ordering::Relaxed) < QA_VETO_LOG_LIMIT
+            {
+                tracing::info!(target: "murmur::qa_overlay_activation", hwnd = ?(wparam as HWND),
+                               foreground = ?GetForegroundWindow(), focus = ?GetFocus(),
+                               "QA overlay activation veto");
+            }
+            return 1;
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+
+    fn install_veto(top: HWND) -> bool {
+        if VETO_HOOK.load(Ordering::Relaxed) != 0 {
+            return VETO_OVERLAY.load(Ordering::Relaxed) == top as usize;
+        }
+        VETO_OVERLAY.store(top as usize, Ordering::Relaxed);
+        let hook = unsafe {
+            SetWindowsHookExW(
+                WH_CBT,
+                Some(cbt_proc),
+                std::ptr::null_mut(),
+                GetCurrentThreadId(),
+            )
+        };
+        if hook.is_null() {
+            VETO_OVERLAY.store(0, Ordering::Relaxed);
+            return false;
+        }
+        VETO_HOOK.store(hook as usize, Ordering::Relaxed);
+        true
+    }
+
+    /// Called from the overlay root's WM_NCDESTROY on the same UI thread.
+    fn remove_veto(window: HWND) {
+        if VETO_OVERLAY.load(Ordering::Relaxed) != window as usize {
+            return;
+        }
+        VETO_OVERLAY.store(0, Ordering::Relaxed);
+        let hook = VETO_HOOK.swap(0, Ordering::Relaxed);
+        if hook != 0 {
+            unsafe {
+                UnhookWindowsHookEx(hook as _);
+            }
+        }
+    }
 
     struct QaTrace {
         id: usize,
@@ -349,6 +426,7 @@ mod native {
             },
             || {
                 if message == WM_NCDESTROY {
+                    remove_veto(window);
                     RemoveWindowSubclass(window, Some(overlay_proc), id);
                 }
                 DefSubclassProc(window, message, wparam, lparam)
@@ -390,6 +468,14 @@ mod native {
         let top_level = subclass(top);
         unsafe {
             EnumChildWindows(top, Some(each_child), &mut children as *mut usize as LPARAM);
+        }
+        let veto = top_level && install_veto(top);
+        if VETO_LOGGED.swap(usize::from(veto), Ordering::Relaxed) != usize::from(veto) {
+            if veto {
+                tracing::info!("Overlay activation veto installed on the UI thread");
+            } else {
+                tracing::warn!("Overlay activation veto unavailable; relying on the hand-back");
+            }
         }
         let key = log_key(top_level, children);
         if top_level
@@ -691,6 +777,20 @@ mod tests {
             WA_ACTIVE,
             true
         ));
+    }
+
+    #[test]
+    fn activation_veto_refuses_only_the_overlay_root_activation() {
+        const OVERLAY: usize = 0x151228;
+        assert!(veto_activation(HCBT_ACTIVATE, OVERLAY, OVERLAY));
+        // Settings, any other window, other hook codes and negative codes pass on.
+        assert!(!veto_activation(HCBT_ACTIVATE, 0x590998, OVERLAY));
+        for code in [-1, 0, 1, 2, 3, 4, 6, 7, 8, 9] {
+            assert!(!veto_activation(code, OVERLAY, OVERLAY), "code {code}");
+        }
+        // Before installation (or after teardown) nothing is refused, not even a null target.
+        assert!(!veto_activation(HCBT_ACTIVATE, 0, 0));
+        assert!(!veto_activation(HCBT_ACTIVATE, OVERLAY, 0));
     }
 
     #[test]
