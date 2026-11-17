@@ -387,7 +387,15 @@ class Notepad:
             raise RuntimeError(f"Notepad window ownership changed for {self.path.name}")
         check()
         if not self.win32.activate(self.hwnd):
-            raise RuntimeError(f"Could not activate Notepad for {self.path.name}")
+            # Windows' foreground lock can refuse SetForegroundWindow once an unrelated window
+            # took the foreground (after C3 stops Murmur: runs 43906690485, 44054200939). Use
+            # the real activation path Notepad.focus uses, a click on this owned editor, and
+            # only where a hit-test proves this Notepad window is the one under the point.
+            point = self._owned_editor_point()
+            check()
+            if point is None or not self.win32.activate(self.hwnd, click_at=point, guard_check=check):
+                raise RuntimeError(f"Could not activate Notepad for {self.path.name}"
+                                   + ("" if point else " (editor covered or not owned)"))
         # Restored tabs from earlier sessions can precede this run's fixtures.
         # Navigation is reversible; Ctrl+W is sent only when this run's unique title is active.
         for _ in range(max_tabs):
@@ -425,6 +433,20 @@ class Notepad:
             check()
             self.win32.tap("ctrl", "tab")
         raise RuntimeError(f"Could not locate owned Notepad tab {self.path.name}")
+
+    def _owned_editor_point(self):
+        """Centre of this window's editor, only when that point hit-tests to this owned window."""
+        try:
+            point = self.uia.center(self.document())
+        except Exception:  # noqa: BLE001 - no point means no click
+            return None
+        user32 = self.win32.user32
+        hit = user32.WindowFromPoint(self.win32.POINT(*point))
+        if (not hit or user32.GetAncestor(hit, self.win32.GA_ROOT) != self.hwnd or
+                self.win32.window_pid(hit) != self.owner_pid or
+                self.owner_pid not in self.win32.pids("Notepad.exe")):
+            return None
+        return point
 
     def editor_focused(self, document=None):
         document = document or self.document()

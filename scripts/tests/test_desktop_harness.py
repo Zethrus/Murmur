@@ -1547,6 +1547,30 @@ class DesktopFollowupTests(unittest.TestCase):
             keys.assert_not_called()
             self.assertEqual(pad.hwnd, 42)
 
+    def test_cleanup_falls_back_to_a_hit_tested_click_on_the_owned_editor_only(self):
+        for label, hit_root, hit_pid, expect_click in (("owned editor", 42, 7, True),
+                                                       ("covered by another window", 99, 31, False),
+                                                       ("foreign child in the window", 42, 31, False)):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                pad = targets.Notepad(directory, "I6-doc")
+                pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+                calls = []
+                def activate(hwnd, click_at=None, guard_check=None):
+                    calls.append(click_at)
+                    return click_at is not None  # the plain attempt is refused (foreground lock)
+                pad.win32 = SimpleNamespace(
+                    is_window=lambda _: True, pids=lambda _: [7], activate=activate, tap=mock.Mock(),
+                    window_pid=lambda h: 7 if h == 42 else hit_pid, POINT=lambda x, y: (x, y), GA_ROOT=2,
+                    user32=SimpleNamespace(WindowFromPoint=lambda _p: 55,
+                                           GetAncestor=lambda h, _k: hit_root if h == 55 else h),
+                    foreground=lambda: 0, window_text=lambda _: "")
+                pad.uia = SimpleNamespace(center=lambda _d: (300, 200))
+                pad.document = lambda: "document"
+                with self.assertRaises(RuntimeError):  # stops later: foreground mocked as lost
+                    pad.close_owned()
+                self.assertEqual(calls, [None, (300, 200)] if expect_click else [None])
+                pad.win32.tap.assert_not_called()
+
     def test_notepad_snapshot_records_foreground_and_current_owner_without_input(self):
         ctx = Context.__new__(Context)
         pad = SimpleNamespace(path=Path("owned.txt"), hwnd=42, owner_pid=7, owned_tab=True,

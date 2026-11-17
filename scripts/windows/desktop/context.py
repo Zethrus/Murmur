@@ -167,6 +167,14 @@ class Context:
     def notepad_ownership_snapshot(self):
         """Read-only evidence around teardown; never grants permission to close a tab."""
         foreground = win32.foreground_context()
+        identity = {}
+        try:  # which window holds the foreground matters when cleanup cannot activate Notepad
+            hwnd = foreground.get("hwnd")
+            identity["class"] = win32.class_name(hwnd) if hwnd else ""
+            path = win32.process_path(foreground.get("process_id")) if hwnd else None
+            identity["process_image"] = path.rsplit("\\", 1)[-1] if path else None
+        except Exception as error:  # noqa: BLE001 - evidence only
+            identity["error"] = f"{type(error).__name__}: {error}"
         owned = []
         for pad in self._completed_notepads:
             row = {"document": pad.path.name, "hwnd": pad.hwnd, "recorded_pid": pad.owner_pid,
@@ -180,7 +188,7 @@ class Context:
                 except Exception as error:  # noqa: BLE001 - evidence cannot authorize cleanup
                     row["read_error"] = f"{type(error).__name__}: {error}"
             owned.append(row)
-        return {"foreground": foreground, "notepads": owned}
+        return {"foreground": foreground, "foreground_identity": identity, "notepads": owned}
 
     def clipboard_guard(self):
         """Restore the clipboard text after the check (other formats cannot be restored)."""
