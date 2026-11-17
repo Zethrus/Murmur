@@ -2460,25 +2460,46 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
     def test_o8_settings_typing_requires_the_exact_control_to_keep_uia_focus(self):
         owned = {"hwnd": 33, "process_id": 71, "input_desktop": "Default", "gui_status": "ok",
                  "focus_hwnd": 0x480cc2}
-        for label, contexts, focused in (
-                ("another page control took focus", [owned], [False]),
-                ("native focus moved during the UIA check", [owned, dict(owned, focus_hwnd=0x660bd4)], [True])):
+        clock = iter(range(1000))
+        self.enterContext(mock.patch.object(overlay_checks.time, "monotonic", side_effect=lambda: next(clock) * 0.25))
+        self.enterContext(mock.patch.object(uia, "focused", return_value="document"))
+        self.enterContext(mock.patch.object(uia, "describe", return_value="Document 'Murmur Settings'"))
+        self.enterContext(mock.patch.object(uia, "handle", return_value=0x64011c))
+        for label, focused, typed_expected, returned in (
+                ("never returns", lambda: False, True, None),
+                ("returns during the bounded poll", None, True, 1.0)):
             with self.subTest(label=label):
-                ctx = self._typing_context(contexts)
-                with mock.patch.object(win32, "type_unicode") as typed:
+                ctx = self._typing_context([owned] * 20)
+                if focused is None:
+                    answers = iter([False, False, False, True, True, True, True])
+                    focused = lambda: next(answers)  # noqa: E731
+                values = ["", "o8k2"]
+                with mock.patch.object(win32, "type_unicode") as typed, \
+                     mock.patch.object(win32, "window_pid", return_value=71):
                     probe = overlay_checks._o8_type_after_release(
-                        ctx, {"foreground_before": dict(owned)}, (33, 71), lambda: "", "o8k2",
-                        lambda: focused.pop(0))
-                typed.assert_not_called()
-                self.assertFalse(probe["attempted"])
-        ctx = self._typing_context([owned] * 4)
+                        ctx, {"foreground_before": dict(owned)}, (33, 71), lambda: values.pop(0), "o8k2", focused)
+                self.assertEqual(typed.called, typed_expected)
+                self.assertEqual(probe["uia_focus_returned_after_s"], returned)
+                self.assertEqual(probe["uia_focus_seen"][0]["describe"], "Document 'Murmur Settings'")
+                # Typing then proceeds only into the verified native Settings focus window,
+                # and is labelled so it is never mistaken for a UIA-proven target.
+                self.assertEqual(probe.get("typed_without_uia_proof", False), returned is None)
+        # A native focus move is refused before any UIA wait.
+        ctx = self._typing_context([dict(owned, focus_hwnd=0x660bd4)] * 3)
+        with mock.patch.object(win32, "type_unicode") as typed:
+            probe = overlay_checks._o8_type_after_release(
+                ctx, {"foreground_before": dict(owned)}, (33, 71), lambda: "", "o8k2", lambda: True)
+        typed.assert_not_called()
+        self.assertNotIn("uia_focus_returned_after_s", probe)
+        # Unchanged control: types immediately, no poll recorded.
+        ctx = self._typing_context([owned] * 6)
         values = ["", "o8k2"]
         with mock.patch.object(win32, "type_unicode") as typed:
             probe = overlay_checks._o8_type_after_release(
-                ctx, {"foreground_before": dict(owned)}, (33, 71), lambda: values.pop(0), "o8k2",
-                lambda: True)
+                ctx, {"foreground_before": dict(owned)}, (33, 71), lambda: values.pop(0), "o8k2", lambda: True)
         typed.assert_called_once_with("o8k2")
         self.assertTrue(probe["landed"])
+        self.assertNotIn("uia_focus_returned_after_s", probe)
 
     def test_o8_settings_field_is_clicked_only_inside_owned_settings_and_must_take_focus(self):
         owned = {"hwnd": 33, "process_id": 71, "input_desktop": "Default", "gui_status": "ok"}

@@ -476,9 +476,40 @@ def _o8_type_after_release(ctx, observed, expected_foreground, read_text, token,
         if element_focused is not None:
             if not element_focused():
                 probe["reason"] = "keyboard target not verified: preselected control lost UIA focus"
+                _record_uia_focus()
                 return False
             return native_verified()  # the UIA read can block while focus changes
         return True
+
+    def _record_uia_focus():
+        # Evidence only: what UIA reports instead (role, name, owning window); no input.
+        try:
+            focused = uia.focused()
+            native = uia.handle(focused) if focused else 0
+            root = win32.user32.GetAncestor(native, win32.GA_ROOT) if native else 0
+            probe.setdefault("uia_focus_seen", []).append({
+                "describe": uia.describe(focused), "native_hwnd": native, "native_root": root,
+                "native_pid": win32.window_pid(root) if root else 0})
+        except Exception as error:  # noqa: BLE001
+            probe.setdefault("uia_focus_seen", []).append({"error": f"{type(error).__name__}: {error}"})
+
+    if element_focused is not None and native_verified() and not element_focused():
+        # Measure (never wait silently): poll up to 2 s for the control to regain UIA focus.
+        _record_uia_focus()
+        started = time.monotonic()
+        while time.monotonic() - started < 2.0:
+            ctx.sleep(0.25)
+            if element_focused():
+                probe["uia_focus_returned_after_s"] = round(time.monotonic() - started, 2)
+                break
+        else:
+            probe["uia_focus_returned_after_s"] = None
+            # Native owner and focus window are still Murmur's own Settings: a letters-only
+            # token there cannot activate a button or toggle, and the exact field text then
+            # shows whether DOM focus stayed in the field (UIA misreport) or moved (real loss).
+            if token.isalnum() and token.isascii() and native_verified():
+                element_focused = None
+                probe["typed_without_uia_proof"] = True
 
     if not target_verified():
         return probe
@@ -667,6 +698,9 @@ def o8_foreground_drag(ctx):
                 record["failures"].append(f"{label}: keyboard focus changed")
             typed = _o8_type_after_release(ctx, observed, expected, read_text, f"o8k{index + 1}",
                                            element_focused)
+            if "uia_focus_returned_after_s" in typed:
+                record["failures"].append(f"{label}: preselected control lost UIA focus "
+                                          f"(returned after {typed['uia_focus_returned_after_s']} s)")
             if not typed["landed"]:
                 record["failures"].append(f"{label}: typing after release did not land exactly "
                                           f"({typed.get('reason') or 'text mismatch'})")
