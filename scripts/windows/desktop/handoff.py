@@ -36,6 +36,8 @@ REQUIRED = (
     "murmur-release.asc",
     "components-windows-inputs.json",
 )
+# At most one each; hashed, logged and verified exactly like the required files.
+OPTIONAL = ("webview2-input-repro.exe",)  # O9's diagnostic reproducer (tools/webview2-input-repro)
 WORKFLOW = "windows-build.yml"
 
 
@@ -92,7 +94,11 @@ def check_required(names):
         matches = [n for n in names if fnmatch.fnmatchcase(n, pattern)]
         if len(matches) != 1:
             raise HandoffError(f"Expected exactly one {pattern} in the hand-off, found {matches or 'none'}")
-    extra = [n for n in names if not any(fnmatch.fnmatchcase(n, p) for p in REQUIRED)]
+    for pattern in OPTIONAL:
+        matches = [n for n in names if fnmatch.fnmatchcase(n, pattern)]
+        if len(matches) > 1:
+            raise HandoffError(f"Expected at most one {pattern} in the hand-off, found {matches}")
+    extra = [n for n in names if not any(fnmatch.fnmatchcase(n, p) for p in REQUIRED + OPTIONAL)]
     if extra:
         raise HandoffError(f"Unexpected files in the hand-off: {', '.join(sorted(extra))}")
 

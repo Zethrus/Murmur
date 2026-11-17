@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "settings",
+        "create": false,
         "title": "Murmur Settings",
         "url": "index.html",
         "width": 1000,
@@ -23,6 +24,7 @@
       },
       {
         "label": "overlay",
+        "create": false,
         "title": "Murmur Overlay",
         "url": "index.html?window=overlay",
         "width": 608,

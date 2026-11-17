@@ -11,10 +11,13 @@ import time
 BUTTON, CHECKBOX, EDIT, HYPERLINK, LISTITEM, MENU, MENUBAR, MENUITEM = 50000, 50002, 50004, 50005, 50007, 50009, \
     50010, 50011
 PROGRESSBAR, RADIOBUTTON, TEXT, DOCUMENT, WINDOW, PANE, GROUP = 50012, 50013, 50020, 50030, 50032, 50033, 50026
-TYPE_NAMES = {BUTTON: "Button", CHECKBOX: "CheckBox", EDIT: "Edit", HYPERLINK: "Hyperlink", LISTITEM: "ListItem",
+IMAGE, STATUSBAR, TOOLTIP = 50006, 50017, 50022
+TYPE_NAMES = {BUTTON: "Button", CHECKBOX: "CheckBox", EDIT: "Edit", HYPERLINK: "Hyperlink", IMAGE: "Image",
+              LISTITEM: "ListItem",
               MENU: "Menu", MENUBAR: "MenuBar", MENUITEM: "MenuItem", PROGRESSBAR: "ProgressBar",
-              RADIOBUTTON: "RadioButton", TEXT: "Text", DOCUMENT: "Document", WINDOW: "Window", PANE: "Pane",
-              GROUP: "Group"}
+              RADIOBUTTON: "RadioButton", TEXT: "Text", TOOLTIP: "ToolTip", DOCUMENT: "Document", WINDOW: "Window",
+              PANE: "Pane",
+              GROUP: "Group", STATUSBAR: "StatusBar"}
 INVOKE, VALUE, RANGEVALUE, SELECTIONITEM, TEXTPATTERN, TOGGLE = 10000, 10002, 10003, 10010, 10014, 10015
 TREE_CHILDREN, TREE_DESCENDANTS = 0x2, 0x4
 NAME_PROPERTY = 30005
@@ -246,6 +249,34 @@ def has_pattern(element, pattern_id):
         return False
 
 
+def named_toggle(window, label, timeout=10.0, sleep=time.sleep):
+    """Find the switch itself, whose accessible name comes from its row label.
+
+    A following-button lookup can escape the page and select a title-bar button.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        for element in find_all(window, name_=label):
+            if has_pattern(element, TOGGLE):
+                return element
+        if time.monotonic() >= deadline:
+            raise NotFound(f"No toggle named {label!r} after {timeout:.0f} s")
+        sleep(0.25)
+
+
+def document_element(window, timeout=10.0, sleep=time.sleep):
+    """The editor document, never an unrelated TextPattern such as Notepad's style menu."""
+    deadline = time.monotonic() + timeout
+    while True:
+        for kind in (DOCUMENT, EDIT):
+            for element in find_all(window, control_type_=kind):
+                if has_pattern(element, TEXTPATTERN):
+                    return element
+        if time.monotonic() >= deadline:
+            raise NotFound("No document with TextPattern")
+        sleep(0.25)
+
+
 def text_element(window, timeout=10.0, sleep=time.sleep):
     """First descendant (or the window itself) that supports TextPattern."""
     deadline = time.monotonic() + timeout
@@ -255,4 +286,24 @@ def text_element(window, timeout=10.0, sleep=time.sleep):
                 return element
         if time.monotonic() >= deadline:
             raise NotFound("No element with TextPattern")
+        sleep(0.25)
+
+
+def terminal_text_element(window, timeout=10.0, sleep=time.sleep):
+    """Find a descendant whose TextPattern contains a PowerShell prompt.
+
+    Windows Terminal's top-level window also exposes TextPattern, but that range contains its
+    title rather than the terminal buffer. The prompt proves this is the content range.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        for element in descendants(window):
+            if has_pattern(element, TEXTPATTERN):
+                try:
+                    if re.search(r"(?m)^PS [^>\n]*>", text(element)):
+                        return element
+                except Exception:  # noqa: BLE001 - a UIA element may be replaced during redraw
+                    pass
+        if time.monotonic() >= deadline:
+            raise NotFound("No terminal buffer TextPattern containing a PowerShell prompt")
         sleep(0.25)

@@ -12,6 +12,7 @@ export function components(ctx: PageContext): HTMLElement {
   const free = el("span", "status-value", "…");
   const notice = el("p", "hint", "Loading components…"), updates = el("p", "hint"), problem = el("p", "field-error"); problem.setAttribute("role", "alert");
   const rows = new Map<string, (job: import("../../bridge").ComponentJob) => void>();
+  const verified = new Map<string, string>();
   let live = true; ctx.cleanup(() => { live = false; });
   const fail = (message: string): void => { problem.textContent = message; };
   const render = (snapshot: ComponentsSnapshot): void => {
@@ -23,6 +24,13 @@ export function components(ctx: PageContext): HTMLElement {
     const m = snapshot.manifest;
     updates.textContent = m ? `Component list ${m.serial}, issued ${m.issued_at.slice(0, 10)}, ${m.stale ? "expired" : "valid until"} ${m.expires_at.slice(0, 10)}${snapshot.trust.development ? " · development signing key" : ""}.` : "No verified component list yet.";
     const hooks = {fail, canInstall: snapshot.trust.ok && !snapshot.stale,
+      verified: (info: ComponentInfo): boolean => verified.get(info.id) === info.installed_version &&
+        (info.state === "active" || info.state === "installed"),
+      onVerify: (info: ComponentInfo, verdict: string): void => {
+        if (verdict === "verified" && info.installed_version) verified.set(info.id, info.installed_version);
+        else verified.delete(info.id);
+        void load(); // a components/changed event may already have replaced the button's row
+      },
       extra: (info: ComponentInfo): HTMLElement[] => info.kind === "speech-model" && info.state === "installed" && info.model
         ? [button("Use model", () => ctx.save({engine: {model: info.model ?? ""}}), "primary")] : []};
     const place = (box: HTMLElement, list: ComponentInfo[], empty: string): void => {

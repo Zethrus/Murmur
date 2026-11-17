@@ -7,7 +7,7 @@ const button = (root,label) => root.querySelectorAll("button").find(b=>b.textCon
 async function settings(overrides){const h=await harness(overrides);await (await h.module("settings/app.ts")).mountSettings(h.root);await settle();return h;}
 test("settings mounts six pages, status/version, and releases all listeners",async()=>{
   const h=await settings();assert.equal(h.root.querySelectorAll(".nav-button").length,6);assert.match(h.root.textContent,/Version 0.1.0/);
-  for(const page of ["General","Components","Audio","Behavior","Privacy","Companion"]){await button(h.root,page).dispatch("click");await settle();assert.equal(h.root.querySelector("h1").textContent,page);assert.ok(h.root.querySelectorAll(".card").length>=2);}
+  for(const page of ["General","Components","Audio","Behavior","Privacy","Companion"]){assert.equal(button(h.root,page).getAttribute("aria-label"),page);await button(h.root,page).dispatch("click");await settle();assert.equal(h.root.querySelector("h1").textContent,page);assert.ok(h.root.querySelectorAll(".card").length>=2);}
   h.unload();assert.equal([...h.events.values()].reduce((n,s)=>n+s.size,0),0);
 });
 test("general saves coding hotkey and theme through set_config",async()=>{
@@ -66,6 +66,7 @@ test("components page shows every state with its actions",async()=>{
   const h=await settings({componentsFixture:fixture});await button(h.root,"Components").dispatch("click");await settle();await settle();
   const row=id=>component(h.root,id);
   assert.ok(button(row("cuda"),"Resume")&&button(row("cuda"),"Discard"));assert.match(h.root.textContent,/RTX 4060 Laptop GPU · 8.0 GB video memory · driver 580.178.04/);
+  assert.equal(row("cuda").querySelector(".progress-block").hidden,true,"paused jobs intentionally hide the progress bar");
   assert.ok(button(row("speech-tiny.en"),"Reinstall"));assert.match(row("speech-tiny.en").textContent,/do not match the signed manifest.*Nothing was deleted/);
   assert.ok(button(row("speech-distil-large-v3"),"Retry"));assert.match(row("speech-distil-large-v3").textContent,/Not enough disk space/);
   assert.ok(button(row("speech-large-v3-turbo"),"Reinstall")&&button(row("speech-large-v3-turbo"),"Remove"));
@@ -73,6 +74,28 @@ test("components page shows every state with its actions",async()=>{
   await button(row("cuda"),"Resume").dispatch("click");assert.deepEqual(plain(h.calls.find(c=>c.name==="components_resume").args),{id:"cuda"});
   await button(row("engine"),"Verify").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_verify"));
   await button(h.root,"Check for updates").dispatch("click");assert.ok(h.calls.some(c=>c.name==="components_check_updates"));h.unload();
+});
+test("component Verify note survives a refresh before the reply",async()=>{
+  const h=await settings({components_verify:async(_,{emit})=>{
+    emit("components/changed",{});h.timers.tick(100);await settle();await settle();
+    return {verdict:"verified"};
+  }});
+  await button(h.root,"Components").dispatch("click");await settle();await settle();
+  await button(component(h.root,"engine"),"Verify").dispatch("click");await settle();await settle();
+  assert.match(component(h.root,"engine").textContent,/Files verified\./);
+  assert.doesNotMatch(component(h.root,"speech-distil-small.en").textContent,/Files verified\./);
+  h.unload();
+});
+test("component Verify mismatch never keeps a stale success note",async()=>{
+  let verified=true;
+  const h=await settings({components_verify:async()=>({verdict:verified?"verified":"mismatch"})});
+  await button(h.root,"Components").dispatch("click");await settle();await settle();
+  await button(component(h.root,"engine"),"Verify").dispatch("click");await settle();await settle();
+  assert.match(component(h.root,"engine").textContent,/Files verified\./);
+  verified=false;
+  await button(component(h.root,"engine"),"Verify").dispatch("click");await settle();await settle();
+  assert.doesNotMatch(component(h.root,"engine").textContent,/Files verified\./);
+  h.unload();
 });
 test("missing trust root explains what needs what and disables installs",async()=>{
   const h=await settings({componentsFixture:componentsFixture({engine:false,trust:false})});
@@ -103,6 +126,14 @@ test("setup still opens with an expired list but cannot install, and says why",a
 // ---- First-run setup ----
 const stepTitle=h=>h.root.querySelector(".setup-title").textContent;
 const radio=(h,name,value)=>h.root.querySelectorAll("input").find(i=>i.name===name&&i.value===value);
+test("an installed engine without the selected model still opens first-run setup",async()=>{
+  const fixture=componentsFixture();Object.assign(fixture.components.find(c=>c.id==="speech-distil-small.en"),{state:"available",installed_version:null});
+  const h=await settings({componentsFixture:fixture});
+  assert.equal(stepTitle(h),"Welcome");assert.equal(h.root.querySelector(".settings-shell").hidden,true);
+  for(let i=0;i<4;i++)await button(h.root,"Next").dispatch("click");
+  assert.match(h.root.textContent,/Download335 MB/);
+  h.unload();
+});
 test("setup opens on first run, walks six steps in order and installs only after consent",async()=>{
   const h=await settings({componentsFixture:componentsFixture({engine:false})});
   assert.equal(h.root.querySelector(".setup-layer").hidden,false);assert.equal(h.root.querySelector(".settings-shell").hidden,true);
@@ -283,6 +314,21 @@ test("general offers reset position and describes a clickable, draggable overlay
   const h=await settings();assert.doesNotMatch(h.root.textContent,/click-through/);await button(h.root,"Reset position").dispatch("click");assert.ok(h.calls.some(c=>c.name==="reset_overlay_position"));
   h.config.overlay.position="custom";h.emit("config",structuredClone(h.config));await settle();const position=h.document.getElementById("field-position");
   assert.equal(position.value,"custom");assert.match(h.root.textContent,/Where you dragged it/);h.unload();
+});
+test("an external config change never rebuilds the page under a focused text field",async()=>{
+  const h=await settings();await button(h.root,"Privacy").dispatch("click");await settle();
+  const search=()=>h.root.querySelectorAll("input").find(i=>i.getAttribute("aria-label")==="Search history");
+  const field=search();field.value="half-typed";field.focus();
+  // The overlay drag persists its placement: Settings receives an external config event.
+  h.config.overlay.position="custom";h.emit("config",structuredClone(h.config));await settle();
+  assert.equal(search(),field,"the focused field survives");assert.equal(field.value,"half-typed");
+  assert.equal(h.document.activeElement,field);
+  // Leaving the field applies the deferred refresh.
+  h.document.activeElement=null;await h.root.querySelector(".page-content").dispatch("focusout");h.timers.tick(1);await settle();
+  assert.notEqual(search(),field,"the deferred render ran once focus left");
+  // Without a focused text field the refresh is immediate, as before.
+  const fresh=search();h.config.overlay.scale=1.2;h.emit("config",structuredClone(h.config));await settle();
+  assert.notEqual(search(),fresh);h.unload();
 });
 test("general replaces the hide toggle with a When idle choice",async()=>{
   const h=await settings();assert.doesNotMatch(h.root.textContent,/Hide when idle/);const idle=h.document.getElementById("field-when-idle");
@@ -485,6 +531,7 @@ test("idle icon replaces hiding by default and gives way to every active state",
   assert.equal(h.root.dataset.idle,undefined,"startup shows the pill first");h.timers.tick(1500);
   assert.equal(pill.hidden,false);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.title,"Drag to move");
   h.emit("state",{state:"listening"});assert.equal(h.root.dataset.idle,undefined);assert.equal(pill.hidden,false);
+  const handle=h.root.querySelector(".drag-handle");assert.equal(handle.getAttribute("aria-label"),"Drag to move");assert.equal(handle.getAttribute("role"),"img");
   h.emit("state",{state:"done"});h.timers.tick(899);assert.equal(h.root.dataset.idle,undefined);h.timers.tick(1);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);
   h.emit("state",{state:"idle"});assert.equal(h.root.dataset.idle,"icon");
   h.emit("state",{state:"error"});assert.equal(h.root.dataset.idle,undefined);h.timers.tick(1600);assert.equal(h.root.dataset.idle,"icon");
@@ -507,6 +554,91 @@ test("the whole idle icon is the drag handle and stays an icon while moving",asy
   await pill.dispatch("mousedown",{button:0});assert.equal(h.drags.length,1);assert.equal(h.root.dataset.dragging,"true");
   h.timers.tick(5000);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);
   release();await settle();h.timers.tick(1500);assert.equal(h.root.dataset.idle,"icon");assert.equal(pill.hidden,false);h.unload();
+});
+test("QA drag probe records DOM hit and handler receipt only when enabled",async()=>{
+  let h;h=await harness({qa_overlay_drag_probe:async({probe})=>{
+    if(probe.stage===4)assert.equal(h.root.listeners.get("mousedown")?.length,1,"stage 4 follows listener installation");
+    return true;
+  }});
+  h.document.elementFromPoint=()=>h.root;
+  await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);await settle();
+  const pill=h.root.querySelector(".pill"),bar=h.root.querySelector(".bars i");
+  pill.rect={left:10,top:20,right:50,bottom:60,width:40,height:40};
+  h.document.elementFromPoint=()=>bar;
+  h.timers.tick(1500);
+  await h.root.dispatch("mousedown",{button:0,clientX:12,clientY:13});
+  await pill.dispatch("mousedown",{button:0,clientX:12,clientY:13});
+  const probes=h.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>plain(c.args.probe));
+  assert.deepEqual(probes.filter(p=>p.stage!==6).map(p=>p.stage),[0,4,5,1,2]);
+  assert.equal(probes[2].idleIcon,true);assert.equal(probes[2].pillHidden,false);
+  assert.equal(probes[2].rootPointerEvents,true);assert.equal(probes[2].targetKind,3);
+  assert.deepEqual(probes[2].pillRect,[10,20,50,60]);assert.deepEqual([probes[2].x,probes[2].y],[30,40]);
+  assert.equal(probes[3].targetKind,3);assert.equal(probes[3].hitPill,true);
+  assert.equal(probes[3].idleIcon,true);assert.equal(probes[4].dragging,true);
+  assert.equal(h.drags.length,1);h.unload();
+});
+test("QA icon sample waits for listener acknowledgment and does not alter normal mounts",async()=>{
+  let acknowledge;const h=await harness({qa_overlay_drag_probe:async({probe})=>
+    probe.stage===4?new Promise(resolve=>{acknowledge=resolve;}):true});
+  h.document.elementFromPoint=()=>h.root;
+  await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);await settle();
+  h.timers.tick(1500);
+  assert.deepEqual(h.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>c.args.probe.stage),[0,4]);
+  acknowledge(true);await settle();
+  assert.deepEqual(h.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>c.args.probe.stage),[0,4,5]);
+  h.timers.tick(5000);
+  assert.equal(h.calls.filter(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===5).length,1);
+  h.unload();
+
+  const normal=await harness({qa_overlay_drag_probe:async()=>false});
+  normal.document.elementFromPoint=()=>normal.root;
+  await (await normal.module("overlay/overlay.ts")).mountOverlay(normal.root);await settle();
+  normal.timers.tick(1500);
+  await normal.root.querySelector(".pill").dispatch("mousedown",{button:0});
+  assert.deepEqual(normal.calls.filter(c=>c.name==="qa_overlay_drag_probe").map(c=>c.args.probe.stage),[0]);
+  assert.equal(normal.drags.length,1,"QA disabled leaves the normal drag handler active");
+  assert.equal(normal.root.dataset.idle,"icon");normal.unload();
+});
+test("QA post-size probe samples viewport center only after native size acknowledgment",async()=>{
+  let acknowledgeSize;
+  const h=await harness({qa_overlay_drag_probe:async()=>true,
+    set_overlay_size:()=>new Promise(resolve=>{acknowledgeSize=resolve;})});
+  h.document.elementFromPoint=()=>h.root;
+  await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);await settle();
+  const pill=h.root.querySelector(".pill");
+  pill.rect={left:50,top:30,right:94,bottom:62,width:44,height:32};
+  h.timers.tick(1500);
+  h.observers.trigger();
+  assert.equal(typeof acknowledgeSize,"function");
+  assert.ok(!h.calls.some(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6));
+  Object.assign(h.window,{innerWidth:52,innerHeight:40,devicePixelRatio:1.25});
+  acknowledgeSize();await settle();
+  const probe=plain(h.calls.find(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6).args.probe);
+  assert.deepEqual([probe.x,probe.y,probe.viewportWidth,probe.viewportHeight,probe.devicePixelRatio],[26,20,52,40,1.25]);
+  assert.deepEqual(probe.pillRect,[50,30,94,62]);
+  assert.equal(probe.hitPill,false,"a mismatched viewport is observed, not accepted as a drag hit");
+  h.unload();
+});
+test("QA viewport sampling handles late arming and ignores superseded size replies",async()=>{
+  for (const armFirst of [false,true]) {
+    let arm;const sizes=[];
+    const h=await harness({qa_overlay_drag_probe:async({probe})=>probe.stage===4?new Promise(resolve=>{arm=resolve;}):true,
+      set_overlay_size:()=>new Promise(resolve=>sizes.push(resolve))});
+    h.document.elementFromPoint=()=>h.root;
+    await (await h.module("overlay/overlay.ts")).mountOverlay(h.root);await settle();
+    const pill=h.root.querySelector(".pill");
+    pill.rect={left:4,top:4,right:204,bottom:46,width:200,height:42};h.observers.trigger();
+    h.timers.tick(1500);
+    pill.rect={left:4,top:4,right:48,bottom:36,width:44,height:32};h.observers.trigger();
+    const latest=sizes.pop();assert.ok(sizes.length>0);
+    if(armFirst){arm(true);await settle();}
+    for(const resolve of sizes)resolve();await settle();
+    assert.ok(!h.calls.some(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6),"old replies cannot qualify the current layout");
+    latest();await settle();
+    if(!armFirst){assert.ok(!h.calls.some(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6));arm(true);await settle();}
+    assert.equal(h.calls.filter(c=>c.name==="qa_overlay_drag_probe"&&c.args.probe.stage===6).length,1);
+    h.unload();
+  }
 });
 test("suggestions, held text and drag errors use the full pill over the idle icon",async()=>{
   const h=await overlay({startOverlayDrag:async()=>{throw new Error("permission denied");}}),pill=h.root.querySelector(".pill"),label=h.root.querySelector(".pill-label");

@@ -14,6 +14,7 @@ class Check:
     title: str
     function: str
     best_effort: bool = False
+    diagnostic: bool = False
 
 
 GROUPS = ("setup", "settings", "overlay", "hotkeys", "insertion", "focus", "tray", "microphone", "keyboard",
@@ -33,6 +34,9 @@ CHECKS = (
     Check("O4", "overlay", "B7: empty area and drag handle keep focus", "o4_empty_area"),
     Check("O6", "overlay", "Overlay scale minimum and maximum", "o6_scale"),
     Check("O7", "overlay", "B7 evidence: no-activate subclass logged", "o7_subclass_log"),
+    Check("O8", "overlay", "Diagnostic: idle drag across foreground owners", "o8_foreground_drag", diagnostic=True),
+    Check("O9", "overlay", "Diagnostic: WebView2 host-input reproducer, baseline and candidate",
+          "o9_webview2_repro", diagnostic=True),
     Check("H1", "hotkeys", "Hold hotkey into Notepad, key released first", "h1_hold"),
     Check("H2", "hotkeys", "Release order variants", "h2_release_order"),
     Check("H3", "hotkeys", "B8: Shift held after the key", "h3_shift_held"),
@@ -40,6 +44,8 @@ CHECKS = (
     Check("H5", "hotkeys", "Escape cancels", "h5_escape"),
     Check("H6", "hotkeys", "Hotkey owned by another app", "h6_conflict"),
     Check("H7", "hotkeys", "Code hotkey", "h7_code"),
+    Check("H8", "hotkeys", "Direct-input control and Alt/non-Alt Notepad focus phases",
+          "h8_focus_phases", diagnostic=True),
     Check("I1", "insertion", "Sentence A into Notepad (type)", "i1_notepad"),
     Check("I2", "insertion", "Sentence B into the editor", "i2_editor"),
     Check("I3", "insertion", "Sentence A into Windows Terminal", "i3_terminal", best_effort=True),
@@ -115,7 +121,8 @@ def select(only=None, group=None):
     bad_groups = [g for g in groups if g not in GROUPS]
     if bad_groups:
         raise SelectionError(f"Unknown group(s): {', '.join(bad_groups)}; choose from {', '.join(GROUPS)}")
-    chosen = [c for c in CHECKS if (not only_ids or c.id in only_ids) and (not groups or c.group in groups)]
+    chosen = [c for c in CHECKS if (not c.diagnostic or c.id in only_ids)
+              and (not only_ids or c.id in only_ids) and (not groups or c.group in groups)]
     if not chosen:
         raise SelectionError("The selection matches no checks")
     return sorted(chosen, key=lambda c: (GROUPS.index(c.group), CHECKS.index(c)))

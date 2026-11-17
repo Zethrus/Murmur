@@ -9,7 +9,7 @@ const NOTICE_MS = 4000;
 const active = (e: Enhancement): boolean => e.phase !== "none";
 
 export async function mountOverlay(root: HTMLElement): Promise<void> {
-  root.innerHTML = '<section class="pill" role="status" aria-live="polite"><span class="pill-state"><span class="drag-handle" role="presentation" title="Drag to move"><i></i><i></i><i></i></span><span class="indicator" aria-hidden="true"></span><span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><span class="pill-label"></span></span><span class="preview"></span>'
+  root.innerHTML = '<section class="pill" role="status" aria-live="polite"><span class="pill-state"><span class="drag-handle" role="img" aria-label="Drag to move" title="Drag to move"><i></i><i></i><i></i></span><span class="indicator" aria-hidden="true"></span><span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><span class="pill-label"></span></span><span class="preview"></span>'
     + '<div class="suggestion"><p class="suggestion-title">Suggested rewrite</p><p class="suggestion-text"></p><p class="suggestion-message"></p>'
     + '<div class="suggestion-actions"><button type="button" class="overlay-button primary accept-button">Accept — copy</button><button type="button" class="overlay-button discard-button">Discard</button></div></div></section>';
   const pill = root.querySelector<HTMLElement>(".pill")!, label = root.querySelector<HTMLElement>(".pill-label")!, preview = root.querySelector<HTMLElement>(".preview")!, indicator = root.querySelector<HTMLElement>(".indicator")!;
@@ -20,7 +20,49 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   let state: DictationState = "idle", config: Config | undefined, receivedState = false, receivedConfig = false, lastError = "Dictation unavailable", disposed = false;
   let enhancement: Enhancement = NONE, revision = -1, busy = false, acting = false, dragging = false, localMessage = "";
   let timer: ReturnType<typeof setTimeout> | undefined, expiry: ReturnType<typeof setTimeout> | undefined, noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let qaDragProbeEnabled = false, qaDragProbeArmed = false, qaSettledReported = false;
+  let qaIconAcknowledged = false, qaSizeAcknowledged = 0, qaViewportReported = 0;
   const disposers: (()=>void)[] = [];
+  const qaDragProbe = (stage: number, event?: MouseEvent): Promise<boolean> => {
+    if (typeof document.elementFromPoint !== "function") return Promise.resolve(false);
+    // The icon hides .drag-handle; its visible pill is the native drag target.
+    const box = pill.getBoundingClientRect();
+    const x = event?.clientX ?? (stage === 6 ? window.innerWidth / 2 : (box.left + box.right) / 2);
+    const y = event?.clientY ?? (stage === 6 ? window.innerHeight / 2 : (box.top + box.bottom) / 2);
+    const hit = document.elementFromPoint(x, y);
+    const rect = (element: Element): [number, number, number, number] => { const r = element.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+    const pointer = (element: Element | null): boolean => !!element && window.getComputedStyle(element).pointerEvents !== "none";
+    const targetKind = hit && handle.contains(hit) ? 2 : hit && hit.closest(".bars") ? 3 : hit && pill.contains(hit) ? 1 : 0;
+    return call("qa_overlay_drag_probe", {probe: {
+      stage, x, y, targetKind, hitPill: !!hit && pill.contains(hit), hitHandle: !!hit && handle.contains(hit),
+      viewportWidth: window.innerWidth, viewportHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio,
+      idleIcon: root.dataset.idle === "icon", busy, dragging, button: event?.button ?? -1,
+      pillRect: rect(pill), handleRect: rect(handle), targetPointerEvents: pointer(hit),
+      pillPointerEvents: pointer(pill), handlePointerEvents: pointer(handle),
+      rootPointerEvents: pointer(root), pillHidden: pill.hidden,
+    }});
+  };
+  const reportViewportSample = (): void => {
+    if (!qaDragProbeArmed || !qaIconAcknowledged || !layoutRevision ||
+        qaSizeAcknowledged !== layoutRevision || qaViewportReported === layoutRevision) return;
+    const sampleRevision = layoutRevision;
+    requestAnimationFrame(()=>{
+      if (disposed || sampleRevision !== layoutRevision || qaSizeAcknowledged !== sampleRevision ||
+          qaViewportReported === sampleRevision || state !== "idle" || root.dataset.idle !== "icon" || pill.hidden) return;
+      qaViewportReported = sampleRevision;
+      // This observes the latest acknowledged request, not viewport convergence or
+      // freshness at a later harness gesture. Gesture-time native geometry is separate.
+      void qaDragProbe(6).catch(()=>{});
+    });
+  };
+  const reportSettledIcon = (): void => {
+    if (!qaDragProbeArmed || qaSettledReported || disposed || state !== "idle" ||
+        root.dataset.idle !== "icon" || pill.hidden) return;
+    qaSettledReported = true;
+    void qaDragProbe(5).then(acknowledged=>{
+      if (acknowledged && !disposed) { qaIconAcknowledged = true; reportViewportSample(); }
+    }).catch(()=>{});
+  };
   panel.hidden = true;
   const idleView = (): IdleView => config?.overlay.idle_view ?? "icon";
   /** Full pill chrome; dictation, suggestions, held text and drag errors always use it. */
@@ -29,7 +71,7 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   const collapse = (): void => {
     if (dragging || active(enhancement) || held.active()) return;
     const view = idleView();
-    if (view === "icon") { root.dataset.idle = "icon"; pill.title = "Drag to move"; pill.hidden = !config?.overlay.enabled; return; }
+    if (view === "icon") { root.dataset.idle = "icon"; pill.title = "Drag to move"; pill.hidden = !config?.overlay.enabled; reportSettledIcon(); return; }
     expand(); if (view === "hidden") pill.hidden = true;
   };
   const scheduleCollapse = (ms: number): void => { clearTimeout(timer); timer = setTimeout(collapse,ms); };
@@ -142,9 +184,13 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   // next pointerdown. Mouse down continues to arrive for successive native drags.
   // The idle icon is itself the handle: the whole glyph starts a move.
   const beginDrag = (event: Event): void => { const pointer = event as MouseEvent;
-    if (pointer.button !== 0 || busy || dragging) return;
+    if (pointer.button !== 0 || busy || dragging) {
+      if (qaDragProbeEnabled) void qaDragProbe(3, pointer).catch(()=>{});
+      return;
+    }
     pointer.preventDefault();
     dragging = true; root.dataset.dragging = "true"; delete root.dataset.dragError;
+    if (qaDragProbeEnabled) void qaDragProbe(2, pointer).catch(()=>{});
     render(state); // clear any previous drag error and restart the normal hide timer
     void startOverlayDrag().then(()=>{
       if (disposed) return;
@@ -166,7 +212,11 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
     const style = window.getComputedStyle(root);
     const next = windowSize({width:box.width,height:box.height},{top:cssLength(style.paddingTop),right:cssLength(style.paddingRight),bottom:cssLength(style.paddingBottom),left:cssLength(style.paddingLeft)});
     if (!sizeChanged(reported,next)) return; reported = next;
-    void call("set_overlay_size",{width:next.width,height:next.height,layoutRevision:++layoutRevision,layoutInstance}).catch(()=>{});
+    const requestedRevision = ++layoutRevision;
+    void call("set_overlay_size",{width:next.width,height:next.height,layoutRevision:requestedRevision,layoutInstance})
+      .then(()=>{ if (!disposed && requestedRevision === layoutRevision) {
+        qaSizeAcknowledged = requestedRevision; reportViewportSample();
+      } }).catch(()=>{});
   };
   const Observer = (globalThis as {ResizeObserver?: typeof ResizeObserver}).ResizeObserver;
   if (Observer) { const observer = new Observer(()=>measure()); observer.observe(root); observer.observe(pill); disposers.push(()=>observer.disconnect()); }
@@ -187,4 +237,14 @@ export async function mountOverlay(root: HTMLElement): Promise<void> {
   if (disposed) return; if (!receivedConfig) apply(initial); if (status.error) lastError = status.error; if (!receivedState) render(status.state);
   if (snapshot) applySnapshot(snapshot);
   measure();
+  void qaDragProbe(0).then(enabled => {
+    if (!enabled || disposed) return;
+    qaDragProbeEnabled = true;
+    const onDown = (event: MouseEvent): void => { void qaDragProbe(1, event).catch(()=>{}); };
+    root.addEventListener("mousedown", onDown, true);
+    disposers.push(() => root.removeEventListener("mousedown", onDown, true));
+    // Stage 4 is logged by Rust only after the capture listener exists. A stage 0
+    // response alone is not evidence that the listener is armed.
+    void qaDragProbe(4).then(armed => { if (armed && !disposed) { qaDragProbeArmed = true; reportSettledIcon(); } }).catch(()=>{});
+  }).catch(() => {});
 }

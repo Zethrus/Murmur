@@ -3,8 +3,7 @@
 What Murmur does with a finished transcript when the window you dictated into is,
 or is not, the window that has focus at delivery. This extends the focus binding
 of 0.4.7 (`src-tauri/src/focus_guard.rs`, `src-tauri/src/held.rs`,
-`src-tauri/src/controller.rs`); the Windows rows are **verified in source, not
-run on hardware**. Evidence is tracked in
+`src-tauri/src/controller.rs`). Windows focus and insertion evidence is tracked in
 [parity/test-ledger.md](parity/test-ledger.md); the hands-on Windows procedure is
 [parity/windows-checklist.md](parity/windows-checklist.md) (items `F1`–`F13`).
 
@@ -44,6 +43,8 @@ run on hardware**. Evidence is tracked in
      Windows (UIPI) silently drops synthetic input to such windows, so Murmur must
      not report it as delivered. A dictation that starts and ends in the same
      elevated window is still held. The held text says why.
+   - Windows: the foreground thread is in Win32 menu mode. An Alt hotkey can
+     move focus into a menu while the top-level window identity stays the same.
 5. **Held text** lives in memory only: never logged, written to disk or put in
    history until you insert or copy it. One transcript is held at a time; it is
    cleared after **120 seconds**, on Discard, or when the next dictation starts.
@@ -61,7 +62,9 @@ run on hardware**. Evidence is tracked in
    non-modifier key every 50 ms (registered with `MOD_NOREPEAT`), so the modifiers
    can still be down at that moment. A dictation press that arrives while the
    previous transcript is being transcribed or delivered is ignored, so a
-   synthetic letter that matches the hotkey cannot restart dictation.
+   synthetic letter that matches the hotkey cannot restart dictation. Windows
+   delivery stops and holds the full raw transcript if these modifiers remain
+   down, with a reason to release them and deliberately retry with Insert here.
 8. **The overlay never takes focus.** Three things protect the target on
    Windows: the overlay is `focusable: false`, which gives it
    `WS_EX_NOACTIVATE`; if it is activated anyway, its `WM_ACTIVATE` handler
@@ -78,22 +81,29 @@ run on hardware**. Evidence is tracked in
 9. **Insert here types while Murmur is idle.** `deliver_held` runs from the
    overlay button in the `idle` state, where dictation presses are not ignored
    (rule 7 ignores them only while transcribing or delivering). This is believed
-   safe: on Windows enigo's `text()` sends each character as
+   safe: on Windows Murmur sends each character as
    `KEYEVENTF_UNICODE` (`VK_PACKET`), which `RegisterHotKey` hotkeys do not
    match, and the user has just clicked a button, so no hotkey modifiers are
    held. The paste path sends Ctrl+V, which matters only for a dictation hotkey
-   bound to Ctrl+V. **Believed, verify on Edison** (checklist F13).
+   bound to Ctrl+V. F13 separately checks modifier refusal, recovery, and exact
+   type and clipboard insertion. **Believed, verify on Edison** (checklist F13).
 
 ## What it cannot distinguish
 
 - **Tabs inside one window** (browser tabs, terminal tabs, editor splits) share
   one window identity: switching tabs mid-dictation is delivered to the new tab.
-- **Changes during typing.** Focus is checked once, just before typing starts;
-  switching windows while a long transcript is being typed is not detected.
+- **Changes during typing.** On Windows, Murmur checks the foreground identity
+  before each character and stops if it changes. An application can still change
+  its focused control within one top-level window without a detectable Win32 menu
+  state, or move focus in the instant between check and submission; this is a
+  best-effort guard, not an atomic focus guarantee. Linux checks
+  focus once before typing starts.
 - **Same-integrity input filters.** Applications that ignore injected input at
   the same integrity level (some games, remote-desktop clients, password
-  prompts in browsers) are not detected; `enigo` reports an error only when
-  `SendInput` inserts fewer events than requested.
+  prompts in browsers) are not detected; Windows reports an error only when
+  `SendInput` inserts fewer events than requested. On a short submission Murmur
+  attempts key-up-only cleanup for unmatched keys it inserted in that call;
+  cleanup itself can fail, so the full transcript remains held for review.
 - **Wayland** is not supported for injection; focus is unknown, so text is held.
 
 ## Test matrix
@@ -114,7 +124,7 @@ run on hardware**. Evidence is tracked in
 | 7 Modifier wait (shared loop, 600 ms bound) | `inject::tests::modifier_wait_returns_once_released`, `modifier_wait_is_bounded_at_600_ms` | H3, H4 | covered |
 | 7 Hotkey edges, no re-trigger during delivery | `hotkey::tests::only_press_release_edges_are_acted_on`, `presses_during_delivery_do_not_restart_dictation` | H2, H5 | covered |
 | 8 Overlay never activates | `overlay::noactivate::tests::*` (decision logic, log-once key); UI: `overlay buttons never take focus on mouse down but still act on click (Windows B7)` (`scripts/tests/ui.test.mjs`) | O3, O4, O7 | GTK path unchanged |
-| 9 Insert here in idle does not re-trigger the hotkey | none (needs Windows input) | F13 | covered |
+| 9 Insert here in idle does not re-trigger the hotkey | `scripts/tests/test_desktop_harness.py::F13Tests` (harness assertions; Windows input still required) | F13 | covered |
 
 "covered" in the Linux column means the existing 0.4.7/0.5.0 Linux checks; no
 Linux behaviour changed except rule 4's first bullet in `insert` mode, which used

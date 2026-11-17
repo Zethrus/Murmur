@@ -410,12 +410,12 @@ impl Controller {
         let mut held = false;
         let delivered = match decision {
             Decision::Deliver => {
-                let class = current?.class().to_owned();
-                self.deliver(state, text, self.force_code, &class, false, duration, start)?
+                let target = current?;
+                self.deliver_or_hold(state, text, &target, duration, start, &mut held)?
             }
             Decision::Refocus(id) => match self.refocus(state, id) {
-                Some(class) => {
-                    self.deliver(state, text, self.force_code, &class, false, duration, start)?
+                Some(target) => {
+                    self.deliver_or_hold(state, text, &target, duration, start, &mut held)?
                 }
                 None => {
                     held = self.hold(state, text, duration);
@@ -424,8 +424,16 @@ impl Controller {
             },
             Decision::Copy => {
                 let class = self.copy_class(current.as_ref().ok());
-                let delivery =
-                    self.deliver(state, text, self.force_code, &class, true, duration, start)?;
+                let delivery = self.deliver(
+                    state,
+                    text,
+                    self.force_code,
+                    &class,
+                    None,
+                    true,
+                    duration,
+                    start,
+                )?;
                 if delivery.is_some() {
                     state.held.notice(COPIED, Instant::now());
                     state.enhance.refresh_overlay(state);
@@ -468,6 +476,43 @@ impl Controller {
     }
     /// Post-process the raw transcript for the destination app and inject it, then record
     /// latency and history. Returns `None` when post-processing leaves nothing to send.
+    fn deliver_or_hold(
+        &mut self,
+        state: &AppState,
+        raw: &str,
+        target: &Focus,
+        duration: u64,
+        start: Instant,
+        held: &mut bool,
+    ) -> Result<Option<Delivery>> {
+        match self.deliver(
+            state,
+            raw,
+            self.force_code,
+            target.class(),
+            Some(target),
+            false,
+            duration,
+            start,
+        ) {
+            Err(error) => {
+                *held = self.hold(state, raw, duration);
+                if *held {
+                    let message = delivery_error_message(&error);
+                    if let Some(id) = state.held.current_id() {
+                        state.held.set_message(id, &message);
+                        state.enhance.refresh_overlay(state);
+                    }
+                }
+                if *held {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            }
+            result => result,
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     fn deliver(
         &mut self,
@@ -475,6 +520,7 @@ impl Controller {
         raw: &str,
         force_code: bool,
         class: &str,
+        target: Option<&Focus>,
         clipboard_only: bool,
         duration: u64,
         start: Instant,
@@ -488,7 +534,13 @@ impl Controller {
         let mut injection = self.config.injection.clone();
         injection.clipboard_only |= clipboard_only;
         // Both callers acquire the drag-release barrier before reading focus.
-        let path = self.injector.inject(&text, &injection, class, style)?;
+        let path = self.injector.inject(&text, &injection, class, style, || {
+            let Some(target) = target else {
+                return Ok(true);
+            };
+            let now = platform::focused_target(&state.app)?;
+            Ok(focus_guard::decide(Some(target), Some(&now), FocusMode::Hold) == Decision::Deliver)
+        })?;
         let latency = start.elapsed().as_millis() as u64;
         tracing::info!(latency_ms = latency, app = %class, style = ?style, chars = text.len(), "transcript delivered");
         state
@@ -521,15 +573,15 @@ impl Controller {
             &self.config,
         );
     }
-    /// Bring the original window back. Returns its class once it has focus again.
-    fn refocus(&self, state: &AppState, id: u64) -> Option<String> {
+    /// Bring the original window back. Returns its identity once it has focus again.
+    fn refocus(&self, state: &AppState, id: u64) -> Option<Focus> {
         if let Err(error) = platform::activate_window(id) {
             tracing::info!(%error, "Refocus original window failed; holding transcript");
             return None;
         }
         let now = platform::focused_target(&state.app).ok();
         match focus_guard::decide(self.origin.as_ref(), now.as_ref(), FocusMode::Hold) {
-            Decision::Deliver => now.map(|focus| focus.class().to_owned()),
+            Decision::Deliver => now,
             _ => None,
         }
     }
@@ -594,15 +646,11 @@ impl Controller {
             |busy| set_delivery_busy(state, busy),
             || platform::focused_target(&state.app),
         )?;
-        let class = if clipboard {
-            // Clipboard-only output still follows the original app's style.
-            held.origin
-                .clone()
-                .filter(|class| !inject::is_own_app(class))
-                .unwrap_or_default()
+        let target = if clipboard {
+            None
         } else {
             match current {
-                Ok(Focus::Window { class, .. }) => class,
+                Ok(focus @ Focus::Window { .. }) => Some(focus),
                 Ok(Focus::Blocked { reason, .. }) => {
                     self.held_message(state, held.id, reason.message());
                     return Ok(());
@@ -617,11 +665,25 @@ impl Controller {
                 }
             }
         };
+        let class = if clipboard {
+            // Clipboard-only output still follows the original app's style.
+            held.origin
+                .clone()
+                .filter(|class| !inject::is_own_app(class))
+                .unwrap_or_default()
+        } else {
+            target
+                .as_ref()
+                .expect("insertion target checked above")
+                .class()
+                .to_owned()
+        };
         let delivered = match self.deliver(
             state,
             &held.raw,
             held.force_code,
             &class,
+            target.as_ref(),
             clipboard,
             held.duration_ms,
             Instant::now(),
@@ -629,7 +691,12 @@ impl Controller {
             Ok(delivered) => delivered,
             Err(error) => {
                 tracing::warn!(%error, "Deliver held transcript");
-                self.held_message(state, held.id, &format!("Could not deliver: {error:#}"));
+                let message = if error.downcast_ref::<inject::ModifiersHeld>().is_some() {
+                    delivery_error_message(&error)
+                } else {
+                    format!("Could not deliver: {error:#}")
+                };
+                self.held_message(state, held.id, &message);
                 return Ok(());
             }
         };
@@ -825,7 +892,14 @@ impl Controller {
             Action::ToggleOverlay => {
                 state.update(json!({"overlay":{"enabled":!state.config()?.overlay.enabled}}))?;
             }
-            Action::Reload => state.reload()?,
+            Action::Reload => {
+                // Metadata only: the desktop gate needs to distinguish a missed file-watch
+                // event from a rejected rebind without putting configuration or text in logs.
+                tracing::debug!("configuration reload requested");
+                let result = state.reload();
+                tracing::debug!(ok = result.is_ok(), "configuration reload finished");
+                result?;
+            }
             Action::ComponentsChanged(kind) => {
                 use crate::components::manifest::Kind;
                 match kind {
@@ -933,6 +1007,17 @@ fn hold_reason(current: &Result<Focus>) -> Option<String> {
     }
 }
 
+fn delivery_error_message(error: &anyhow::Error) -> String {
+    if error.downcast_ref::<inject::ModifiersHeld>().is_some() {
+        return "Delivery paused: release Ctrl, Alt, Shift or Windows, then choose Insert here to retry.".to_owned();
+    }
+    match error.downcast_ref::<inject::TargetChanged>().map(|e| e.sent_chars) {
+        Some(0) => "Delivery stopped before typing because the selected destination changed.".to_owned(),
+        Some(count) => format!("Delivery stopped after {count} characters were submitted. Some text may be present; review it before inserting or copying the full transcript."),
+        None => "Delivery failed. Some text may be present; review it before inserting or copying the full transcript.".to_owned(),
+    }
+}
+
 fn set_delivery_busy(state: &AppState, busy: bool) -> Result<()> {
     let result = overlay::set_busy(&state.app, busy);
     state.enhance.publish(state);
@@ -986,6 +1071,19 @@ mod tests {
     use super::{preview_due, preview_valid, remote_action, Controller, Policy, RemoteAction};
     use crate::{audio::AudioCapture, config::Config};
     use std::time::Duration;
+
+    #[test]
+    fn modifier_timeout_has_a_retry_reason_distinct_from_focus_change() {
+        let timeout = anyhow::Error::new(crate::inject::ModifiersHeld)
+            .context("Type transcript into selected application");
+        assert_eq!(super::delivery_error_message(&timeout),
+            "Delivery paused: release Ctrl, Alt, Shift or Windows, then choose Insert here to retry.");
+        let changed = anyhow::Error::new(crate::inject::TargetChanged { sent_chars: 0 });
+        assert_eq!(
+            super::delivery_error_message(&changed),
+            "Delivery stopped before typing because the selected destination changed."
+        );
+    }
 
     #[test]
     fn held_text_says_why_when_focus_is_unreadable_or_blocked() {

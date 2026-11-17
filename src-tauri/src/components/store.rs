@@ -90,6 +90,22 @@ fn retry_transient(
     }
 }
 
+fn remove_staging_with(
+    path: &Path,
+    windows: bool,
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+    sleep: impl FnMut(Duration),
+) -> std::io::Result<()> {
+    retry_transient(
+        || match remove(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        },
+        windows,
+        sleep,
+    )
+}
+
 impl Store {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -126,6 +142,21 @@ impl Store {
             ));
         }
         Ok(self.component_dir(id)?.join(format!(".staging-{version}")))
+    }
+    /// Remove only this version's staging folder. Windows may briefly report a sharing
+    /// violation after the smoke-test process exits, so use the activation rename retry budget.
+    pub fn remove_staging(&self, id: &str, version: &str) -> Result<(), ComponentError> {
+        let path = self.staging_dir(id, version)?;
+        remove_staging_with(
+            &path,
+            cfg!(windows),
+            |path| fs::remove_dir_all(path),
+            std::thread::sleep,
+        )
+        .map_err(|error| {
+            tracing::warn!(target: "murmur::components", id, version, %error, "could not remove staging");
+            io("Could not remove the staged component (is it in use?)")
+        })
     }
     /// An `active.json` location outside the version folder must be an absolute path without
     /// `..` inside the component's own folder or a pre-0.5 model folder.
@@ -701,6 +732,55 @@ mod tests {
         )
         .is_err());
         assert!(!slept);
+    }
+    #[test]
+    fn staging_cleanup_retries_windows_lock_without_removing_active_engine() {
+        let s = store("staging-cleanup");
+        let active = s.version_dir("engine", "1").unwrap();
+        fs::create_dir_all(&active).unwrap();
+        fs::write(active.join(ENGINE_FILE), b"working engine").unwrap();
+        s.write_active(
+            "engine",
+            &Active {
+                version: "1".into(),
+                kind: Kind::Engine,
+                model: None,
+                location: None,
+                migrated: false,
+                installed_at: 1,
+            },
+        )
+        .unwrap();
+        let staging = s.staging_dir("engine", "2").unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join(ENGINE_FILE), b"bad engine").unwrap();
+
+        let mut errors = [5, 32].into_iter();
+        let mut attempts = 0;
+        let mut sleeps = 0;
+        remove_staging_with(
+            &staging,
+            true,
+            |path| {
+                attempts += 1;
+                errors.next().map_or_else(
+                    || fs::remove_dir_all(path),
+                    |code| Err(std::io::Error::from_raw_os_error(code)),
+                )
+            },
+            |_| sleeps += 1,
+        )
+        .unwrap();
+        assert_eq!((attempts, sleeps), (3, 2));
+        assert!(!staging.exists());
+        assert_eq!(
+            fs::read(active.join(ENGINE_FILE)).unwrap(),
+            b"working engine"
+        );
+        assert_eq!(s.active_dir("engine"), Some(active));
+        assert!(!s.version_dir("engine", "2").unwrap().exists());
+        s.remove_staging("engine", "2").unwrap(); // An interrupted removal may already be gone.
+        let _ = fs::remove_dir_all(&s.root);
     }
     #[test]
     fn active_json_is_replaced_atomically() {

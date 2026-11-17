@@ -1,9 +1,233 @@
 use crate::{config::Injection, postproc::Style};
-use anyhow::{bail, Context, Result};
-use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+#[cfg(target_os = "linux")]
+use anyhow::bail;
+use anyhow::{Context, Result};
+#[cfg(not(any(target_os = "linux", windows)))]
+use enigo::{Direction, Key};
+#[cfg(not(windows))]
+use enigo::{Enigo, Keyboard, Settings};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 use std::{thread, time::Duration};
+
+/// The selected destination stopped accepting input. `sent_chars` is the number of characters
+/// submitted before the check failed; the target may have processed fewer of them.
+#[derive(Debug)]
+pub struct TargetChanged {
+    pub sent_chars: usize,
+}
+impl std::fmt::Display for TargetChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Delivery target changed after {} characters were submitted",
+            self.sent_chars
+        )
+    }
+}
+impl std::error::Error for TargetChanged {}
+
+/// Delivery was refused because the hotkey's physical modifiers stayed down through the wait.
+#[derive(Debug)]
+pub struct ModifiersHeld;
+impl std::fmt::Display for ModifiersHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Modifier keys are still held; release them and choose Insert here to retry")
+    }
+}
+impl std::error::Error for ModifiersHeld {}
+
+#[cfg(any(windows, test))]
+mod keyboard_batch {
+    use anyhow::{bail, Result};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Key {
+        Control,
+        Shift,
+        V,
+        Return,
+        Tab,
+        Unicode(u16),
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct Stroke {
+        pub key: Key,
+        pub up: bool,
+    }
+
+    fn pair(key: Key) -> [Stroke; 2] {
+        [Stroke { key, up: false }, Stroke { key, up: true }]
+    }
+
+    pub(super) fn character(ch: char) -> Result<Vec<Stroke>> {
+        if ch == '\0' {
+            bail!("Transcript contains a NUL character");
+        }
+        let mut events = Vec::with_capacity(4);
+        match ch {
+            '\n' => events.extend(pair(Key::Return)),
+            '\t' => events.extend(pair(Key::Tab)),
+            _ => {
+                let mut units = [0; 2];
+                for &unit in ch.encode_utf16(&mut units).iter() {
+                    events.extend(pair(Key::Unicode(unit)));
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    pub(super) fn paste(shift: bool) -> Vec<Stroke> {
+        let mut events = vec![Stroke {
+            key: Key::Control,
+            up: false,
+        }];
+        if shift {
+            events.push(Stroke {
+                key: Key::Shift,
+                up: false,
+            });
+        }
+        events.extend(pair(Key::V));
+        if shift {
+            events.push(Stroke {
+                key: Key::Shift,
+                up: true,
+            });
+        }
+        events.push(Stroke {
+            key: Key::Control,
+            up: true,
+        });
+        events
+    }
+
+    /// Only releases downs inserted by this call and not balanced within its inserted prefix.
+    /// A cleanup failure is logged, but the original short-submission error remains authoritative.
+    pub(super) fn send(events: &[Stroke], mut submit: impl FnMut(&[Stroke]) -> u32) -> Result<()> {
+        let sent = submit(events) as usize;
+        if sent == events.len() {
+            return Ok(());
+        }
+        let mut down = Vec::new();
+        for event in events.iter().take(sent) {
+            if event.up {
+                if let Some(index) = down.iter().rposition(|key| key == &event.key) {
+                    down.remove(index);
+                }
+            } else {
+                down.push(event.key);
+            }
+        }
+        let cleanup: Vec<_> = down
+            .into_iter()
+            .rev()
+            .map(|key| Stroke { key, up: true })
+            .collect();
+        if !cleanup.is_empty() {
+            let released = submit(&cleanup);
+            if released != cleanup.len() as u32 {
+                tracing::warn!(
+                    released,
+                    requested = cleanup.len(),
+                    "SendInput key-up cleanup incomplete"
+                );
+            }
+        }
+        bail!(
+            "SendInput submitted {sent} of {} keyboard events",
+            events.len()
+        )
+    }
+}
+
+#[cfg(test)]
+fn utf16_pairs(ch: char) -> Vec<(u16, u16)> {
+    let mut units = [0; 2];
+    ch.encode_utf16(&mut units)
+        .iter()
+        .map(|&unit| (unit, unit))
+        .collect()
+}
+
+#[cfg(any(windows, test))]
+fn guarded_chars(
+    text: &str,
+    mut still_target: impl FnMut() -> Result<bool>,
+    mut send: impl FnMut(char) -> Result<()>,
+    mut pause: impl FnMut(),
+) -> Result<()> {
+    for (index, ch) in text.chars().enumerate() {
+        if !still_target().unwrap_or(false) {
+            return Err(TargetChanged { sent_chars: index }.into());
+        }
+        send(ch)?;
+        pause();
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+mod win_input {
+    use super::keyboard_batch::{Key, Stroke};
+    use super::*;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+        VK_CONTROL, VK_RETURN, VK_SHIFT, VK_TAB, VK_V,
+    };
+
+    fn key(vk: u16, scan: u16, flags: u32) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+    fn send(events: &[Stroke]) -> Result<()> {
+        keyboard_batch::send(events, |strokes| {
+            let input: Vec<_> = strokes
+                .iter()
+                .map(|stroke| {
+                    let (vk, scan, flags) = match stroke.key {
+                        Key::Control => (VK_CONTROL, 0, 0),
+                        Key::Shift => (VK_SHIFT, 0, 0),
+                        Key::V => (VK_V, 0, 0),
+                        Key::Return => (VK_RETURN, 0, 0),
+                        Key::Tab => (VK_TAB, 0, 0),
+                        Key::Unicode(unit) => (0, unit, KEYEVENTF_UNICODE),
+                    };
+                    key(
+                        vk,
+                        scan,
+                        flags | if stroke.up { KEYEVENTF_KEYUP } else { 0 },
+                    )
+                })
+                .collect();
+            unsafe {
+                SendInput(
+                    input.len() as u32,
+                    input.as_ptr(),
+                    std::mem::size_of::<INPUT>() as i32,
+                )
+            }
+        })
+    }
+    pub fn character(ch: char) -> Result<()> {
+        send(&keyboard_batch::character(ch)?)
+    }
+    pub fn paste(shift: bool) -> Result<()> {
+        send(&keyboard_batch::paste(shift))
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum InjectionPath {
@@ -99,7 +323,7 @@ fn modifiers_held() -> bool {
 #[cfg(target_os = "linux")]
 fn release_modifiers() {
     use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{ConnectionExt as _, KEY_RELEASE_EVENT};
+    use x11rb::protocol::xproto::KEY_RELEASE_EVENT;
     use x11rb::protocol::xtest::ConnectionExt as _;
     const CONTROL_L: u8 = 37;
     const ALT_L: u8 = 64;
@@ -145,15 +369,17 @@ fn wait_until_released(
 /// Ctrl+Alt is still physically down can even fire the dictation hotkey again. Bounded at 600 ms
 /// so a stuck modifier cannot stall typing.
 #[cfg(any(target_os = "linux", windows))]
-fn wait_for_modifiers_released() {
-    if !wait_until_released(
+fn wait_for_modifiers_released() -> bool {
+    let released = wait_until_released(
         modifiers_held,
         thread::sleep,
         MODIFIER_PROBES,
         MODIFIER_STEP,
-    ) {
-        tracing::info!("Modifier keys still held after 600 ms; typing anyway");
+    );
+    if !released {
+        tracing::info!("Modifier keys still held after 600 ms");
     }
+    released
 }
 /// Windows: Control, Alt, Shift or either Windows key physically down. GetAsyncKeyState reads the
 /// asynchronous key state (high bit = down now), the same source global-hotkey polls to report
@@ -458,6 +684,7 @@ impl Injector {
         cfg: &Injection,
         focused: &str,
         style: Style,
+        mut still_target: impl FnMut() -> Result<bool>,
     ) -> Result<InjectionPath> {
         let safe = safe_text(text, focused);
         let text = safe.as_str();
@@ -466,7 +693,7 @@ impl Injector {
             return Ok(path);
         }
         if path == InjectionPath::Type {
-            return self.type_text(text, path, focused);
+            return self.type_text(text, path, focused, &mut still_target);
         }
         if self.clipboard.is_none() {
             self.clipboard = Some(arboard::Clipboard::new().context("Open clipboard")?);
@@ -487,14 +714,32 @@ impl Injector {
         }
         #[cfg(target_os = "linux")]
         let sent = xdotool_chord(is_terminal(focused));
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        let sent = (|| {
+            if !wait_for_modifiers_released() {
+                return Err(ModifiersHeld.into());
+            }
+            if !still_target().unwrap_or(false) {
+                return Err(TargetChanged { sent_chars: 0 }.into());
+            }
+            win_input::paste(is_terminal(focused))
+        })();
+        #[cfg(not(any(target_os = "linux", windows)))]
         let sent = Self::paste_with_enigo(focused);
         thread::sleep(Duration::from_millis(350));
         Self::restore(clipboard, previous, text);
         sent?;
         Ok(path)
     }
-    fn type_text(&self, text: &str, path: InjectionPath, focused: &str) -> Result<InjectionPath> {
+    fn type_text(
+        &self,
+        text: &str,
+        path: InjectionPath,
+        focused: &str,
+        mut still_target: impl FnMut() -> Result<bool>,
+    ) -> Result<InjectionPath> {
+        #[cfg(windows)]
+        let _ = focused;
         #[cfg(target_os = "linux")]
         {
             match xdotool_type(text, focused) {
@@ -509,11 +754,23 @@ impl Injector {
             }
         }
         #[cfg(windows)]
-        wait_for_modifiers_released();
-        Enigo::new(&Settings::default())
-            .context("Connect keyboard injection")?
-            .text(text)
-            .context("Type transcript into focused application")?;
+        {
+            if !wait_for_modifiers_released() {
+                return Err(ModifiersHeld.into());
+            }
+            guarded_chars(text, &mut still_target, win_input::character, || {
+                thread::sleep(Duration::from_millis(12))
+            })
+            .context("Type transcript into selected application")?;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = &mut still_target;
+            Enigo::new(&Settings::default())
+                .context("Connect keyboard injection")?
+                .text(text)
+                .context("Type transcript into focused application")?;
+        }
         Ok(path)
     }
     fn restore(clipboard: &mut arboard::Clipboard, previous: Option<String>, text: &str) {
@@ -526,10 +783,8 @@ impl Injector {
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     fn paste_with_enigo(focused: &str) -> Result<()> {
-        #[cfg(windows)]
-        wait_for_modifiers_released();
         let mut keyboard = Enigo::new(&Settings::default()).context("Connect paste keyboard")?;
         keyboard
             .key(Key::Control, Direction::Press)
@@ -560,6 +815,221 @@ impl Injector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unicode_key_pairs_keep_each_key_up_with_its_own_unit() {
+        assert_eq!(utf16_pairs('é'), vec![(0x00e9, 0x00e9)]);
+        assert_eq!(utf16_pairs('😀'), vec![(0xd83d, 0xd83d), (0xde00, 0xde00)]);
+    }
+
+    #[test]
+    fn short_send_releases_only_unmatched_downs_from_its_own_prefix() {
+        use keyboard_batch::{Key, Stroke};
+        let up = |key| Stroke { key, up: true };
+        let cases = [
+            (
+                "paste",
+                keyboard_batch::paste(false),
+                vec![
+                    vec![],
+                    vec![up(Key::Control)],
+                    vec![up(Key::V), up(Key::Control)],
+                    vec![up(Key::Control)],
+                ],
+            ),
+            (
+                "terminal paste",
+                keyboard_batch::paste(true),
+                vec![
+                    vec![],
+                    vec![up(Key::Control)],
+                    vec![up(Key::Shift), up(Key::Control)],
+                    vec![up(Key::V), up(Key::Shift), up(Key::Control)],
+                    vec![up(Key::Shift), up(Key::Control)],
+                    vec![up(Key::Control)],
+                ],
+            ),
+            (
+                "return",
+                keyboard_batch::character('\n').unwrap(),
+                vec![vec![], vec![up(Key::Return)]],
+            ),
+            (
+                "tab",
+                keyboard_batch::character('\t').unwrap(),
+                vec![vec![], vec![up(Key::Tab)]],
+            ),
+            (
+                "unicode",
+                keyboard_batch::character('é').unwrap(),
+                vec![vec![], vec![up(Key::Unicode(0xe9))]],
+            ),
+            (
+                "surrogates",
+                keyboard_batch::character('😀').unwrap(),
+                vec![
+                    vec![],
+                    vec![up(Key::Unicode(0xd83d))],
+                    vec![],
+                    vec![up(Key::Unicode(0xde00))],
+                ],
+            ),
+        ];
+        for (name, events, expected) in cases {
+            assert_eq!(expected.len(), events.len(), "{name}");
+            for (prefix, cleanup) in expected.into_iter().enumerate() {
+                let mut calls = Vec::new();
+                let error = keyboard_batch::send(&events, |batch| {
+                    calls.push(batch.to_vec());
+                    if calls.len() == 1 {
+                        prefix as u32
+                    } else {
+                        batch.len() as u32
+                    }
+                })
+                .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "SendInput submitted {prefix} of {} keyboard events",
+                        events.len()
+                    ),
+                    "{name}"
+                );
+                assert_eq!(
+                    calls,
+                    if cleanup.is_empty() {
+                        vec![events.clone()]
+                    } else {
+                        vec![events.clone(), cleanup.clone()]
+                    },
+                    "{name} prefix {prefix}"
+                );
+                if name == "paste" && calls.len() == 2 {
+                    // A held Shift was never in this submission, so cleanup must not release it.
+                    assert!(calls[1].iter().all(|event| event.key != Key::Shift));
+                }
+                if !cleanup.is_empty() {
+                    let mut attempts = 0;
+                    let original = keyboard_batch::send(&events, |_| {
+                        attempts += 1;
+                        if attempts == 1 {
+                            prefix as u32
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_err();
+                    assert_eq!(
+                        original.to_string(),
+                        error.to_string(),
+                        "{name} prefix {prefix}"
+                    );
+                    assert_eq!(
+                        attempts, 2,
+                        "cleanup failure is never retried: {name} prefix {prefix}"
+                    );
+                }
+            }
+            let mut calls = 0;
+            keyboard_batch::send(&events, |batch| {
+                calls += 1;
+                batch.len() as u32
+            })
+            .unwrap();
+            assert_eq!(calls, 1, "full send never needs cleanup: {name}");
+        }
+    }
+
+    #[test]
+    fn failed_cleanup_keeps_original_short_send_error_and_does_not_retry_text() {
+        let events = keyboard_batch::paste(true);
+        let mut calls = Vec::new();
+        let error = keyboard_batch::send(&events, |batch| {
+            calls.push(batch.to_vec());
+            if calls.len() == 1 {
+                3
+            } else {
+                0
+            }
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "SendInput submitted 3 of 6 keyboard events"
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[1],
+            vec![
+                keyboard_batch::Stroke {
+                    key: keyboard_batch::Key::V,
+                    up: true
+                },
+                keyboard_batch::Stroke {
+                    key: keyboard_batch::Key::Shift,
+                    up: true
+                },
+                keyboard_batch::Stroke {
+                    key: keyboard_batch::Key::Control,
+                    up: true
+                },
+            ]
+        );
+        assert!(calls[1].iter().all(|event| event.up));
+    }
+    #[test]
+    fn guarded_typing_stops_before_destination_changes() {
+        let mut sent = String::new();
+        let mut probes = 0;
+        let error = guarded_chars(
+            "Aé😀Z",
+            || {
+                probes += 1;
+                Ok(probes <= 2)
+            },
+            |ch| {
+                sent.push(ch);
+                Ok(())
+            },
+            || {},
+        )
+        .context("Type transcript into selected application")
+        .unwrap_err();
+        assert_eq!(sent, "Aé");
+        assert_eq!(error.downcast_ref::<TargetChanged>().unwrap().sent_chars, 2);
+        assert_eq!(probes, 3);
+    }
+    #[test]
+    fn unreadable_destination_does_not_submit_a_character() {
+        let mut sent = String::new();
+        let error = guarded_chars(
+            "text",
+            || anyhow::bail!("focus unavailable"),
+            |ch| {
+                sent.push(ch);
+                Ok(())
+            },
+            || {},
+        )
+        .unwrap_err();
+        assert!(sent.is_empty());
+        assert_eq!(error.downcast_ref::<TargetChanged>().unwrap().sent_chars, 0);
+    }
+    #[test]
+    fn guarded_typing_preserves_exact_unicode_text() {
+        let mut sent = String::new();
+        guarded_chars(
+            "café 日本語 😀\n",
+            || Ok(true),
+            |ch| {
+                sent.push(ch);
+                Ok(())
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(sent, "café 日本語 😀\n");
+    }
     #[test]
     fn auto_paths() {
         let c = Injection::default();

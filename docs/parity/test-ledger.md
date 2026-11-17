@@ -9,6 +9,19 @@ hardware result.
 Machine for every Linux row unless noted: einstein-probe, Ubuntu 24.04.5 LTS,
 x86_64, RTX 4060 Laptop GPU, NVIDIA driver 580.178.04, Python 3.12, Node 22.
 
+## Overlay input repair on Edison, 2026-11-17
+
+Desktop runs on Edison's logged-in session (Windows 10 Pro 25H2 build 26200, WebView2
+157.0.4341.46, three 1920×1080 displays at 100 %), exact-SHA builds via `windows-build.yml`
+and `windows-desktop.yml`. Details: [desktop-44053826670-o8-fixed.md](desktop-44053826670-o8-fixed.md).
+
+| Check | Platform | Status | Evidence |
+| --- | --- | --- | --- |
+| All 48 automated catalog checks (`P1…C3`, including ordinary O2, O3, O4, O7, F11, H8) | Windows | executed | Run 44064380387 on `faf54085`: 48 pass, 0 fail, 0 skipped, 0 aborted; owned Notepad cleanup completed. O2: dragged (934,964)→(634,764), restored exactly after restart |
+| O8 four-foreground drag diagnostic | Windows | executed | Run 44066578394 on `faf54085`: all four gestures moved; no same-root focus change; exact typing in Notepad and Settings; 3 activation vetoes per gesture; 0 px restore error |
+| O9 WebView2 host-input reproducer | Windows | executed | Run 44041874181: the baseline reproduces Murmur's failure; `AllowHostInputProcessing` restores drag start and clean release ([desktop-44041874181-o9-host-input.md](desktop-44041874181-o9-host-input.md)) |
+| Manual checks (S2 high DPI, O5 mixed DPI, F9, F10, K2 Narrator, K3, C2, M2, M4, visual parity) | Windows | blocked | Need the owner at the machine; [windows-checklist.md](windows-checklist.md) |
+
 ## Windows CI on Edison, 2026-11-08
 
 First runs on real Windows hardware. Machine: "Edison", Windows (x64), NVIDIA

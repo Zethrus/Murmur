@@ -3,7 +3,7 @@
 - TargetApp: a small Tk window shipped with the harness (run as its own process). It records
   every received character with a timestamp, focus-in/out times and the widget text, and writes
   them to a JSON state file after every event. Exact, scriptable assertions.
-- Notepad (Windows 11): text read back through UI Automation TextPattern, else by saving.
+- Notepad (Windows 11): text read back through UI Automation TextPattern.
 - Windows Terminal running Windows PowerShell: buffer read back through TextPattern.
 - VS Code, only when installed: read back by saving the file.
 
@@ -36,7 +36,7 @@ def run_target_app(title, state_path, role):
     area = tk.Text(root, wrap="word", font=font, undo=False)
     area.pack(fill="both", expand=True)
     record = {"title": title, "role": role, "pid": os.getpid(), "hwnd": 0, "text": "", "keys": [], "focus": [],
-              "updated": time.time()}
+              "editor_focused": False, "updated": time.time()}
 
     def save():
         record["text"] = area.get("1.0", "end-1c")
@@ -57,6 +57,10 @@ def run_target_app(title, state_path, role):
 
     def on_focus(kind):
         record["focus"].append({"event": kind, "t": time.time()})
+        save()
+
+    def on_editor_focus(focused):
+        record["editor_focused"] = focused
         save()
 
     def on_modified(_):
@@ -80,6 +84,8 @@ def run_target_app(title, state_path, role):
         root.after(100, poll)
 
     area.bind("<Key>", on_key, add="+")
+    area.bind("<FocusIn>", lambda _: on_editor_focus(True), add="+")
+    area.bind("<FocusOut>", lambda _: on_editor_focus(False), add="+")
     root.bind("<FocusIn>", lambda _: on_focus("in"))
     root.bind("<FocusOut>", lambda _: on_focus("out"))
     area.bind("<<Modified>>", on_modified)
@@ -134,6 +140,11 @@ def delivered_keys(keys):
     return [k for k in keys if k.get("char") and k["char"].isprintable()]
 
 
+def delivered_characters(keys):
+    """Characters seen by the target's key handler, even if held modifiers stop Tk insertion."""
+    return "".join(key["char"] for key in delivered_keys(keys))
+
+
 class TargetApp:
     """Handle on one TargetApp window. Use clear() between deliveries."""
 
@@ -150,6 +161,7 @@ class TargetApp:
         self.guard = guard
         self.process = None
         self.hwnd = 0
+        self._startup_handoff = None
 
     def start(self, timeout=20):
         for path in (self.state_path, self.state_path.with_suffix(".cmd")):
@@ -188,6 +200,20 @@ class TargetApp:
             ok = self.win32.activate(self.hwnd, click_at=self.text_point())
         if not ok:
             raise RuntimeError(f"Could not focus {self.title}")
+        handoff = getattr(self, "_startup_handoff", None)
+        if handoff is not None:
+            handoff(self)
+
+    @property
+    def handoff_owner_pid(self):
+        return self.process.pid if self.process is not None else 0
+
+    def handoff_ready(self):
+        """The live target process still reports this exact window and text destination."""
+        state = self.state()
+        return (self.process is not None and self.process.poll() is None and
+                state.get("pid") == self.process.pid and state.get("hwnd") == self.hwnd and
+                state.get("title") == self.title and state.get("editor_focused") is True)
 
     def clear(self, timeout=5):
         self.state_path.with_suffix(".cmd").write_text("clear", encoding="utf-8")
@@ -232,24 +258,55 @@ class TargetApp:
 
 
 class Notepad:
-    """Windows 11 Notepad on a file in the work folder. Preflight requires Notepad not to be
-    running, so these windows and their tabs are only ever the harness's own."""
+    """Windows 11 Notepad on a unique work-file; restored tabs may share its window."""
 
     def __init__(self, work, name):
         import uia
         import win32
         self.win32, self.uia = win32, uia
-        self.path = Path(win32.long_path(str(Path(work) / f"notepad-{name}.txt")))
+        # Every fixture has a run-specific title; an old restored tab cannot impersonate it.
+        filename = f"notepad-{name}-{Path(work).name}.txt"
+        self.path = Path(win32.long_path(str(Path(work) / filename)))
         self.hwnd = 0
+        self.owner_pid = 0
+        self.owned_tab = False
+        self._startup_handoff = None
 
-    def start(self, timeout=20):
-        self.path.write_text("", encoding="utf-8")
+    def _title_is_document(self, title):
+        title = title.lower().lstrip("*● ")
+        return title.startswith(self.path.name.lower() + " - ") or title.startswith(self.path.stem.lower() + " - ")
+
+    def active_document(self):
+        """The active tab's window title names this fixture, not another open document."""
+        return (bool(self.hwnd) and self.win32.is_window(self.hwnd) and
+                (not self.owned_tab or self.win32.window_pid(self.hwnd) == self.owner_pid) and
+                self._title_is_document(self.win32.window_text(self.hwnd)))
+
+    def start(self, timeout=20, reuse_hwnd=None, owned_tab=False, reuse_owner_pid=None, reuse_windows=None):
+        approved_windows = dict(reuse_windows or {})
+        if reuse_hwnd is not None:
+            if not reuse_owner_pid:
+                raise RuntimeError("Reused Notepad window has no verified owner")
+            approved_windows[reuse_hwnd] = reuse_owner_pid
+        self.owned_tab = owned_tab
+        # Context gives each call a new identity. Refuse a collision instead of erasing text.
+        with self.path.open("x", encoding="utf-8"):
+            pass
         before = set(self.win32.find_windows(contains="Notepad"))
         subprocess.Popen(["notepad.exe", str(self.path)])
         self.hwnd = self.win32.wait_for(
-            lambda: next((h for h in self.win32.find_windows(contains=self.path.stem) if h not in before), None), timeout)
+            lambda: next((h for h in self.win32.find_windows(contains=self.path.stem)
+                          if (h not in before or
+                              (h in approved_windows and self.win32.window_pid(h) == approved_windows[h])) and
+                          (not owned_tab or self._title_is_document(self.win32.window_text(h)))), None), timeout)
         if not self.hwnd:
             raise RuntimeError("Notepad did not open")
+        if (self.hwnd in before and self.win32.window_pid(self.hwnd) != approved_windows[self.hwnd]):
+            raise RuntimeError("Reused Notepad window ownership changed during creation")
+        owner_pid = self.win32.window_pid(self.hwnd)
+        if owned_tab and owner_pid not in self.win32.pids("Notepad.exe"):
+            raise RuntimeError(f"Notepad window owner is not Notepad.exe for {self.path.name}")
+        self.owner_pid = owner_pid
         return self
 
     # Shift+click would extend Notepad's selection from the caret, and the next typed character
@@ -257,38 +314,237 @@ class Notepad:
     CLICK_WHILE_HELD = False
 
     def document(self):
-        return self.uia.text_element(self.uia.from_handle(self.hwnd), timeout=5)
+        return self.uia.document_element(self.uia.from_handle(self.hwnd), timeout=5)
 
-    def focus(self, click=True):
-        left, top, right, bottom = self.win32.window_rect(self.hwnd)
-        point = ((left + right) // 2, (top + bottom) // 2)
-        self.win32.activate(self.hwnd, click_at=None if not click else point)
+    def focus(self, click=True, guard_check=None):
+        check = guard_check or (lambda: None)
+        check()
+        if self.owned_tab and not self.active_document():
+            raise RuntimeError(f"Notepad active tab is not {self.path.name}")
+        document = self.document()
+        point = self.uia.center(document)
+        check()  # discovery can block; revalidate before any activation or input
+        options = {"guard_check": check} if guard_check is not None else {}
+        self.win32.activate(self.hwnd, click_at=None if not click else point, **options)
+        check()
         if click:
             self.win32.click(*point)
-        if not self.win32.wait_for(lambda: self.win32.foreground() == self.hwnd, 3):
+        else:
+            # A foreground window can still have keyboard focus on File, especially when
+            # Alt is held for the global shortcut. Focus the editor without a Shift+click.
+            document.SetFocus()
+        def focused():
+            check()
+            return self.win32.foreground() == self.hwnd
+        if not self.win32.wait_for(focused, 3):
             raise RuntimeError("Could not focus Notepad")
+        if not self.editor_focused(document):
+            raise RuntimeError(f"Notepad foreground is active but editor focus is {self.uia.describe(self.uia.focused())}")
+        check()
+        if self.owned_tab and not self.active_document():
+            raise RuntimeError(f"Notepad switched away from {self.path.name}")
+        handoff = getattr(self, "_startup_handoff", None)
+        if handoff is not None:
+            handoff(self)
+
+    @property
+    def handoff_owner_pid(self):
+        return self.owner_pid
+
+    def handoff_ready(self):
+        """The named document, live Notepad owner and editor focus all still agree."""
+        return (self.editor_focused() and self.active_document() and
+                self.owner_pid in self.win32.pids("Notepad.exe"))
+
+    def save_owned(self):
+        """Save the settled H8 document while keeping its tab and window alive."""
+        if not self.owned_tab:
+            raise RuntimeError("Not an H8 owned Notepad tab")
+        self.focus()
+        self.win32.tap("ctrl", "s")
+        time.sleep(0.8)
+
+    def clear_owned(self):
+        """Clear only the verified active H8 document for a same-tab direct-input comparison."""
+        if not self.owned_tab or not self.active_document():
+            raise RuntimeError(f"Notepad active tab is not owned {self.path.name}")
+        self.focus()
+        self.win32.tap("ctrl", "a")
+        self.win32.tap("delete")
+        if not self.win32.wait_for(lambda: self.active_document() and self.text() == "", 5):
+            raise RuntimeError(f"Notepad did not clear {self.path.name}")
+
+    def close_owned(self, max_tabs=64, guard_check=None):
+        """Close only this verified run-owned tab, never its shared window or another tab."""
+        check = guard_check or (lambda: None)
+        check()
+        if not self.hwnd:
+            return
+        if not self.win32.is_window(self.hwnd):
+            raise RuntimeError(f"Notepad window disappeared before cleanup of {self.path.name}")
+        if (self.win32.window_pid(self.hwnd) != self.owner_pid or
+                self.owner_pid not in self.win32.pids("Notepad.exe")):
+            raise RuntimeError(f"Notepad window ownership changed for {self.path.name}")
+        check()
+        if not self.win32.activate(self.hwnd):
+            # Windows' foreground lock can refuse SetForegroundWindow once an unrelated window
+            # took the foreground (after C3 stops Murmur: runs 43906690485, 44054200939). Use
+            # the real activation path Notepad.focus uses, a click on this owned editor, and
+            # only where a hit-test proves this Notepad window is the one under the point.
+            point = self._owned_editor_point()
+            check()
+            if point is None or not self.win32.activate(self.hwnd, click_at=point, guard_check=check):
+                raise RuntimeError(f"Could not activate Notepad for {self.path.name}"
+                                   + ("" if point else " (editor covered or not owned)"))
+        # Restored tabs from earlier sessions can precede this run's fixtures.
+        # Navigation is reversible; Ctrl+W is sent only when this run's unique title is active.
+        for _ in range(max_tabs):
+            check()
+            if (self.win32.foreground() != self.hwnd or self.win32.window_pid(self.hwnd) != self.owner_pid or
+                    self.owner_pid not in self.win32.pids("Notepad.exe")):
+                raise RuntimeError(f"Notepad lost foreground or ownership during cleanup of {self.path.name}")
+            if self.active_document():
+                # Checks may have only read the editor; its file can still be empty and dirty.
+                # Save at final cleanup, then require the same owned, clean document
+                # before Ctrl+W so a save prompt cannot consume the close operation.
+                def saved_owned_document():
+                    check()
+                    return (self.win32.foreground() == self.hwnd and self.active_document() and
+                            self.win32.window_pid(self.hwnd) == self.owner_pid and
+                            self.owner_pid in self.win32.pids("Notepad.exe") and
+                            not self.win32.window_text(self.hwnd).lstrip().startswith(("*", "●")) and
+                            self.path.is_file())
+
+                check()
+                self.win32.tap("ctrl", "s")
+                if not self.win32.wait_for(saved_owned_document, 5) or not saved_owned_document():
+                    raise RuntimeError(f"Notepad save or ownership verification failed for {self.path.name}")
+                check()
+                self.win32.tap("ctrl", "w")
+
+                def tab_closed():
+                    check()
+                    return not self.win32.is_window(self.hwnd) or not self.active_document()
+
+                if not self.win32.wait_for(tab_closed, 5):
+                    raise RuntimeError(f"Notepad did not close {self.path.name}")
+                self.hwnd = 0
+                return
+            check()
+            self.win32.tap("ctrl", "tab")
+        raise RuntimeError(f"Could not locate owned Notepad tab {self.path.name}")
+
+    def _owned_editor_point(self):
+        """Centre of this window's editor, only when that point hit-tests to this owned window."""
+        try:
+            point = self.uia.center(self.document())
+        except Exception:  # noqa: BLE001 - no point means no click
+            return None
+        user32 = self.win32.user32
+        hit = user32.WindowFromPoint(self.win32.POINT(*point))
+        if (not hit or user32.GetAncestor(hit, self.win32.GA_ROOT) != self.hwnd or
+                self.win32.window_pid(hit) != self.owner_pid or
+                self.owner_pid not in self.win32.pids("Notepad.exe")):
+            return None
+        return point
+
+    def editor_focused(self, document=None):
+        document = document or self.document()
+        elements = [document] + self.uia.descendants(document)
+        focused = self.uia.focused()
+        return bool(focused) and any(self.uia.same(focused, element)
+                                     for element in elements)
+
+    def owns_keyboard_focus(self):
+        """O3's read-only proof that the active fixture's editor owns keyboard input."""
+        if not self.hwnd or not self.owner_pid or not self.win32.is_window(self.hwnd):
+            return False
+        # UIA discovery may wait. Do it before the final document/native ownership
+        # snapshot so a tab or foreground change during discovery cannot authorize input.
+        if self.menu_open() or not self.editor_focused():
+            return False
+        if (not self.hwnd or not self.owner_pid or not self.win32.is_window(self.hwnd) or
+                self.win32.window_pid(self.hwnd) != self.owner_pid or
+                self.owner_pid not in self.win32.pids("Notepad.exe") or
+                not self.active_document()):
+            return False
+        native = self.win32.foreground_context()
+        if (native["input_desktop"] != "Default" or native["gui_status"] != "ok" or
+                native.get("process_id") != self.owner_pid or
+                native.get("gui_flags", 0) & 0x14):  # menu / popup-menu mode
+            return False
+
+        def owned(hwnd):
+            return (bool(hwnd) and self.win32.is_window(hwnd) and
+                    self.win32.user32.GetAncestor(hwnd, self.win32.GA_ROOT) == self.hwnd and
+                    self.win32.window_pid(hwnd) == self.owner_pid)
+
+        foreground = native["hwnd"]
+        focus = native.get("focus_hwnd", 0)
+        active = native.get("active_hwnd", 0)
+        return (owned(foreground) and owned(active) and owned(focus) and
+                active in (foreground, focus) and
+                self.win32.class_name(focus) == "RichEditD2DPT")
+
+    def focus_diagnostic(self):
+        focused = self.uia.focused()
+        foreground = self.win32.foreground()
+        native = self.win32.foreground_context()
+        focus_hwnd = native.get("focus_hwnd", 0)
+        def ownership(hwnd):
+            if not hwnd:
+                return None
+            root = self.win32.user32.GetAncestor(hwnd, self.win32.GA_ROOT) or 0
+            return {"hwnd": hex(hwnd), "root": hex(root), "pid": self.win32.window_pid(hwnd),
+                    "root_pid": self.win32.window_pid(root) if root else 0,
+                    "class": self.win32.class_name(hwnd)}
+        return (f"scratch path: {self.path}\n"
+                f"Notepad hwnd: {hex(self.hwnd)}; expected owner pid: {self.owner_pid}; "
+                f"active fixture: {self.active_document()}\n"
+                f"foreground: {ownership(foreground)!r} {self.win32.window_text(foreground)!r}\n"
+                f"native active: {ownership(native.get('active_hwnd', 0))!r}; "
+                f"native focus owner: {ownership(focus_hwnd)!r}\n"
+                f"UIA focus: {self.uia.describe(focused)}\n"
+                f"native focus: {self.win32.gui_thread_focus(self.hwnd)}\n"
+                f"editor mode label: {self.editor_mode_label()}\n"
+                f"menu open: {self.menu_open()}\n"
+                f"file bytes: {self.path.stat().st_size if self.path.exists() else 'missing'}\n")
+
+    def editor_mode_label(self):
+        """Read Notepad's visible status label if UIA exposes Plain text or Formatted."""
+        try:
+            window = self.uia.from_handle(self.hwnd)
+            for label in ("Plain text", "Formatted"):
+                if self.uia.find_all(window, name_=label):
+                    return label
+        except Exception:  # noqa: BLE001 - status is diagnostic only
+            pass
+        return "unknown"
 
     def text(self):
-        """Document text via TextPattern; falls back to Ctrl+S and reading the file."""
-        try:
-            # RichEdit reports a final paragraph mark; transcripts never end in a newline.
-            return self.uia.text(self.document()).replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
-        except Exception:  # noqa: BLE001 - fall back to the saved file
-            self.focus()
-            self.win32.tap("ctrl", "s")
-            time.sleep(1.0)
-            return self.path.read_text(encoding="utf-8-sig").replace("\r\n", "\n").rstrip("\n")
+        """Read the editor without sending input or changing focus during delivery."""
+        # RichEdit reports a final paragraph mark; transcripts never end in a newline.
+        return self.uia.text(self.document()).replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
 
     def wait_text(self, timeout=45, stable=1.2, sleep=time.sleep):
         deadline = time.monotonic() + timeout
         last, since = None, time.monotonic()
+        last_error = None
         while time.monotonic() < deadline:
-            current = self.text()
+            try:
+                current = self.text()
+                last_error = None
+            except Exception as error:  # noqa: BLE001 - UIA can rebuild the document during typing
+                last_error = error
+                sleep(0.2)
+                continue
             if current != last:
                 last, since = current, time.monotonic()
             elif current and time.monotonic() - since >= stable:
                 return current
             sleep(0.2)
+        if last is None and last_error is not None:
+            raise RuntimeError("Notepad document was unavailable through UI Automation") from last_error
         return last or ""
 
     def menu_open(self):
@@ -345,9 +601,9 @@ class Terminal:
             raise RuntimeError("Could not focus Windows Terminal")
 
     def buffer(self):
-        """Terminal text through TextPattern, or None when this version does not expose it."""
+        """Prompt buffer through TextPattern, never the title-bar TextPattern."""
         try:
-            return self.uia.text(self.uia.text_element(self.uia.from_handle(self.hwnd), timeout=5))
+            return self.uia.text(self.uia.terminal_text_element(self.uia.from_handle(self.hwnd), timeout=5))
         except Exception:  # noqa: BLE001 - reported as a skip by I3
             return None
 

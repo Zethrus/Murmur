@@ -26,10 +26,12 @@ ULONG_PTR = ctypes.c_size_t
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE = 0x0001, 0x0002, 0x0004
 MOUSEEVENTF_MOVE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0001, 0x0002, 0x0004
+MOUSEEVENTF_MOVE_NOCOALESCE = 0x2000
 MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP = 0x0008, 0x0010
 MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_ABSOLUTE = 0x4000, 0x8000
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 76, 77, 78, 79
 WM_CLOSE, WM_SETTINGCHANGE = 0x0010, 0x001A
+WM_NCHITTEST, HTBOTTOMRIGHT, GA_ROOT = 0x0084, 17, 2
 HWND_BROADCAST, SMTO_ABORTIFHUNG = 0xFFFF, 0x0002
 SW_RESTORE = 9
 SWP_NOZORDER, SWP_NOACTIVATE = 0x0004, 0x0010
@@ -79,6 +81,14 @@ class RECT(ctypes.Structure):
         return (self.left, self.top, self.right, self.bottom)
 
 
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                ("rcCaret", RECT)]
+
+
 class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
@@ -102,18 +112,38 @@ def _declare():
     for name, args, res in (
         ("SendInput", (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int), wintypes.UINT),
         ("GetForegroundWindow", (), wintypes.HWND),
+        ("CreateWindowExW", (wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                             ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND,
+                             wintypes.HWND, handle, ctypes.c_void_p), wintypes.HWND),
+        ("DestroyWindow", (wintypes.HWND,), wintypes.BOOL),
         ("SetForegroundWindow", (wintypes.HWND,), wintypes.BOOL),
+        ("SetFocus", (wintypes.HWND,), wintypes.HWND),
+        ("GetFocus", (), wintypes.HWND),
+        ("GetMessageExtraInfo", (), wintypes.LPARAM),
+        ("PeekMessageW", (ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT,
+                          wintypes.UINT, wintypes.UINT), wintypes.BOOL),
+        ("DispatchMessageW", (ctypes.POINTER(wintypes.MSG),), ctypes.c_ssize_t),
         ("BringWindowToTop", (wintypes.HWND,), wintypes.BOOL),
         ("ShowWindow", (wintypes.HWND, ctypes.c_int), wintypes.BOOL),
         ("IsIconic", (wintypes.HWND,), wintypes.BOOL),
         ("IsWindow", (wintypes.HWND,), wintypes.BOOL),
         ("IsWindowVisible", (wintypes.HWND,), wintypes.BOOL),
+        ("IsWindowEnabled", (wintypes.HWND,), wintypes.BOOL),
+        ("GetWindowLongPtrW", (wintypes.HWND, ctypes.c_int), ctypes.c_ssize_t),
+        ("MonitorFromPoint", (POINT, wintypes.DWORD), handle),
+        ("GetMonitorInfoW", (handle, ctypes.c_void_p), wintypes.BOOL),
         ("GetWindowTextW", (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int), ctypes.c_int),
         ("GetWindowTextLengthW", (wintypes.HWND,), ctypes.c_int),
         ("GetClassNameW", (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int), ctypes.c_int),
         ("GetWindowThreadProcessId", (wintypes.HWND, ctypes.POINTER(wintypes.DWORD)), wintypes.DWORD),
+        ("GetGUIThreadInfo", (wintypes.DWORD, ctypes.POINTER(GUITHREADINFO)), wintypes.BOOL),
         ("GetWindowRect", (wintypes.HWND, ctypes.POINTER(RECT)), wintypes.BOOL),
+        ("WindowFromPoint", (POINT,), wintypes.HWND),
+        ("GetAncestor", (wintypes.HWND, wintypes.UINT), wintypes.HWND),
+        ("GetWindow", (wintypes.HWND, wintypes.UINT), wintypes.HWND),
+        ("SendMessageW", (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM), ctypes.c_ssize_t),
         ("GetClientRect", (wintypes.HWND, ctypes.POINTER(RECT)), wintypes.BOOL),
+        ("ClientToScreen", (wintypes.HWND, ctypes.POINTER(POINT)), wintypes.BOOL),
         ("SetWindowPos", (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                           wintypes.UINT), wintypes.BOOL),
         ("GetDpiForWindow", (wintypes.HWND,), wintypes.UINT),
@@ -134,6 +164,8 @@ def _declare():
         ("GetLastInputInfo", (ctypes.POINTER(LASTINPUTINFO),), wintypes.BOOL),
         ("OpenInputDesktop", (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD), handle),
         ("CloseDesktop", (handle,), wintypes.BOOL),
+        ("GetProcessWindowStation", (), handle),
+        ("GetThreadDesktop", (wintypes.DWORD,), handle),
         ("GetUserObjectInformationW", (handle, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
                                        ctypes.POINTER(wintypes.DWORD)), wintypes.BOOL),
         ("MapVirtualKeyW", (wintypes.UINT, wintypes.UINT), wintypes.UINT),
@@ -150,6 +182,8 @@ def _declare():
         ("GlobalFree", (handle,), handle),
         ("GetTickCount", (), wintypes.DWORD),
         ("GetCurrentThreadId", (), wintypes.DWORD),
+        ("GetModuleHandleW", (wintypes.LPCWSTR,), handle),
+        ("ProcessIdToSessionId", (wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)), wintypes.BOOL),
         ("CreateToolhelp32Snapshot", (wintypes.DWORD, wintypes.DWORD), handle),
         ("Process32FirstW", (handle, ctypes.POINTER(PROCESSENTRY32W)), wintypes.BOOL),
         ("Process32NextW", (handle, ctypes.POINTER(PROCESSENTRY32W)), wintypes.BOOL),
@@ -308,15 +342,23 @@ def click(x, y, button="left", settle=0.05):
     mouse_up(button)
 
 
-def drag(start, end, steps=20, hold=0.15, step_delay=0.02, release=True):
+def drag(start, end, steps=20, hold=0.15, step_delay=0.02, release=True, sample=None):
     """Press at `start`, move in steps to `end`, release (unless release=False)."""
     mouse_move(*start)
     time.sleep(0.05)
+    if sample:
+        sample("at-start", 0)
     mouse_down()
+    if sample:
+        sample("button-down", 0)
     time.sleep(hold)
+    if sample:
+        sample("held-before-move", 0)
     for i in range(1, steps + 1):
         mouse_move(round(start[0] + (end[0] - start[0]) * i / steps), round(start[1] + (end[1] - start[1]) * i / steps))
         time.sleep(step_delay)
+        if sample and i in (1, steps // 2, steps):
+            sample("moving", i)
     if release:
         time.sleep(0.05)
         mouse_up()
@@ -348,6 +390,45 @@ def release_all():
 
 def foreground():
     return user32.GetForegroundWindow() or 0
+
+
+def foreground_context():
+    """Read foreground ownership and GUI focus without changing either."""
+    hwnd = foreground()
+    pid = wintypes.DWORD()
+    thread = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) if hwnd else 0
+    result = {"hwnd": hwnd, "thread_id": thread, "process_id": pid.value if thread else 0,
+              "input_desktop": input_desktop(), "gui_status": "no_foreground"}
+    if thread:
+        info = GUITHREADINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if user32.GetGUIThreadInfo(thread, ctypes.byref(info)):
+            result.update(gui_status="ok", active_hwnd=info.hwndActive or 0,
+                          focus_hwnd=info.hwndFocus or 0, gui_flags=int(info.flags))
+        else:
+            result.update(gui_status="error", gui_error=ctypes.get_last_error())
+    return result
+
+
+def owned_foreground(context, hwnd, owner_pid, expected_focus):
+    """A null focus is allowed only during the explicit SetFocus(NULL) stage."""
+    return (context["input_desktop"] == "Default" and context["hwnd"] == hwnd and
+            context["process_id"] == owner_pid and
+            context["gui_status"] == "ok" and context["active_hwnd"] == hwnd and
+            context["focus_hwnd"] == (hwnd if expected_focus == "window" else 0))
+
+
+def gui_thread_focus(hwnd):
+    """Read another window's native keyboard focus and menu mode without changing either."""
+    thread = user32.GetWindowThreadProcessId(hwnd, None)
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if not thread or not user32.GetGUIThreadInfo(thread, ctypes.byref(info)):
+        return {"error": ctypes.get_last_error()}
+    focus = info.hwndFocus or 0
+    return {"focus_hwnd": hex(focus), "focus_class": class_name(focus) if focus else "",
+            "menu_owner_hwnd": hex(info.hwndMenuOwner or 0),
+            "menu_mode": bool(info.flags & 0x4), "popup_menu_mode": bool(info.flags & 0x10)}
 
 
 def window_text(hwnd):
@@ -392,6 +473,20 @@ def enum_windows(visible_only=True):
     return found
 
 
+def child_windows(hwnd, limit):
+    """At most `limit` descendant handles of `hwnd` (EnumChildWindows is recursive). Read-only."""
+    found = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def each(child, _):
+        found.append(child or 0)
+        return len(found) < limit
+
+    user32.EnumChildWindows.argtypes = (wintypes.HWND, callback_type, wintypes.LPARAM)
+    user32.EnumChildWindows(hwnd, callback_type(each), 0)
+    return found
+
+
 def find_windows(title=None, contains=None, pid=None, class_=None, visible_only=True):
     return [w[0] for w in enum_windows(visible_only)
             if (title is None or w[2] == title) and (contains is None or contains.lower() in w[2].lower())
@@ -418,10 +513,44 @@ def window_rect(hwnd):
     return rect.tuple()
 
 
+def outer_rect(hwnd):
+    """Full frame, including the invisible resize border used for a mouse resize."""
+    rect = RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return rect.tuple()
+
+
+def resize_grip(hwnd):
+    """A reachable bottom-right point that Windows identifies as the native resize grip."""
+    require_windows()
+    left, top, right, bottom = outer_rect(hwnd)
+    for inset in (4, 6, 8, 10, 12, 14, 16):
+        x, y = right - inset, bottom - inset
+        if x <= left or y <= top:
+            continue
+        point = POINT(x, y)
+        hit_window = user32.WindowFromPoint(point)
+        if user32.GetAncestor(hit_window, GA_ROOT) != hwnd:
+            continue
+        packed = ((y & 0xffff) << 16) | (x & 0xffff)
+        if user32.SendMessageW(hwnd, WM_NCHITTEST, 0, packed) == HTBOTTOMRIGHT:
+            return x, y
+    raise RuntimeError(f"No reachable Settings bottom-right resize grip in outer frame {(left, top, right, bottom)}")
+
+
 def client_size(hwnd):
     rect = RECT()
     user32.GetClientRect(hwnd, ctypes.byref(rect))
     return rect.right - rect.left, rect.bottom - rect.top
+
+
+def client_origin(hwnd):
+    """Physical screen position of a window's client (or WebView2 child) origin."""
+    point = POINT(0, 0)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(point)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return point.x, point.y
 
 
 def dpi_scale(hwnd):
@@ -437,11 +566,14 @@ def close_window(hwnd):
     user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
 
-def activate(hwnd, click_at=None, timeout=3.0):
+def activate(hwnd, click_at=None, timeout=3.0, guard_check=None):
     """Bring `hwnd` to the foreground. SetForegroundWindow is refused unless this process may
     take focus, so attach to the current foreground thread first; if that still fails and a
     point is given, click it (a real activation path)."""
+    check = guard_check or (lambda: None)
+    check()
     if user32.IsIconic(hwnd):
+        check()
         user32.ShowWindow(hwnd, SW_RESTORE)
     if foreground() == hwnd:
         return True
@@ -450,16 +582,22 @@ def activate(hwnd, click_at=None, timeout=3.0):
     other = window_thread(current) if current else 0
     attached = bool(other and other != mine and user32.AttachThreadInput(mine, other, True))
     try:
+        check()
         user32.BringWindowToTop(hwnd)
+        check()
         user32.SetForegroundWindow(hwnd)
     finally:
         if attached:
             user32.AttachThreadInput(mine, other, False)
-    if wait_for(lambda: foreground() == hwnd, 1.0, 0.05):
+    def focused():
+        check()
+        return foreground() == hwnd
+    if wait_for(focused, 1.0, 0.05):
         return True
     if click_at:
+        check()
         click(*click_at)
-    return bool(wait_for(lambda: foreground() == hwnd, timeout, 0.05))
+    return bool(wait_for(focused, timeout, 0.05))
 
 
 def broadcast_setting_change(area):
@@ -470,6 +608,14 @@ def broadcast_setting_change(area):
 class MONITORINFOEXW(ctypes.Structure):
     _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", RECT), ("rcWork", RECT), ("dwFlags", wintypes.DWORD),
                 ("szDevice", wintypes.WCHAR * 32)]
+
+
+def work_area_at(point):
+    monitor = user32.MonitorFromPoint(POINT(*point), 0)  # NULL rather than an inferred nearby monitor
+    info = MONITORINFOEXW(cbSize=ctypes.sizeof(MONITORINFOEXW))
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        raise RuntimeError("Could not verify the drag monitor's work area")
+    return info.rcWork.tuple()
 
 
 def monitors():
@@ -611,10 +757,23 @@ def set_clipboard_text(text):
 def idle_seconds():
     """Seconds since the last input event in this session (GetLastInputInfo)."""
     require_windows()
+    last = last_input_tick()
+    return ((kernel32.GetTickCount() - last) & 0xFFFFFFFF) / 1000
+
+
+def last_input_tick():
+    """Last session input tick, including injected input (GetLastInputInfo)."""
+    require_windows()
     info = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
     if not user32.GetLastInputInfo(ctypes.byref(info)):
         raise ctypes.WinError(ctypes.get_last_error())
-    return ((kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000
+    return int(info.dwTime)
+
+
+def current_tick():
+    """Current 32-bit system tick, on the same clock as GetLastInputInfo."""
+    require_windows()
+    return int(kernel32.GetTickCount())
 
 
 def input_desktop():
@@ -632,6 +791,33 @@ def input_desktop():
         return buffer.value
     finally:
         user32.CloseDesktop(desktop)
+
+
+def desktop_context(thread_id=None):
+    """Read-only identity of this process's station and a thread's hook desktop."""
+    require_windows()
+
+    def object_name(handle):
+        if not handle:
+            return None
+        buffer = ctypes.create_unicode_buffer(256)
+        needed = wintypes.DWORD()
+        if not user32.GetUserObjectInformationW(handle, 2, buffer, ctypes.sizeof(buffer), ctypes.byref(needed)):
+            return None
+        return buffer.value
+
+    session = wintypes.DWORD()
+    session_id = session.value if kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)) else None
+    station = user32.GetProcessWindowStation()
+    thread = user32.GetThreadDesktop(thread_id or kernel32.GetCurrentThreadId())
+    receives_input = wintypes.BOOL()
+    needed = wintypes.DWORD()
+    input_state = (bool(receives_input.value) if thread and user32.GetUserObjectInformationW(
+        thread, 6, ctypes.byref(receives_input), ctypes.sizeof(receives_input), ctypes.byref(needed))
+        else None)
+    return {"session_id": session_id, "window_station": object_name(station),
+            "thread_desktop": object_name(thread), "thread_desktop_receives_input": input_state,
+            "foreground_window_present": bool(user32.GetForegroundWindow())}
 
 
 class HotkeyBlocker:

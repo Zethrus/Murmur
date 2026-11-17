@@ -55,6 +55,8 @@ def k1_keyboard(ctx):
             if wraps > 1:
                 break
         previous = index if index != -1 else previous
+        if step > 0 and index == order[0][0] and wraps == 1:
+            break  # one complete traversal; a second cycle is not a second order defect
     distinct = {name for _, name in order}
     ctx.artifact("tab-order.txt").write_text("\n".join(f"{i}\t{n}" for i, n in order) + "\n", encoding="utf-8")
     if len(distinct) < 5:
@@ -64,7 +66,7 @@ def k1_keyboard(ctx):
     if not _tab_to(ctx, window, "Audio"):
         raise Skip("could not reach the Audio page button with Tab")
     win32.tap("enter")
-    if uia.try_find(ctx.murmur.settings(), name_="Refresh", control_type_=uia.BUTTON, timeout=5, sleep=ctx.sleep) is None:
+    if uia.try_find(ctx.murmur.settings(), name_="Refresh inputs", control_type_=uia.BUTTON, timeout=5, sleep=ctx.sleep) is None:
         raise Fail("Enter on the Audio page button did not open Audio")
     if not _tab_to(ctx, window, "General"):
         raise Skip("could not reach the General page button with Tab")

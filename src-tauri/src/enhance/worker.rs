@@ -186,11 +186,21 @@ fn run_job(
         output::parse(&raw, &prompt, &job.body)
     }))
     .unwrap_or_else(|_| {
-        Err(EnhanceError::new(ErrorCode::InferenceFailed, "The Enhance engine failed"))
+        Err(EnhanceError::new(
+            ErrorCode::InferenceFailed,
+            "The Enhance engine failed",
+        ))
     });
-    let elapsed_ms = generate_elapsed.or_else(|| generate_started.map(|start| start.elapsed().as_millis() as u64));
+    let elapsed_ms = generate_elapsed
+        .or_else(|| generate_started.map(|start| start.elapsed().as_millis() as u64));
     let error_code = result.as_ref().err().map(|error| error.code.as_str());
-    tracing::info!(request_id = job.request_id, ok = result.is_ok(), error_code = error_code.as_deref(), elapsed_ms, "Enhance job finished");
+    tracing::info!(
+        request_id = job.request_id,
+        ok = result.is_ok(),
+        error_code = error_code.as_deref(),
+        elapsed_ms,
+        "Enhance job finished"
+    );
     result
 }
 

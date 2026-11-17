@@ -6,6 +6,7 @@ focus the target, hold the hotkey for the length of the spoken sentence, release
 order, then wait for the text to settle.
 """
 from pathlib import Path
+import json
 import time
 
 import golden
@@ -16,6 +17,18 @@ class Fail(Exception):
     pass
 
 
+class TargetCreationError(Fail):
+    """A Notepad spawn may have left an unverified tab; stop later checks."""
+
+
+class OutputCount(Fail):
+    """The per-utterance history did not contain exactly one output."""
+
+    def __init__(self, count):
+        self.count = count
+        super().__init__(f"Expected one output for this utterance, found {count}")
+
+
 class Skip(Exception):
     pass
 
@@ -24,7 +37,8 @@ HOLD_MARGIN = 0.8  # seconds held after the spoken sentence ends
 
 
 class Context:
-    def __init__(self, *, build, session, fixtures, goldens, restorer, guard, out, work, hotkey, cache):
+    def __init__(self, *, build, session, fixtures, goldens, restorer, guard, out, work, hotkey, cache,
+                 startup_probe_lease=None):
         self.build = build
         self.murmur = session
         self.fixtures = fixtures
@@ -35,15 +49,32 @@ class Context:
         self.work = Path(work)
         self.hotkey = hotkey
         self.cache = Path(cache)
+        self.startup_probe_lease = startup_probe_lease
+        # Notepad tabs outlive checks; all other per-check state still unwinds at its mark.
+        self._completed_notepads = []
+        self._notepad_serial = 0
         self.artifacts = []
         self.notes = []
         self.check_id = ""
+        self.attempt = 1
         self._targets = []
+        self._delivery_cursor = None
+        self._delivery_fixture = None
+        self._delivery_released_at = None
+        self._delivery_wait_elapsed = None
 
     # ------------------------------------------------------------ bookkeeping
-    def begin(self, check_id):
+    def begin(self, check_id, attempt=1):
         self.check_id = check_id
+        self.attempt = attempt
         self.artifacts, self.notes = [], []
+        self._delivery_cursor = self._delivery_fixture = None
+        self._delivery_released_at = self._delivery_wait_elapsed = None
+        # Only dictation checks opt into the app's existing history in this disposable profile.
+        # Settings/Privacy screenshots retain the default-off setting. The next ensure() applies
+        # this base configuration before the check drives Murmur.
+        self.murmur.base_config["privacy"]["history_enabled"] = (
+            check_id.startswith(("H", "I", "F")) or check_id == "M3")
 
     def artifact(self, suffix):
         """Path for an evidence file of the current check (registered in the report)."""
@@ -74,15 +105,90 @@ class Context:
         """A fresh TargetApp, closed by the restore stack."""
         import targets
         app = targets.TargetApp(self.work, f"{self.check_id}-{name}", role, guard=self.guard).start()
+        if getattr(self, "startup_probe_lease", None) is not None:
+            app._startup_handoff = self.startup_probe_lease.complete_handoff
         self.restorer.push(f"close {app.title}", app.close)
         self._targets.append(app)
         return app
 
-    def notepad(self, name="doc"):
+    def notepad(self, name="doc", *, reuse_hwnd=None, owned_tab=False):
+        """Create a distinct run-owned tab; H8 may request one verified existing HWND."""
         import targets
-        pad = targets.Notepad(self.work, f"{self.check_id}-{name}").start()
-        self.restorer.push(f"close Notepad {pad.path.name}", pad.close)
+        owned_windows = {}
+        for previous in self._completed_notepads:
+            if not previous.hwnd:
+                continue  # A failed spawn has no window we may claim or close.
+            if not previous.owned_tab or not previous.owner_pid:
+                raise TargetCreationError("Completed Notepad window ownership changed before target creation")
+            if previous.hwnd in owned_windows and owned_windows[previous.hwnd] != previous.owner_pid:
+                raise TargetCreationError("Completed Notepad window has conflicting owners")
+            if previous.hwnd in owned_windows:
+                continue
+            if (not previous.win32.is_window(previous.hwnd) or
+                    previous.win32.window_pid(previous.hwnd) != previous.owner_pid or
+                    previous.owner_pid not in previous.win32.pids("Notepad.exe")):
+                raise TargetCreationError("Completed Notepad window ownership changed before target creation")
+            owned_windows[previous.hwnd] = previous.owner_pid
+        if reuse_hwnd is not None and reuse_hwnd not in owned_windows:
+            raise TargetCreationError("Notepad reuse handle is not a completed fixture owned by this run")
+        self._notepad_serial += 1
+        fixture_name = f"{self.check_id}-{name}-a{self.attempt}-c{self._notepad_serial}"
+        pad = targets.Notepad(self.work, fixture_name)
+        # Creation may fail after spawning Notepad. Keep the incomplete fixture for final
+        # ownership-checked cleanup; the creation exception itself fails the check.
+        self._completed_notepads.append(pad)
+        try:
+            pad.start(reuse_hwnd=reuse_hwnd, owned_tab=True,
+                      reuse_owner_pid=owned_windows.get(reuse_hwnd),
+                      reuse_windows=owned_windows if reuse_hwnd is None else None)
+        except Exception as error:
+            raise TargetCreationError(f"Notepad target creation failed: {error}") from error
+        if getattr(self, "startup_probe_lease", None) is not None:
+            pad._startup_handoff = self.startup_probe_lease.complete_handoff
         return pad
+
+    def close_completed_notepads(self):
+        """Retire only run-owned tabs at run end; failed activation stays an error."""
+        errors = []
+        # Preserve the old 64-tab allowance for restored tabs plus this run's fixtures.
+        tab_search_limit = 64 + len(self._completed_notepads)
+        for pad in reversed(self._completed_notepads):
+            try:
+                self.guard.check()
+                pad.close_owned(max_tabs=tab_search_limit, guard_check=self.guard.check)
+            except Exception as error:  # noqa: BLE001 - try every verified fixture
+                errors.append((f"close Notepad {pad.path.name}", f"{type(error).__name__}: {error}"))
+                from guard import UserInput
+                if isinstance(error, UserInput):
+                    break  # a latched guard failure forbids further input
+        # Keep identities for the after-cleanup snapshot; successful pads have hwnd=0.
+        return errors
+
+    def notepad_ownership_snapshot(self):
+        """Read-only evidence around teardown; never grants permission to close a tab."""
+        foreground = win32.foreground_context()
+        identity = {}
+        try:  # which window holds the foreground matters when cleanup cannot activate Notepad
+            hwnd = foreground.get("hwnd")
+            identity["class"] = win32.class_name(hwnd) if hwnd else ""
+            path = win32.process_path(foreground.get("process_id")) if hwnd else None
+            identity["process_image"] = path.rsplit("\\", 1)[-1] if path else None
+        except Exception as error:  # noqa: BLE001 - evidence only
+            identity["error"] = f"{type(error).__name__}: {error}"
+        owned = []
+        for pad in self._completed_notepads:
+            row = {"document": pad.path.name, "hwnd": pad.hwnd, "recorded_pid": pad.owner_pid,
+                   "owned_tab": pad.owned_tab}
+            if pad.hwnd:
+                try:
+                    row["window_exists"] = pad.win32.is_window(pad.hwnd)
+                    if row["window_exists"]:
+                        row["current_pid"] = pad.win32.window_pid(pad.hwnd)
+                        row["active_title"] = pad.win32.window_text(pad.hwnd)
+                except Exception as error:  # noqa: BLE001 - evidence cannot authorize cleanup
+                    row["read_error"] = f"{type(error).__name__}: {error}"
+            owned.append(row)
+        return {"foreground": foreground, "foreground_identity": identity, "notepads": owned}
 
     def clipboard_guard(self):
         """Restore the clipboard text after the check (other formats cannot be restored)."""
@@ -137,6 +243,7 @@ class Context:
         the hotkey is still held (hold) or before the second press (toggle), e.g. to change focus.
         Returns the time the dictation was released/stopped."""
         hotkey = hotkey or self.hotkey
+        self.observe_delivery(fixture)
         speech = self.fixtures[fixture].speech_seconds
         if mode == "hold":
             self.press(hotkey)
@@ -146,7 +253,9 @@ class Context:
             self.sleep(speech + HOLD_MARGIN)
             if during:
                 during(self)
-            return self.release(hotkey, order)
+            released = self.release(hotkey, order)
+            self.mark_delivery_released()
+            return released
         self.tap_hotkey(hotkey)
         if not self.murmur.wait_state("listening", 5):
             raise Fail(f"Toggle dictation did not start (overlay: {self.murmur.overlay_state()})")
@@ -154,7 +263,60 @@ class Context:
         if during:
             during(self)
         self.tap_hotkey(hotkey)
+        self.mark_delivery_released()
         return time.time()
+
+    def observe_delivery(self, fixture):
+        """Start an exact observation before a manually driven or ordinary utterance."""
+        self._delivery_cursor = self.murmur.history_cursor()
+        self._delivery_fixture = fixture
+        self._delivery_released_at = self._delivery_wait_elapsed = None
+
+    def mark_delivery_released(self):
+        """Record when the last hotkey key went up for failure timing evidence."""
+        self._delivery_released_at = time.monotonic()
+
+    def observed_text(self, timeout=5):
+        """Exactly one output for the current utterance, saved before target readback."""
+        if self._delivery_cursor is None:
+            raise Fail("No per-utterance output observation was started")
+        started = time.monotonic()
+        try:
+            rows = win32.wait_for(lambda: self.murmur.history_after(self._delivery_cursor), timeout, 0.1,
+                                  sleep=self.sleep) or []
+        finally:
+            self._delivery_wait_elapsed = round(time.monotonic() - started, 3)
+        if len(rows) != 1:
+            raise OutputCount(len(rows))
+        text = rows[0][1]
+        fidelity = golden.fixture_fidelity(self._delivery_fixture, text)
+        if fidelity:
+            raise Fail(fidelity)
+        return text
+
+    def capture_output_failure(self, suffix="output-failure", terminal_state=None):
+        """Preserve synthetic-profile app evidence without reading the target during delivery."""
+        state = {"history_cursor_before": self._delivery_cursor,
+                 "history_wait_elapsed_s": self._delivery_wait_elapsed,
+                 "settle_state": terminal_state,
+                 "seconds_since_release": (round(time.monotonic() - self._delivery_released_at, 3)
+                                           if self._delivery_released_at is not None else None)}
+        for label, read in (("history_count_after", lambda: len(self.murmur.history_after(self._delivery_cursor))),
+                            ("history_cursor_after", self.murmur.history_cursor),
+                            ("overlay_state", self.murmur.overlay_state)):
+            try:
+                state[label] = read()
+            except Exception as error:  # noqa: BLE001 - diagnostics must preserve the original failure
+                state[label + "_error"] = f"{type(error).__name__}: {error}"
+        self.artifact(f"{suffix}-state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+        self.artifact(f"{suffix}-app-log.txt").write_text(self.murmur.log(since_launch=True), encoding="utf-8")
+
+    def expect_delivery(self, actual, where):
+        expected = self.observed_text()
+        difference = golden.compare(expected, actual)
+        if difference:
+            raise Fail(f"{where}: {difference}")
+        return expected
 
     def settle(self, timeout=45):
         """Wait until the overlay leaves listening/transcribing."""
@@ -162,7 +324,7 @@ class Context:
 
     # ------------------------------------------------------------ goldens
     def golden(self, fixture, mode="hold", hotkey=None, style="prose", variant="", config=None):
-        """Expected text for these settings; made by a first delivery into a fresh TargetApp."""
+        """First sample for semantic checks; exact delivery checks use the same utterance's history."""
         hotkey = hotkey or self.hotkey
         key = golden.key(fixture, mode, hotkey, style, variant)
         if self.goldens.has(key):
@@ -187,11 +349,7 @@ class Context:
         app.close()
         if not text:
             raise Fail(f"No text reached TargetApp while recording the golden text for {fixture}")
+        self.expect_delivery(text, "golden TargetApp")
         self.goldens.record(key, text)
         self.note(f"golden {fixture}/{mode}/{style}{('/' + variant) if variant else ''}: {text!r}")
         return text
-
-    def expect(self, expected, actual, where):
-        difference = golden.compare(expected, actual)
-        if difference:
-            raise Fail(f"{where}: {difference}")

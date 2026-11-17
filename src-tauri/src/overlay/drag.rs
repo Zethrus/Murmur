@@ -129,6 +129,7 @@ fn finish_drag(app: &AppHandle, generation: u64, capture: bool) -> Result<()> {
 /// Returns only once the native gesture has released and settled. All native window
 /// operations stay on the UI thread; no runtime mutex is held across a native call.
 pub async fn drag(app: AppHandle) -> Result<()> {
+    tracing::info!("Overlay drag requested");
     let generation = on_main(&app, |app| {
         let window = app
             .get_webview_window("overlay")
@@ -159,6 +160,7 @@ pub async fn drag(app: AppHandle) -> Result<()> {
             runtime().drag = None;
             return Err(error.into());
         }
+        tracing::info!("Overlay drag engaged");
         Ok(generation)
     })
     .await?;
@@ -213,5 +215,6 @@ pub async fn drag(app: AppHandle) -> Result<()> {
         })
         .await;
     }
+    tracing::info!(success = result.is_ok(), "Overlay drag completed");
     result
 }

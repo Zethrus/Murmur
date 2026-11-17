@@ -46,6 +46,9 @@ function appLogo(){
   return svg;
 }
 
+/** Inputs that take no typed text: a config refresh may rebuild the page under them. */
+const NON_TEXT_INPUTS = new Set(["checkbox","radio","range","button","submit","reset","color","file","image"]);
+
 export async function mountSettings(root: HTMLElement): Promise<void> {
   root.replaceChildren(el("p","boot-message","Opening your workspace…"));
   let config: Config, status: Status, version = "", page: Page = "General", disposed = false, saving = 0, lastTranscript = "", generation = 0;
@@ -72,6 +75,8 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   const report = (e: unknown): void => { notice.textContent = String(e); notice.dataset.tone = "error"; };
   const theme = (): void => { document.documentElement.dataset.theme = config.general.theme; };
   const noEngine = (): boolean => snapshot !== null && !snapshot.engine_installed;
+  const needsSetup = (): boolean => noEngine() || (snapshot !== null && !snapshot.components.some(c =>
+    c.kind === "speech-model" && c.model === config.engine.model && (c.state === "active" || c.state === "installed")));
   const chrome = (): void => { dot.dataset.online = String(status.sidecar_alive); engineStatus.textContent = noEngine() ? "Speech engine not installed" : !status.sidecar_alive ? "Engine offline" : !status.model_available ? "No model selected" : status.state === "idle" ? "Ready when you are" : status.state;
     banner.hidden = status.model_available && !noEngine();
     bannerText.textContent = noEngine() ? "The speech engine is not installed. Dictation needs it and one speech model." : "Choose a speech model to start dictating";
@@ -102,8 +107,22 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
     finally { saving--; }
     renderPage();
   };
+  // An external config change (the overlay saving its dragged position, a tray toggle…) must
+  // not rebuild the page under a field the user is typing in: that discards focus, caret and
+  // text. Defer the rebuild until focus leaves the field (Windows O8, run 44051172677).
+  let deferredRender = false;
+  const typingInPage = (): boolean => {
+    const active = document.activeElement as (HTMLElement & {type?: string}) | null;
+    if (!active || !content.contains(active)) return false;
+    if (active.tagName === "TEXTAREA" || active.isContentEditable) return true;
+    return active.tagName === "INPUT" && !NON_TEXT_INPUTS.has(active.type ?? "text");
+  };
+  const renderUnlessTyping = (): void => { if (typingInPage()) deferredRender = true; else renderPage(); };
+  content.addEventListener("focusout",()=>{ if (!deferredRender) return;
+    setTimeout(()=>{ if (deferredRender && !disposed && !typingInPage()) renderPage(); },0); });
   function renderPage(): void {
     if (setupOpen) return;
+    deferredRender = false;
     generation++; const current = generation; pageDisposers.splice(0).forEach(f=>f());
     const focused = document.activeElement instanceof HTMLElement ? document.activeElement.id : "";
     const scroll = main.scrollTop;
@@ -118,12 +137,13 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   }
   function navigate(next: Page): void { page = next; renderPage(); main.scrollTop = 0; }
   (Object.keys(pages) as Page[]).forEach((name,index)=>{const b = button(name,()=>navigate(name),"nav-button"); b.dataset.page = name;
+    b.setAttribute("aria-label",name);
     b.prepend(el("span","nav-number",String(index+1).padStart(2,"0"))); nav.append(b);});
   const subscribe = async <K extends keyof Events>(event: K, handler: (data: Events[K])=>void): Promise<void> => {
     const off = await on(event,handler); if (disposed) off(); else disposers.push(off);
   };
   // Closing the window during setup postpones it (Rust side); hide the wizard to match.
-  await subscribe("config",next=>{config = next; theme(); if (setupOpen && next.setup.postponed) closeSetup(); else if (!saving) renderPage();});
+  await subscribe("config",next=>{config = next; theme(); if (setupOpen && next.setup.postponed) closeSetup(); else if (!saving) renderUnlessTyping();});
   await subscribe("latency",event=>{if (event.text !== undefined) lastTranscript = event.text;});
   const refreshStatus = (): void => { if (refreshTimer !== undefined) return;
     refreshTimer = setTimeout(()=>{refreshTimer = undefined; void call("get_status").then(next=>{
@@ -136,5 +156,5 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   await subscribe("components/changed",()=>{ void refreshSnapshot().then(()=>{ chrome(); refreshStatus(); }); });
   theme(); chrome(); renderPage();
   // First run: open setup automatically unless the user chose "Set up later" before.
-  if (noEngine() && !config.setup.postponed && snapshot?.trust.ok) openSetup();
+  if (needsSetup() && !config.setup.postponed && snapshot?.trust.ok) openSetup();
 }

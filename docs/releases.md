@@ -63,6 +63,36 @@ available. Report the original X11 focus symptom separately if it recurs.
 After the workflow succeeds and manual checks pass, publish the validated draft
 from GitHub Releases, or run `gh release edit vMAJOR.MINOR.PATCH --draft=false --latest`.
 
+### Beta (pre-release), then promotion
+
+A beta uses the ordinary `vMAJOR.MINOR.PATCH` tag; the pipeline does not accept
+`-beta` suffixes. It is the same signed draft, published as a GitHub
+pre-release so `/releases/latest` (and every installed app's component update
+check) keeps pointing at the previous official release:
+
+```
+gh release edit vX.Y.Z --draft=false --prerelease --latest=false --title "Murmur vX.Y.Z (beta)"
+```
+
+Component downloads only work once the release is public (the embedded manifest
+points at `/releases/download/vX.Y.Z/`), so smoke-test a clean install on each
+platform right after publishing the pre-release and before inviting testers.
+Share the tag URL, not `/releases/latest`. While it is a pre-release,
+Settings → Components → Check for updates in the beta reads the previous
+release and reports an error; say so in the notes.
+
+Never replace a pre-release's files. A blocking bug ships as the next patch
+version and its own pre-release. To promote, update the release text (drop the
+beta wording, then commit the same text) and run:
+
+```
+gh release edit vX.Y.Z --prerelease=false --latest --title "Murmur vX.Y.Z"
+```
+
+Nothing is rebuilt, so signatures, `SHA256SUMS` and GPU evidence stay valid. Then
+confirm `/releases/latest/download/components-manifest.json` resolves and do the
+checks under "After publishing".
+
 A failed build leaves a draft. Fix the failure and rerun the workflow while it is
 still a draft. A published release cannot be overwritten by the prepare job.
 

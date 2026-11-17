@@ -1,9 +1,16 @@
-# Murmur 0.5.0 (unreleased)
+# Murmur 0.5.0 (beta)
 
-Much smaller Linux downloads: the app packages no longer contain the speech
-engine or the GPU runtime. Murmur downloads what you choose, verifies it against
-a signed list, and installs it into your data folder. Measured sizes are in
-[the size report](size-report.md).
+The first Windows build, and much smaller Linux downloads: the app packages no
+longer contain the speech engine or the GPU runtime. Murmur downloads what you
+choose, verifies it against a signed list, and installs it into your data
+folder. Measured sizes are in [the size report](size-report.md).
+
+**This is a beta.** It is published as a GitHub pre-release for about a week of
+testing on Linux and Windows. If no blocking problems turn up, these same files
+become the official 0.5.0 release; a fix would ship as 0.5.1 instead. Please
+report problems at <https://github.com/Zethrus/Murmur/issues> with your
+platform, desktop (for example Windows 11, or GNOME on X11), how you installed
+Murmur, and what you expected.
 
 ## Components and first-run setup
 
@@ -37,6 +44,8 @@ a signed list, and installs it into your data folder. Measured sizes are in
 - General → When idle offers Small app icon (default), Full pill, or Nothing.
   It replaces the Hide when idle switch. Existing installs that turned hiding
   off keep the full pill.
+- Settings no longer redraws the page while you are typing in one of its text
+  fields, for example after the overlay is moved and its position is saved.
 
 ## Smaller Linux packages
 
@@ -67,18 +76,27 @@ a signed list, and installs it into your data folder. Measured sizes are in
   release-tag jobs are excluded. The fallback has not been activated or
   validated live, and no build speedup has been measured. See
   [CI build performance](ci-build-performance.md).
+- **Vendored Wry on Windows.** Windows builds use a pinned copy of Wry 0.57.2
+  with one patch that lets the overlay's WebView2 receive a drag press while
+  another Murmur window is in front (upstream:
+  [tauri-apps/wry#1850](https://github.com/tauri-apps/wry/pull/1850)).
+  Provenance, verification and removal steps are in `src-tauri/vendor/README.md`.
 
 ## Known limitations
 
-- **Final release validation remains.** The production OpenPGP certificate is
-  committed and its fingerprint pinned in the app; release manifest signing is
-  required by the tag workflow ([signing](signing.md)). Final 0.5.0 Linux and
-  Windows release builds, asset checks and GPU evidence have not yet passed.
-- **Windows desktop checks remain.** Earlier Windows CI builds, packaging,
-  automated tests and GPU inference passed on Edison with an RTX 3060
-  ([test ledger](parity/test-ledger.md)). The overlay, hotkeys, typing and tray
-  have not yet been checked in a logged-in Windows desktop session. Desktop
-  parity remains unverified.
+- **Check for updates fails during the beta.** Settings → Components → Check
+  for updates reads the newest *official* release, which is still 0.4.7 and has
+  no component list, so it reports an error. First-run setup and installing
+  components are not affected: they use the signed list built into this
+  version. The error goes away once 0.5.0 becomes the official release.
+- **Windows uses the CPU in this beta.** The NVIDIA GPU option is hidden on
+  Windows; Windows GPU inference passed in release testing but is not offered
+  yet.
+- **Windows is new.** All 48 automated desktop checks passed in a logged-in
+  Windows session on the test machine (overlay, hotkeys, typing, tray, focus
+  guards; [test ledger](parity/test-ledger.md)). Manual checks such as screen
+  readers and mixed-DPI monitors are tracked in
+  [the Windows checklist](parity/windows-checklist.md). Expect rough edges.
 - **No Windows publisher signature.** The Windows installer and executable are
   intentionally unsigned with Authenticode, so Windows may show an unknown
   publisher or SmartScreen warning. The required OpenPGP signature protects the
@@ -92,9 +110,12 @@ a signed list, and installs it into your data folder. Measured sizes are in
   connection). Requires Windows 10 1809+ x64.
 - **Windows engine and GPU components** in the signed manifest: the engine
   frozen from hash-locked win_amd64 wheels, and a cuBLAS-only GPU add-on
-  (`cublas64_12.dll`, `cublasLt64_12.dll`). Earlier CI inference passed on an RTX
-  3060; final release GPU evidence is still required. The GPU option stays
-  hidden on Windows until the desktop checks pass.
+  (`cublas64_12.dll`, `cublasLt64_12.dll`). Release GPU inference is validated
+  on an RTX 3060 (`GPU-VALIDATION-windows.json`); the GPU option stays hidden on
+  Windows for this beta.
+- **The overlay can be dragged with Settings in front.** Dragging the overlay
+  icon no longer depends on which Murmur window is active, and it does not take
+  keyboard focus from the app you are typing in.
 - **Delivery guards.** Murmur is designed to hold text with Copy/Discard when
   the target is elevated, at a UAC prompt or at the lock screen; the overlay
   explains why.
@@ -112,6 +133,31 @@ a signed list, and installs it into your data folder. Measured sizes are in
 
 - With **When focus changes: Insert anyway**, a transcript whose target window
   cannot be identified is now held instead of failing with an error.
+
+## Downloads
+
+- **Linux x86_64:** `Murmur_0.5.0_amd64.AppImage` (portable), `Murmur_0.5.0_amd64.deb`
+  (Debian/Ubuntu: `sudo apt install ./Murmur_0.5.0_amd64.deb`), or
+  `murmur-linux-x86_64.tar.gz` (the AppImage as `murmur`). If FUSE is
+  unavailable, add `--appimage-extract-and-run`.
+- **Windows 10 1809+ x64:** `Murmur_0.5.0_x64-setup.exe` (per-user installer, no
+  administrator rights) or `murmur-windows-x86_64.zip` (portable). The files are
+  not Authenticode-signed: first check that
+  `Get-FileHash .\Murmur_0.5.0_x64-setup.exe` matches the line in `SHA256SUMS`,
+  then choose *More info → Run anyway* at the SmartScreen prompt
+  ([troubleshooting](troubleshooting.md#windows)).
+- **Flipper Zero:** the matching companion `.fap`.
+- **Do not download** the `murmur-engine-*`, `murmur-cuda-*` and
+  `components-manifest*` files yourself: Murmur fetches and verifies them during
+  setup. `GPU-VALIDATION*.json` is test evidence.
+
+Verify downloads against `SHA256SUMS`. Quit an older running copy from its tray
+menu before launching this version. Closing Settings keeps Murmur running; tray
+→ Quit exits the application.
+
+Linux needs x86_64, glibc 2.39 or newer, and an X11 desktop with working audio
+services and hardware drivers; GPU inference needs a compatible NVIDIA driver.
+Linux packages are unsigned. Android remains deferred.
 
 # Murmur 0.4.7
 

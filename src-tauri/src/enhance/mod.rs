@@ -123,7 +123,12 @@ pub trait ModelStore: Send + Sync {
     fn state(&self, entry: &Entry) -> InstallState;
     fn model_path(&self, entry: &Entry) -> Option<PathBuf>;
     /// Blocking install; `progress(phase, received, total)`.
-    fn install(&self, entry: &'static Entry, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(download::Phase, u64, u64)) -> Result<(), EnhanceError>;
+    fn install(
+        &self,
+        entry: &'static Entry,
+        cancel: &Arc<AtomicBool>,
+        progress: &mut dyn FnMut(download::Phase, u64, u64),
+    ) -> Result<(), EnhanceError>;
     fn remove(&self, entry: &Entry) -> Result<(), EnhanceError>;
 }
 
@@ -139,7 +144,9 @@ impl LegacyStore {
         Self {
             root,
             space: crate::platform::available_space,
-            transport: Arc::new(|| download::Https::new().map(|t| Box::new(t) as Box<dyn download::Transport>)),
+            transport: Arc::new(|| {
+                download::Https::new().map(|t| Box::new(t) as Box<dyn download::Transport>)
+            }),
         }
     }
 }
@@ -151,9 +158,23 @@ impl ModelStore for LegacyStore {
     fn model_path(&self, entry: &Entry) -> Option<PathBuf> {
         Some(entry.model_path(&self.root))
     }
-    fn install(&self, entry: &'static Entry, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(download::Phase, u64, u64)) -> Result<(), EnhanceError> {
+    fn install(
+        &self,
+        entry: &'static Entry,
+        cancel: &Arc<AtomicBool>,
+        progress: &mut dyn FnMut(download::Phase, u64, u64),
+    ) -> Result<(), EnhanceError> {
         let space = (self.space)(&self.root);
-        (self.transport)().and_then(|transport| download::install(entry, &self.root, transport.as_ref(), cancel, space, progress))
+        (self.transport)().and_then(|transport| {
+            download::install(
+                entry,
+                &self.root,
+                transport.as_ref(),
+                cancel,
+                space,
+                progress,
+            )
+        })
     }
     fn remove(&self, entry: &Entry) -> Result<(), EnhanceError> {
         download::remove(entry, &self.root)
@@ -458,10 +479,8 @@ impl Enhance {
             message: None,
         };
         let result = {
-            self.store.install(
-                entry,
-                &cancel,
-                &mut |phase, received, total| {
+            self.store
+                .install(entry, &cancel, &mut |phase, received, total| {
                     info.phase = match phase {
                         download::Phase::Starting => "starting",
                         download::Phase::Downloading => "downloading",
@@ -478,8 +497,7 @@ impl Enhance {
                             s.download = Some(info.clone());
                         }
                     });
-                },
-            )
+                })
         };
         let local = self.store.state(entry);
         match &result {

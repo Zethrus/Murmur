@@ -1,9 +1,34 @@
-"""Golden texts without hard-coding model output. Pure Python.
+"""Exact per-utterance comparison and first-run samples for semantic checks. Pure Python.
 
-The expected text for a fixture is whatever its first delivery into TargetApp produced in this
-run under the same settings (hotkey, mode, style and any rule that changes the text). Every later
-delivery under the same settings must match it exactly, character for character.
+Model punctuation can change between separate inferences of the same WAV. The first TargetApp
+sample is useful for fixture and privacy checks, never as an exact oracle for a later delivery.
 """
+import re
+
+
+# These signatures check that the fixture was recognized. They are deliberately separate from
+# exact delivery comparison; punctuation, spacing and case are all retained there.
+SIGNATURES = {
+    "A": "the quick brown fox jumps over the lazy dog",
+    "B": "version ships on friday",  # the engine may render "two point one" as 2.1
+    "LONG": "please remember to water the garden plants every morning before the sun",
+    "D": "daniel delivered the old wooden desk today",
+    "MARKER": "please type now",  # the Behavior replacement changes the middle words
+}
+
+
+def fixture_fidelity(fixture, text):
+    """Return an error when the output lacks the fixture's ordered word signature."""
+    words = re.findall(r"[^\W_]+", text.lower(), flags=re.UNICODE)
+    signature = SIGNATURES[fixture].split()
+    if fixture in ("A", "D"):
+        faithful = words == signature
+    else:
+        remaining = iter(words)
+        faithful = all(any(word == wanted for word in remaining) for wanted in signature)
+    if not faithful:
+        return f"{fixture} fixture recognition lacked its ordered word signature: {text!r}"
+    return None
 
 
 def key(fixture, mode="hold", hotkey="", style="prose", variant=""):
@@ -44,16 +69,6 @@ class GoldenStore:
         if golden_key in self._texts:
             raise ValueError(f"Golden text for {golden_key} already recorded")
         self._texts[golden_key] = text
-
-    def check(self, golden_key, text):
-        """None when `text` matches the recorded golden text, else the difference."""
-        if golden_key not in self._texts:
-            raise KeyError(f"No golden text for {golden_key}")
-        return compare(self._texts[golden_key], text)
-
-    def texts(self):
-        """Every golden text (for the log scan: none may appear in murmur.log)."""
-        return list(self._texts.values())
 
     def as_dict(self):
         return {" / ".join(k for k in golden_key if k): text for golden_key, text in self._texts.items()}

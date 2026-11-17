@@ -157,6 +157,8 @@ pub enum Blocked {
     Unreadable,
     /// Windows: the secure desktop (UAC prompt, lock screen, Ctrl+Alt+Del) has the input.
     SecureDesktop,
+    /// Windows: an Alt hotkey left the target in menu mode; typing would invoke commands.
+    Menu,
 }
 impl Blocked {
     /// Shown with the held transcript.
@@ -171,6 +173,7 @@ impl Blocked {
             Blocked::SecureDesktop => {
                 "Not typed: a Windows security prompt or the lock screen had focus. Copy the text instead."
             }
+            Blocked::Menu => "Not typed: the destination's menu has focus. Select an editor and use Insert here or Copy.",
         }
     }
 }
@@ -351,10 +354,11 @@ fn native_focus() -> Result<Native> {
         if window.is_null() {
             bail!("No foreground window");
         }
-        GetWindowThreadProcessId(window, &mut pid);
+        let thread = GetWindowThreadProcessId(window, &mut pid);
         if pid == 0 {
             bail!("Foreground window has no process");
         }
+        let menu_active = win::menu_active(thread).context("Read foreground menu state")?;
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if process.is_null() {
             return Err(io::Error::last_os_error()).context("Open foreground process");
@@ -381,7 +385,8 @@ fn native_focus() -> Result<Native> {
             pid: Some(pid),
             started,
             class: name,
-            blocked: integrity_block(target_level, own_level),
+            blocked: integrity_block(target_level, own_level)
+                .or(menu_active.then_some(Blocked::Menu)),
         })
     }
 }
@@ -400,7 +405,27 @@ mod win {
             },
             Threading::{GetProcessTimes, OpenProcessToken},
         },
+        UI::WindowsAndMessaging::{
+            GetGUIThreadInfo, GUITHREADINFO, GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
+        },
     };
+    pub fn menu_active(thread: u32) -> std::io::Result<bool> {
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            flags: 0,
+            hwndActive: std::ptr::null_mut(),
+            hwndFocus: std::ptr::null_mut(),
+            hwndCapture: std::ptr::null_mut(),
+            hwndMenuOwner: std::ptr::null_mut(),
+            hwndMoveSize: std::ptr::null_mut(),
+            hwndCaret: std::ptr::null_mut(),
+            rcCaret: unsafe { std::mem::zeroed() },
+        };
+        if unsafe { GetGUIThreadInfo(thread, &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE) != 0)
+    }
     /// Name of the desktop receiving input; `None` when it cannot be opened, which is what a
     /// normal process sees while the secure desktop is up.
     pub fn input_desktop_name() -> Option<String> {
@@ -715,7 +740,12 @@ pub fn init_logging(data: &Path) -> Result<()> {
 }
 fn payload_safe_for_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     let target = metadata.target();
-    if target == "tungstenite"
+    // enigo's debug event can format `text(text: <entire transcript>)` on
+    // supported platforms. Its target is outside Murmur, so our own metadata-only
+    // transcript logs cannot prevent this payload from reaching murmur.log.
+    if target == "enigo" || target.starts_with("enigo::") {
+        false
+    } else if target == "tungstenite"
         || target.starts_with("tungstenite::")
         || target == "tokio_tungstenite"
         || target.starts_with("tokio_tungstenite::")
@@ -851,7 +881,7 @@ mod logging_tests {
     }
 
     #[test]
-    fn auth_token_is_not_formatted_by_websocket_targets() {
+    fn sensitive_dependency_payloads_are_not_formatted() {
         let output = Capture(Arc::new(Mutex::new(Vec::new())));
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
@@ -866,13 +896,17 @@ mod logging_tests {
                 .with_filter(filter_fn(payload_safe_for_metadata)),
         );
         let token = "AUTH OK secret-token-probe";
+        let transcript = "The private transcript should not be logged";
         tracing::subscriber::with_default(subscriber, || {
             tracing::trace!(target: "tungstenite::protocol", "{token}");
             tracing::trace!(target: "tokio_tungstenite::protocol", "{token}");
+            tracing::debug!(target: "enigo::platform::win_impl", "text(text: {transcript})");
+            tracing::info!(target: "enigo", "{transcript}");
             tracing::info!(target: "murmur", "application log probe");
         });
         let formatted = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
         assert!(formatted.contains("application log probe"));
         assert!(!formatted.contains(token));
+        assert!(!formatted.contains(transcript));
     }
 }

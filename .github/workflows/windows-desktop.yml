@@ -30,6 +30,21 @@ on:
         required: false
         type: string
         default: '1'
+      guard_diagnostic:
+        description: Probe the input guard in the harness environment (no app build)
+        required: false
+        type: boolean
+        default: false
+      guard_teardown_diagnostic:
+        description: One owned-window A/B hook teardown experiment (no app build)
+        required: false
+        type: boolean
+        default: false
+      idle_diagnostic:
+        description: Read-only 90-second last-input sampling (no app build or guard)
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -53,6 +68,9 @@ jobs:
           SHA: ${{ inputs.sha }}
           ONLY: ${{ inputs.only }}
           REPEAT: ${{ inputs.repeat }}
+          GUARD_DIAGNOSTIC: ${{ inputs.guard_diagnostic }}
+          TEARDOWN_DIAGNOSTIC: ${{ inputs.guard_teardown_diagnostic }}
+          IDLE_DIAGNOSTIC: ${{ inputs.idle_diagnostic }}
         run: |
           $Sha = $env:SHA.Trim().ToLowerInvariant()
           if ($Sha -notmatch '^[0-9a-f]{40}$') { throw 'sha must be a full 40-character commit hash' }
@@ -61,6 +79,11 @@ jobs:
           }
           if ($env:ONLY -notmatch '^[A-Za-z0-9, ]*$') { throw 'only accepts checklist ids separated by commas' }
           if ($env:REPEAT -notmatch '^([1-9]|10)$') { throw 'repeat must be 1-10' }
+          if (($env:GUARD_DIAGNOSTIC -eq 'true' -and $env:TEARDOWN_DIAGNOSTIC -eq 'true') -or
+              ($env:GUARD_DIAGNOSTIC -eq 'true' -and $env:IDLE_DIAGNOSTIC -eq 'true') -or
+              ($env:TEARDOWN_DIAGNOSTIC -eq 'true' -and $env:IDLE_DIAGNOSTIC -eq 'true')) {
+            throw 'Choose only one diagnostic mode'
+          }
 
       - uses: actions/checkout@v4
         with:
@@ -82,6 +105,7 @@ jobs:
           "MURMUR_DESKTOP_PYTHON=$Python" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Verify the handed-over build (SHA256SUMS and the build's own job log)
+        if: ${{ !inputs.guard_diagnostic && !inputs.guard_teardown_diagnostic && !inputs.idle_diagnostic }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -99,6 +123,7 @@ jobs:
           "MURMUR_DESKTOP_OUT=$Out" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Preflight (unlocked session, idle 60 s, no other Murmur or Notepad)
+        if: ${{ !inputs.guard_diagnostic && !inputs.guard_teardown_diagnostic && !inputs.idle_diagnostic }}
         shell: pwsh
         env:
           ONLY: ${{ inputs.only }}
@@ -109,6 +134,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Preflight refused to start (see above); nothing was run' }
 
       - name: Run the desktop checks (takes the keyboard and mouse; real input aborts)
+        if: ${{ !inputs.guard_diagnostic && !inputs.guard_teardown_diagnostic && !inputs.idle_diagnostic }}
         shell: pwsh
         env:
           ONLY: ${{ inputs.only }}
@@ -119,12 +145,54 @@ jobs:
           & $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/run.py @RunArgs
           if ($LASTEXITCODE -ne 0) { throw "Desktop checks failed or were aborted; report in $env:MURMUR_DESKTOP_OUT" }
 
+      - name: Diagnose the input guard (harness Python; no app launch)
+        if: ${{ inputs.guard_diagnostic || inputs.guard_teardown_diagnostic }}
+        shell: pwsh
+        env:
+          TEARDOWN: ${{ inputs.guard_teardown_diagnostic }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Out = "C:\murmur-desktop-reports\$env:GITHUB_SHA\$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "MURMUR_DESKTOP_OUT=$Out" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $ProbeArgs = @('--out', (Join-Path $Out 'guard-diagnostic.json'))
+          if ($env:TEARDOWN -eq 'true') { $ProbeArgs += '--teardown' }
+          & $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/guard_diagnostic.py @ProbeArgs
+          if ($LASTEXITCODE -ne 0) { throw "Input guard diagnostic stopped; report in $Out" }
+
+      - name: Sample last-input idle state (read-only; no app launch)
+        if: ${{ inputs.idle_diagnostic }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Out = "C:\murmur-desktop-reports\$env:GITHUB_SHA\$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "MURMUR_DESKTOP_OUT=$Out" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/idle_diagnostic.py --out (Join-Path $Out 'idle-diagnostic.json')
+          if ($LASTEXITCODE -ne 0) { throw "Idle diagnostic refused or stopped; report in $Out" }
+
       - name: Report to the job summary
         if: always()
         shell: pwsh
         run: |
+          $IdlePath = Join-Path "$env:MURMUR_DESKTOP_OUT" 'idle-diagnostic.json'
+          $Diagnostic = Join-Path "$env:MURMUR_DESKTOP_OUT" 'guard-diagnostic.json'
           $Report = Join-Path "$env:MURMUR_DESKTOP_OUT" 'desktop-report.md'
-          if ($env:MURMUR_DESKTOP_OUT -and (Test-Path -LiteralPath $Report)) {
+          if ($env:MURMUR_DESKTOP_OUT -and (Test-Path -LiteralPath $IdlePath)) {
+            $Idle = Get-Content -LiteralPath $IdlePath -Raw | ConvertFrom-Json
+            "Idle diagnostic: $($Idle.status); $($Idle.samples.Count) samples in $($Idle.elapsed_s) s; $($Idle.reset_count) last-input changes." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            if ($Idle.samples.Count -gt 0) {
+              "Initial idle $($Idle.samples[0].idle_s) s; final idle $($Idle.samples[-1].idle_s) s." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            }
+            foreach ($Sample in @($Idle.samples | Where-Object { $_.last_input_changed })) {
+              "Change at $($Sample.utc) (elapsed $($Sample.elapsed_s) s, idle $($Sample.idle_s) s)." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            }
+            "Evidence: ``$env:MURMUR_DESKTOP_OUT`` on Edison." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          } elseif ($env:MURMUR_DESKTOP_OUT -and (Test-Path -LiteralPath $Diagnostic)) {
+            'Input guard diagnostic:' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            '~~~json' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            Get-Content -LiteralPath $Diagnostic -Raw | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            '~~~' | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            "Evidence: ``$env:MURMUR_DESKTOP_OUT`` on Edison." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          } elseif ($env:MURMUR_DESKTOP_OUT -and (Test-Path -LiteralPath $Report)) {
             Get-Content -LiteralPath $Report -Raw | Out-File $env:GITHUB_STEP_SUMMARY -Append
             "Evidence: ``$env:MURMUR_DESKTOP_OUT`` on Edison." | Out-File $env:GITHUB_STEP_SUMMARY -Append
           } else {

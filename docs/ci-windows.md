@@ -260,6 +260,163 @@ unlocked, 60 s without input, no other `murmur.exe`, Notepad closed), shows a
 (same folder layout): `python scripts\windows\desktop\run.py --build <verified
 copy> --out <dir> [--only H1,F2] [--group focus] [--repeat 3]`.
 
+### Read-only idle diagnostic
+
+If the 60-second preflight reports recent input despite the owner leaving Edison
+untouched, dispatch `windows-desktop.yml` on the matching commit and SHA with
+`-f idle_diagnostic=true`. Leave both guard diagnostic flags false. This owner-only
+mode uses the same hash-locked harness venv and writes
+`C:\murmur-desktop-reports\<sha>\<run id>-<attempt>\idle-diagnostic.json`.
+It skips build handoff, the normal preflight, app launch, and the input guard.
+It samples for 90 seconds even when idle is below 60 seconds; it refuses a
+wrong or locked session and stops if the session changes during sampling. The
+normal desktop run still requires 60 seconds idle and retains all its guards.
+
+Each roughly one-second sample contains a UTC timestamp, elapsed time, raw
+`GetLastInputInfo` and `GetTickCount` ticks, wrap-safe computed idle seconds,
+and whether the last-input tick changed since the previous sample. The JSON also
+contains the interactive session/desktop identity and limited Python runtime
+metadata. The job summary lists status, sample and change counts, and change
+times. No command lines, window titles, key fields, pointer positions, or
+process paths are collected. This mode only reads Windows state; it neither
+sends input nor installs hooks, manipulates focus, opens a window, or closes apps.
+
+The timestamp sequence can distinguish a recent reset at job startup from
+repeated changes during the 90-second interval. `GetLastInputInfo` includes
+injected input, gives no device or process attribution, and does not itself
+prove that any specific physical input occurred. This diagnostic provides no
+native proof of the cause of the preflight failures. Review the local artifact
+before drawing a conclusion or scheduling another desktop test.
+
+For an input-guard failure before the checks, dispatch the same workflow with
+`-f guard_diagnostic=true` and the matching `sha`. This branch creates the same
+hash-locked harness venv as the full suite, but skips build handoff and app launch.
+It requires the owner's unlocked session with no Murmur running, then waits for
+the owned diagnostic window to take focus and for 60 seconds without input before
+running the isolated guard for 30 seconds. It does not close any app. To reproduce
+locally in the owner-controlled, unlocked session without a build, create a fresh
+venv with the same requirements:
+
+```powershell
+$Venv = Join-Path $env:TEMP "murmur-guard-$PID"
+py -3.12 -m venv $Venv
+$Python = Join-Path $Venv 'Scripts\python.exe'
+& $Python -m pip install --disable-pip-version-check --no-input --require-hashes --only-binary=:all: `
+  -r scripts\windows\desktop\requirements.txt
+& $Python scripts\windows\desktop\guard_diagnostic.py --seconds 30 --out C:\murmur-desktop-reports\guard-diagnostic.json
+```
+
+The diagnostic opens a small window owned by its own process, verifies that
+Windows gave that window foreground focus (allowing up to 180 seconds for the
+owner to click it if automatic focus fails), and sends a tagged Unicode packet
+key-down/key-up pair to it. The foreground owner is checked again immediately
+before injection, and the window removes messages without calling
+`TranslateMessage`. The packet is a Unicode noncharacter, not a functional
+shortcut. If focus never arrives, it sends no controlled key and reports
+`probe_window_unavailable`. On exit it tries to restore the previous foreground
+window only while its own window is still foreground; it never steals focus back
+after another window has taken it. The local `guard-diagnostic.json` reports
+Python executable/version/prefix, hook and message-pump state, ctypes structure
+sizes, SendInput result, callback counts, and up to eight recent **injected probe
+candidates** with their tag comparison. It never records real key fields. A
+missing or mismatched probe is still a failure; the diagnostic does not relax the
+guard.
+
+For the single teardown-sensitivity experiment, dispatch with
+`-f guard_teardown_diagnostic=true` (leave `guard_diagnostic` false) and the
+matching `sha`, or add `--teardown` to the local command above. This is a
+separate opt-in path in the same hash-locked venv, with no build handoff or app
+launch. It keeps one keyboard/mouse hook registration in this diagnostic process
+and starts no stage after a 12-second deadline following the 60-second idle
+prerequisite; final cleanup can take longer. The test sends
+tagged **key-up only** Unicode `VK_PACKET` and reserved-VK controls to focused
+owned window A. If both callbacks arrive, it calls `SetFocus(NULL)` on A's
+owning GUI thread and repeats the controls while A remains active. Whether an
+A probe is observed or missed, it
+records before/after teardown snapshots, closes A, and requires both a successful
+`DestroyWindow` result and termination of A's window thread before considering B.
+It creates owned window B and probes again. The owned window does not call
+`TranslateMessage`, and the controlled probes send no key-down. The diagnostic
+does not close any user app or intentionally send while an external window is
+foreground. Before B is constructed, the foreground must be null on the Default
+desktop and the session last-input tick must match the tick after the last A probe.
+B is created hidden; its thread repeats those checks before creation, before
+showing B with `SetWindowPos(SWP_NOACTIVATE)`, and before requesting foreground.
+Once B exists, only null foreground or verified ownership of B is allowed. The
+same checks run
+again before each B probe, and the observer checks ownership and input before
+`SendInput`. An arbitrary previous foreground app is never a permitted handoff.
+If B cannot take focus automatically, it stops; an owner click after hooks start
+aborts when detected by the hook. Any last-input tick change during the handoff
+stops B creation/activation, and any change after a miss blocks recovery. That
+tick includes injected input and is only a conservative change detector, not
+proof of human input. Foreground and input checks are separate reads, not an
+atomic lock on the desktop; a change between the last check and native activation
+or `SendInput` remains possible. A missed callback latches failure; the same
+registration gets at most one controlled Unicode key-up probe on B for
+recovery evidence. If the miss happens on B's initial probe, that one recovery
+probe is on B after the handoff. The normal guard worker, its cleanup, and the
+0.5-second probe deadline are unchanged.
+
+`stages` records foreground HWND/TID/PID, `GetGUIThreadInfo` active/focus/status,
+input desktop, callback message types (`WM_KEYDOWN`, `WM_KEYUP`,
+`WM_SYSKEYDOWN`, `WM_SYSKEYUP`), SendInput result, and the hook process/thread
+identity and posted/received pump heartbeat around each send and timeout. A
+received heartbeat shows the message pump ran, not that the hooks ran. Compare
+tags with `window_a` and
+`window_b` received messages. `miss_recovered` means the same registration
+delivered B's recovery callback after a latched miss; it refutes permanent
+removal for that episode and does **not** pass the desktop suite. `miss_persisted`
+means no recovery callback arrived. `inconclusive` means this one A/B run did
+not reproduce a miss. No probe is sent after A's destruction and before B owns
+foreground, so a negative A/B result cannot exclude a hook failure specific to
+that no-target gap. The hook runs in the diagnostic process instead of the
+product guard's isolated worker, so process-specific effects remain unresolved.
+This is one bounded experiment, not a repeated sampling or release gate.
+
+The focus-clear step follows [SetFocus(NULL)](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setfocus),
+and its state is read through [GetGUIThreadInfo](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getguithreadinfo).
+[SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)
+documents `SWP_NOACTIVATE` for B's initial display.
+The [KEYEVENTF_UNICODE key-up](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput)
+is documented to produce a `VK_PACKET` key message without a translated
+character when the window does not call `TranslateMessage`. The
+[GetLastInputInfo](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getlastinputinfo)
+tick is session-specific and may not be monotonic, so any change stops the
+recovery probe without labeling it real input.
+
+The observer creates its message queue before reporting ready. Diagnostic
+`heartbeat_posted` and `heartbeat_received` count private messages through that
+queue; a received heartbeat shows the pump ran but does not prove either hook
+is active. The diagnostic also sends one tagged, zero-displacement mouse move
+with no button action. `zero_move_probe_send_result` and
+`zero_move_probe_seen` can show whether the mouse hook receives injected input.
+A missing mouse callback is inconclusive because the system may suppress a
+zero-displacement move. Compare `probe_window.received_probe_events` with
+`input_guard.hook_state.owned_probe_messages` and `owned_probe_status`:
+
+- Tagged `VK_PACKET` down/up messages in the owned window with no matching hook
+  callbacks show the key event reached the window queue while hook delivery failed.
+- Both matching hook callbacks with a missing reserved-key probe show that the
+  hook delivered a documented valid event immediately before the miss. The
+  reserved key or timing remains suspect; this alone does not establish why.
+- No window messages and no callbacks leave generation versus delivery unresolved,
+  even when `SendInput` reports two events inserted.
+
+The packet uses the documented [`KEYEVENTF_UNICODE` / `VK_PACKET` path](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput),
+with U+FDD0 as a [Unicode noncharacter](https://www.unicode.org/faq/private_use.html).
+The diagnostic window checks its messages using
+[`PeekMessageW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-peekmessagew).
+`pump_result: 0` with
+`pump_exited_before_stop: false` is the expected cleanup `WM_QUIT`.
+Compare `parent_desktop_context` with `input_guard.hook_state.desktop_context`.
+The hook thread must be in the same session and window station as the parent,
+and `thread_desktop_receives_input` must be `true`. A desktop named `Default`
+alone is insufficient: a noninteractive window station can also have a default
+desktop. These fields are captured before the hook thread stops. If the valid
+packet is not seen by either the window or the hook, the cause remains
+unresolved; do not run the desktop checks.
+
 ### Reading the report
 
 The job summary shows `desktop-report.md`: one row per checklist id with

@@ -6,7 +6,8 @@
 
 Runs in the logged-in desktop session (the `desktop` runner, or by hand). It takes the keyboard
 and mouse: any real input aborts the run within ~100 ms, everything it changed is restored and
-the remaining checks are marked "aborted: user input". Writes desktop-report.json,
+the remaining checks are marked "aborted: user input". A shared Murmur startup failure also
+stops later checks, after saving app output, log and window evidence. Writes desktop-report.json,
 desktop-report.md and the evidence PNG/TXT files to --out. Exit code 0 only when nothing failed
 or aborted; skipped checks carry their reason.
 """
@@ -29,7 +30,11 @@ DEFAULT_HOTKEY = "Ctrl+Alt+Shift+F9"
 IDLE_SECONDS = 60
 BANNER_SECONDS = 10
 # Checks that drive Notepad: Windows 11 Notepad restores its tabs, so it must not be running.
-NOTEPAD_CHECKS = {"O3", "O4", "H1", "I1", "I4", "I5", "I6"}
+NOTEPAD_CHECKS = {"O3", "O4", "O8", "O9", "H1", "H8", "I1", "I4", "I5", "I6"}
+REPRO_EXE = "webview2-input-repro.exe"  # O9 only; scripts/windows/desktop/repro.py
+# Run-alone diagnostics whose first guard probe stays passive until Notepad is verified (run
+# 44037195020: O9 on the ordinary guard start lost its first probe before any input).
+LEASED_ALONE = ("O8", "O9")
 
 
 def base_config(hotkey):
@@ -46,11 +51,9 @@ def base_config(hotkey):
     }
 
 
-def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
-    """Problems that prevent a safe run (empty list = go)."""
+def preflight_desktop(win32, idle_needed=IDLE_SECONDS):
+    """Shared safety checks before either desktop workflow sends input."""
     problems = []
-    if not (Path(build_dir) / "build.json").is_file():
-        problems.append(f"{build_dir} is not a verified build (run handoff.py first)")
     desktop = win32.input_desktop()
     if desktop != "Default":
         problems.append(f"the workstation is locked or on a secure desktop (input desktop: {desktop})")
@@ -58,11 +61,25 @@ def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
     if running:
         problems.append(f"another Murmur is running (pid {', '.join(map(str, running))}); quit it from the tray "
                         "(single instance would hand the test launch to it)")
-    if NOTEPAD_CHECKS & {c.id for c in selected} and win32.pids("Notepad.exe"):
-        problems.append("Notepad is running; close it (the Notepad checks open and close their own windows)")
     idle = win32.idle_seconds()
     if idle < idle_needed:
         problems.append(f"the desktop was used {idle:.0f} s ago; it must be idle for {idle_needed} s")
+    return problems
+
+
+def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
+    """Problems that prevent a safe run (empty list = go)."""
+    problems = []
+    if not (Path(build_dir) / "build.json").is_file():
+        problems.append(f"{build_dir} is not a verified build (run handoff.py first)")
+    problems.extend(preflight_desktop(win32, idle_needed))
+    if NOTEPAD_CHECKS & {c.id for c in selected} and win32.pids("Notepad.exe"):
+        problems.append("Notepad is running; close it (the Notepad checks open and close their own windows)")
+    if any(c.id == "O9" for c in selected):
+        if not (Path(build_dir) / REPRO_EXE).is_file():
+            problems.append(f"{REPRO_EXE} is not in the verified build (manual windows-build.yml runs hand it over)")
+        if win32.pids(REPRO_EXE):
+            problems.append(f"{REPRO_EXE} is already running; close it")
     return problems
 
 
@@ -78,23 +95,160 @@ def remove_tree(path, attempts=10):
     return False
 
 
+class StartupProbeLease:
+    """Keep the H8 startup window passive until a registered target owns keyboard focus."""
+
+    def __init__(self, window, guard, win32, startup):
+        self.window, self.guard, self.win32, self.startup = window, guard, win32, startup
+        self.closed = False
+
+    def _target_ready(self, target):
+        try:
+            # UIA discovery can wait. Finish it before taking the final native snapshot.
+            if not target.handoff_ready():
+                return False
+            hwnd, pid = target.hwnd, target.handoff_owner_pid
+            if not hwnd or not pid or not self.win32.is_window(hwnd) or self.win32.window_pid(hwnd) != pid:
+                return False
+            context = self.win32.foreground_context()
+            focus = context.get("focus_hwnd")
+            if (context.get("input_desktop") != "Default" or context.get("hwnd") != hwnd or
+                    context.get("process_id") != pid or context.get("gui_status") != "ok" or
+                    context.get("active_hwnd") != hwnd or not focus or
+                    (focus != hwnd and self.win32.user32.GetAncestor(focus, self.win32.GA_ROOT) != hwnd)):
+                return False
+            return True
+        except Exception:  # noqa: BLE001 - a failed ownership read cannot authorize handoff
+            # A rebuilding UIA element or an unknown owner cannot justify retirement.
+            return False
+
+    def complete_handoff(self, target):
+        """Observe the target after its normal focus call; never activate a window here."""
+        if self.closed:
+            return True
+        self.guard.check()
+        if not self._target_ready(target):
+            self.startup["handoff"] = "awaiting_verified_target"
+            return False
+        # Re-read ownership immediately before destruction; focus may have moved in between.
+        if not self._target_ready(target):
+            self.startup["handoff"] = "ownership_changed_before_close"
+            return False
+        self.guard.check()
+        self.close()
+        self.guard.check()
+        self.startup["handoff"] = "verified_target"
+        return True
+
+    def close(self):
+        if self.closed:
+            return
+        try:
+            closed = self.window.close(restore=False)
+        except Exception as error:  # noqa: BLE001 - teardown must fail closed
+            self.startup["probe_window"] = self.window.diagnostics()
+            raise self._cleanup_error(f"{type(error).__name__}: {error}") from error
+        if not closed:
+            self.startup["probe_window"] = self.window.diagnostics()
+            raise self._cleanup_error(self.window.restoration)
+        self.closed = True
+        self.startup["probe_window"] = self.window.diagnostics()
+
+    @staticmethod
+    def _cleanup_error(detail):
+        from guard import GuardUnavailable
+        return GuardUnavailable(f"H8 owned probe window cleanup failed: {detail}")
+
+
+def start_input_guard(guard, selected, win32, meta):
+    """For H8, or O8/O9 alone, keep the first probe passive until a verified target focuses."""
+    if not (any(check.id == "H8" for check in selected) or
+            len(selected) == 1 and selected[0].id in LEASED_ALONE):
+        guard.start()
+        return None
+
+    from guard import GuardUnavailable
+    from guard_diagnostic import _OwnedProbeWindow, _wait_for_safe_desktop
+
+    startup = meta["guard_startup"]
+    startup["after_banner_desktop_context"] = win32.desktop_context()
+    startup["phase"] = "window_open"
+    window = _OwnedProbeWindow(restore_on_close=False)
+    lease = StartupProbeLease(window, guard, win32, startup)
+    try:
+        if not window.open():
+            raise GuardUnavailable(f"H8 owned probe window unavailable: {window.status}")
+        startup["phase"] = "focus_and_idle_wait"
+        focus_started = time.monotonic()
+        try:
+            state, problems = _wait_for_safe_desktop(window)
+        finally:
+            startup["focus_wait_elapsed_s"] = round(time.monotonic() - focus_started, 3)
+        startup["focus_wait_state"] = state
+        if state != "ready":
+            startup["focus_wait_problems"] = problems
+            raise GuardUnavailable(f"H8 owned probe window {state}: {'; '.join(problems)}")
+        if not window.focused():
+            raise GuardUnavailable("H8 owned probe window lost focus before guard startup")
+        startup["pre_guard_idle_seconds"] = round(win32.idle_seconds(), 2)
+        startup["pre_guard_desktop_context"] = win32.desktop_context()
+        startup["phase"] = "guard_start"
+        started = time.monotonic()
+        try:
+            guard.start(owned_probe_target=(window.hwnd, os.getpid()))
+        finally:
+            startup["guard_start_elapsed_s"] = round(time.monotonic() - started, 3)
+        diagnostic = guard.diagnostics()
+        hook = diagnostic.get("hook_state", {})
+        startup["first_probe"] = {"probes_seen": diagnostic.get("probes_seen", 0),
+                                  "owned_probe_status": hook.get("owned_probe_status"),
+                                  "owned_probe_messages": hook.get("owned_probe_messages")}
+        if not window.focused():
+            raise GuardUnavailable("H8 owned probe window lost focus during guard startup")
+        startup["phase"] = "passive_transition"
+        if not window.enter_passive():
+            raise GuardUnavailable(f"H8 owned probe window passive transition failed: {window.diagnostics()}")
+        guard.check()
+        startup["probe_window"] = window.diagnostics()
+        startup["phase"] = "ready"
+        return lease
+    except BaseException:
+        # Even when readiness or the first probe fails, this window never restores prior focus.
+        lease.close()
+        raise
+
+
 def run_checks(ctx, selected, repeat, lookup, log=print):
-    """Run every check `repeat` times; returns (attempts, aborted reason or '')."""
-    from guard import UserInput
+    """Run checks until complete, real input, guard loss, or shared startup failure."""
+    from guard import GuardUnavailable, UserInput
     import win32
-    from context import Fail, Skip
+    from context import Fail, Skip, TargetCreationError
+    from murmur import StartupError
     results = []
     plan = [(attempt, check) for attempt in range(1, repeat + 1) for check in selected]
+    mark_guard = getattr(ctx.guard, "mark", lambda stage: None)
     for position, (attempt, check) in enumerate(plan):
-        ctx.begin(check.id)
+        ctx.begin(check.id, attempt)
+        mark_guard(f"{check.id}:{attempt}:begin")
         mark = ctx.restorer.mark()
         started = time.monotonic()
         status, reason = report.PASS, ""
+        startup_failure = ""
         log(f"[{check.id}] {check.title} (attempt {attempt})")
         try:
+            ctx.guard.check()
             lookup(check)(ctx)
+            ctx.guard.check()
         except UserInput as error:
-            reason = f"aborted: user input ({error})"
+            mark_guard(f"{check.id}:{attempt}:guard-abort")
+            kind = "input guard unavailable" if isinstance(error, GuardUnavailable) else "user input"
+            reason = f"aborted: {kind} ({error})"
+            if check.id == "P4":
+                # Preserve the launch log at the P3 -> P4 handoff before restoration stops Murmur.
+                try:
+                    ctx.murmur.save_startup_diagnostics(ctx.artifact)
+                except Exception as diagnostic_error:  # noqa: BLE001 - retain the original guard loss
+                    ctx.note(f"startup diagnostics failed: {type(diagnostic_error).__name__}: {diagnostic_error}")
             results.append(report.Result(check.id, report.ABORTED, reason, check.title, check.group,
                                          check.best_effort, list(ctx.artifacts), list(ctx.notes),
                                          round(time.monotonic() - started, 1), attempt))
@@ -107,11 +261,31 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
             return results, reason
         except Skip as error:
             status, reason = report.SKIPPED, str(error) or "skipped"
+        except TargetCreationError as error:
+            status, reason = report.FAIL, str(error)
+            startup_failure = f"blocked after {check.id} target creation failure: {error}"
         except Fail as error:
             status, reason = report.FAIL, str(error) or "failed"
+        except StartupError as error:
+            trace = ctx.artifact("harness-error.txt")
+            trace.write_text(traceback.format_exc(), encoding="utf-8")
+            try:
+                error.session.save_startup_diagnostics(ctx.artifact)
+            except Exception as diagnostic_error:  # noqa: BLE001 - do not hide the launch failure
+                ctx.note(f"startup diagnostics failed: {type(diagnostic_error).__name__}: {diagnostic_error}")
+            status, reason = report.FAIL, f"startup failure: {error}"
+            startup_failure = f"blocked after {check.id} startup failure: {error}"
         except Exception as error:  # noqa: BLE001 - one broken check must not stop the run
             trace = ctx.artifact("harness-error.txt")
             trace.write_text(traceback.format_exc(), encoding="utf-8")
+            # UIA misses otherwise have no visual evidence. Keep the failing profile's
+            # Settings frame before per-check restoration hides or stops it.
+            try:
+                hwnd = ctx.murmur.settings_hwnd()
+                if hwnd:
+                    ctx.screenshot(hwnd, "settings-error.png")
+            except Exception as diagnostic:  # noqa: BLE001 - retain the original failure
+                ctx.note(f"Settings diagnostic failed: {type(diagnostic).__name__}: {diagnostic}")
             message = f"harness error: {type(error).__name__}: {error}"
             # A best-effort check that could not run is a skip, never a pass (and not a failure).
             status, reason = (report.SKIPPED, f"could not run: {message}") if check.best_effort \
@@ -123,7 +297,13 @@ def run_checks(ctx, selected, repeat, lookup, log=print):
         results.append(report.Result(check.id, status, reason, check.title, check.group, check.best_effort,
                                      list(ctx.artifacts), list(ctx.notes), round(time.monotonic() - started, 1),
                                      attempt))
+        mark_guard(f"{check.id}:{attempt}:end:{status}")
         log(f"[{check.id}] {status}{': ' + reason if reason else ''}")
+        if startup_failure:
+            for remaining_attempt, rest in plan[position + 1:]:
+                results.append(report.Result(rest.id, report.ABORTED, startup_failure, rest.title, rest.group,
+                                             rest.best_effort, attempt=remaining_attempt))
+            return results, startup_failure
     return results, ""
 
 
@@ -145,6 +325,10 @@ def main(argv=None):
         selected = catalog.select(args.only or None, args.group or None)
     except catalog.SelectionError as error:
         parser.error(str(error))
+    if any(check.id == "O8" for check in selected) and (len(selected) != 1 or args.repeat != 1):
+        parser.error("O8 requires --only O8 and --repeat 1 (four observations maximum)")
+    if any(check.id == "O9" for check in selected) and (len(selected) != 1 or args.repeat != 1):
+        parser.error("O9 requires --only O9 and --repeat 1 (one baseline and one candidate)")
 
     import win32
     win32.require_windows()
@@ -162,7 +346,7 @@ def main(argv=None):
     import golden
     import targets
     from context import Context
-    from guard import Guard, UserInput
+    from guard import Guard, GuardUnavailable, UserInput
     from murmur import Build, MurmurSession, fetch_model
     from restore import Restorer
 
@@ -177,8 +361,12 @@ def main(argv=None):
             "windows": ".".join(map(str, sys.getwindowsversion()[:3])), "selection": [c.id for c in selected]}
     restorer = Restorer()
     results, aborted = [], ""
-    guard = Guard()
+    # Include hook/pump state in the actual suite report, where P4 has lost the probe.
+    guard = Guard(diagnostic=True)
+    probe_lease_selected = any(check.id == "H8" for check in selected) or selected[0].id in LEASED_ALONE
     session = None
+    startup_lease = None
+    ctx = None
     try:
         print("Preparing fixtures and the test profile (no input yet)...")
         speech = fixtures.build(cache / "fixtures")
@@ -189,17 +377,26 @@ def main(argv=None):
         restorer.push("restore the clipboard text", lambda: win32.set_clipboard_text(clipboard_before))
         session.install_engine()
         session.install(fetch_model(build, cache / "models"))
+        if probe_lease_selected:
+            meta["guard_startup"] = {"phase": "banner", "banner_shown": not args.no_banner,
+                                     "pre_banner_desktop_context": win32.desktop_context()}
+        banner_started = time.monotonic()
         if not args.no_banner:
             targets.show_banner(BANNER_SECONDS)
+        if probe_lease_selected:
+            meta["guard_startup"]["banner_elapsed_s"] = round(time.monotonic() - banner_started, 3)
         if win32.idle_seconds() < BANNER_SECONDS:
             raise UserInput("input during the start countdown")
-        guard.start()
+        startup_lease = start_input_guard(guard, selected, win32, meta)
+        meta["parent_desktop_context"] = win32.desktop_context()
         ctx = Context(build=build, session=session, fixtures=speech, goldens=golden.GoldenStore(), restorer=restorer,
-                      guard=guard, out=out, work=work, hotkey=args.hotkey, cache=cache)
+                      guard=guard, out=out, work=work, hotkey=args.hotkey, cache=cache,
+                      startup_probe_lease=startup_lease)
         results, aborted = run_checks(ctx, selected, args.repeat, checks.lookup)
         meta["goldens"] = ctx.goldens.as_dict()
     except UserInput as error:
-        aborted = f"aborted: user input ({error})"
+        kind = "input guard unavailable" if isinstance(error, GuardUnavailable) else "user input"
+        aborted = f"aborted: {kind} ({error})"
         results += [report.Result(c.id, report.ABORTED, aborted, c.title, c.group, c.best_effort) for c in selected
                     if c.id not in {r.id for r in results}]
     except Exception as error:  # noqa: BLE001 - setup failure: every check is reported
@@ -209,11 +406,42 @@ def main(argv=None):
         results += [report.Result(c.id, report.ABORTED, aborted, c.title, c.group, c.best_effort, [str(trace)])
                     for c in selected if c.id not in {r.id for r in results}]
     finally:
-        guard.stop()
+        def snapshot(stage):
+            if ctx is None:
+                return
+            try:
+                meta.setdefault("notepad_finalization", {})[stage] = ctx.notepad_ownership_snapshot()
+            except Exception as error:  # noqa: BLE001 - diagnostic only, retain teardown outcome
+                meta.setdefault("notepad_finalization", {})[stage] = {
+                    "read_error": f"{type(error).__name__}: {error}"}
+
+        snapshot("before_tab_cleanup")
         win32.release_all()
+        if ctx is not None:
+            completed_failures = ctx.close_completed_notepads()
+            snapshot("after_tab_cleanup")
+            if completed_failures:
+                meta["completed_target_cleanup_failures"] = [f"{label}: {message}"
+                                                             for label, message in completed_failures]
+                aborted = aborted or "aborted: completed Notepad fixture cleanup failed"
+        snapshot("before_guard_stop")
+        try:
+            guard.stop()
+        except Exception as error:  # noqa: BLE001 - still retire our window and restore the run
+            meta["guard_stop_error"] = f"{type(error).__name__}: {error}"
+            aborted = aborted or f"aborted: input guard unavailable (guard stop failed: {error})"
+        if startup_lease is not None:
+            try:
+                startup_lease.close()
+            except GuardUnavailable as error:
+                meta["guard_startup"]["cleanup_error"] = str(error)
+                aborted = aborted or f"aborted: input guard unavailable ({error})"
+        snapshot("after_guard_and_lease_stop")
+        meta["input_guard"] = guard.diagnostics()
         failures = restorer.restore_all()
         if failures:
             meta["restore_failures"] = [f"{label}: {message}" for label, message in failures]
+            aborted = aborted or "aborted: run restoration failed"
         if not args.keep_work and not remove_tree(work):
             meta["cleanup"] = f"could not delete {work}"
         meta["finished"] = report.now()

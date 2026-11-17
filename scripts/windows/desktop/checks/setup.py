@@ -136,7 +136,11 @@ def p3_first_run(ctx):
     session.install_engine()  # the manifest's engine URL points at a release that does not exist
     session.launch(wav=ctx.fixtures["A"].path, config={}, keep_settings=True)
     window = session.settings()
-    uia.find(window, name_="Welcome", timeout=30, sleep=ctx.sleep)
+    try:
+        uia.find(window, name_="Welcome", timeout=30, sleep=ctx.sleep)
+    except uia.NotFound:
+        ctx.screenshot(session.settings_hwnd(), "missing-welcome.png")
+        raise
     _button(window, ctx, "Next")
     _radio(window, ctx, "English only")
     _button(window, ctx, "Next")
@@ -185,16 +189,37 @@ def p3_first_run(ctx):
 
 
 def p4_components(ctx):
+    ctx.guard.mark("P4:ensure:begin")
     ctx.murmur.ensure(ctx.fixtures["A"].path)
+    ctx.guard.mark("P4:ensure:end")
     window = ctx.murmur.page("Components")
+    ctx.guard.mark("P4:components:open")
     for name in ("Speech engine", "Tiny (English)"):
         state = badge(ctx, window, name)
+        ctx.guard.mark(f"P4:{name}:badge")
         if state != "Active":
             raise Fail(f"{name} is {state!r}, not Active")
         uia.invoke(uia.find(window, name_=f"Verify {name}", control_type_=uia.BUTTON, timeout=10, sleep=ctx.sleep))
-        ctx.sleep(0.5)
-    names = wait_names(ctx, lambda: ctx.murmur.settings(), lambda n: n.count("Files verified.") >= 2
-                       or any(x.startswith("Verification failed") for x in n), 120)
+        ctx.guard.mark(f"P4:{name}:verify-invoked")
+        names = wait_names(ctx, lambda: ctx.murmur.settings(), lambda n: _component_verified(n, name)
+                           or any(x.startswith("Verification failed") for x in n), 120)
+        if names is None or not _component_verified(names, name):
+            seen = names if names is not None else uia.names(ctx.murmur.settings())
+            ctx.artifact(f"verify-{name.lower().replace(' ', '-')}-diagnostic.txt").write_text(
+                f"component: {name}\nverdict names: {seen!r}\n"
+                f"component log: {[line for line in ctx.murmur.log().splitlines() if 'verif' in line.lower()][-20:]!r}\n",
+                encoding="utf-8")
+            ctx.screenshot(ctx.murmur.settings_hwnd(), f"verify-{name.lower().replace(' ', '-')}.png")
+            raise Fail(f"Verify did not report 'Files verified.' for {name}")
+    ctx.guard.mark("P4:verification:finished")
     ctx.screenshot(ctx.murmur.settings_hwnd(), "components.png")
-    if names is None or any(x.startswith("Verification failed") for x in names):
-        raise Fail("Verify did not report 'Files verified.' for both components")
+
+
+def _component_verified(names, display_name):
+    """Check the note in this component row, not a note left by an earlier Verify."""
+    try:
+        action = names.index(f"Verify {display_name}")
+        title = max(i for i, name in enumerate(names[:action]) if name == display_name)
+    except (ValueError, TypeError):
+        return False
+    return "Files verified." in names[title:action]

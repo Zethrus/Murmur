@@ -82,6 +82,153 @@ fn qa_wav_capture_without_hardware() -> Result<()> {
     Ok(())
 }
 #[test]
+fn qa_worker_catches_up_to_elapsed_time_after_delayed_ticks() {
+    let cfg = config::Audio::default();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let collected = events.clone();
+    let callback: Callback = Arc::new(move |event| collected.lock().unwrap().push(event));
+    let source = vec![0.25; 90_000];
+    let started = Instant::now();
+    let mut b = Buffer {
+        start: Some(0),
+        qa_started: Some(started),
+        ..Default::default()
+    };
+    push_qa_due(
+        &mut b,
+        &source,
+        16_000,
+        started + Duration::from_millis(20),
+        &cfg,
+        &callback,
+    );
+    assert_eq!(b.qa_pos, 320);
+    // A late worker must cover the observed 58,960 spoken samples by 4,212 ms.
+    push_qa_due(
+        &mut b,
+        &source,
+        16_000,
+        started + Duration::from_millis(4212),
+        &cfg,
+        &callback,
+    );
+    assert_eq!(b.qa_pos, 67_392);
+    assert_eq!(b.pcm(1.0).len(), 67_391);
+    assert!(!b.max_sent);
+    push_qa_due(
+        &mut b,
+        &source,
+        16_000,
+        started + Duration::from_millis(4212),
+        &cfg,
+        &callback,
+    );
+    assert_eq!(b.qa_pos, 67_392);
+    assert!(!events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| matches!(e, AudioEvent::MaxDuration)));
+}
+#[test]
+fn qa_source_end_sends_max_duration_once_and_never_feeds_future_audio() {
+    let cfg = config::Audio::default();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let collected = events.clone();
+    let callback: Callback = Arc::new(move |event| collected.lock().unwrap().push(event));
+    let source = vec![0.25; 1600];
+    let started = Instant::now();
+    let mut b = Buffer {
+        start: Some(0),
+        qa_started: Some(started),
+        ..Default::default()
+    };
+    push_qa_due(
+        &mut b,
+        &source,
+        16_000,
+        started + Duration::from_millis(50),
+        &cfg,
+        &callback,
+    );
+    assert_eq!(b.qa_pos, 800);
+    assert!(!b.max_sent);
+    push_qa_due(
+        &mut b,
+        &source,
+        16_000,
+        started + Duration::from_millis(100),
+        &cfg,
+        &callback,
+    );
+    push_qa_due(
+        &mut b,
+        &source,
+        16_000,
+        started + Duration::from_secs(1),
+        &cfg,
+        &callback,
+    );
+    assert_eq!(b.qa_pos, 1600);
+    assert_eq!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, AudioEvent::MaxDuration))
+            .count(),
+        1
+    );
+}
+#[test]
+fn qa_stop_flushes_elapsed_audio_even_without_a_worker_tick() -> Result<()> {
+    let cfg = config::Audio::default();
+    let callback: Callback = Arc::new(|_| {});
+    let (mut capture, _) = AudioCapture::new_remote(&cfg, |_| {});
+    capture.start()?;
+    capture.qa_source = Some((Arc::new(vec![0.25; 16_000]), 16_000, callback));
+    let started = Instant::now() - Duration::from_millis(250);
+    capture.buffer.lock().unwrap().qa_started = Some(started);
+    let pcm = capture.stop_at(started + Duration::from_millis(250))?;
+    assert_eq!(pcm.len(), 3_999);
+    assert!(pcm.iter().all(|&sample| sample == 0.25));
+    Ok(())
+}
+#[test]
+fn qa_terminal_flush_cannot_enqueue_stop_events_for_a_restart() -> Result<()> {
+    for max_utterance_s in [1, 90] {
+        let cfg = config::Audio {
+            max_utterance_s,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        let callback: Callback = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let (mut capture, _) = AudioCapture::new_remote(&cfg, |_| {});
+        capture.start()?;
+        let mut source = vec![0.25; 6400];
+        source.resize(32_000, 0.0);
+        capture.qa_source = Some((Arc::new(source), 16_000, callback));
+        let started = Instant::now();
+        capture.buffer.lock().unwrap().qa_started = Some(started);
+        let pcm = capture.stop_at(started + Duration::from_secs(2))?;
+        assert_eq!(pcm.len(), 31_999);
+        assert!(pcm[..6400].iter().all(|&sample| sample == 0.25));
+        assert!(pcm[6400..].iter().all(|&sample| sample == 0.0));
+        // Both endpoint and EOF/duration were crossed, but this capture is already stopping.
+        assert!(capture.buffer.lock().unwrap().endpoint);
+        assert!(capture.buffer.lock().unwrap().max_sent);
+        capture.start()?;
+        assert!(capture.buffer.lock().unwrap().start.is_some());
+        assert!(
+            rx.try_iter().next().is_none(),
+            "terminal flush queued stale events after restart"
+        );
+    }
+    Ok(())
+}
+#[test]
 fn gain_and_preroll() {
     let b = Buffer {
         ring: VecDeque::from([0.8, -0.8, 0.2]),

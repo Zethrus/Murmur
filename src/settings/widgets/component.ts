@@ -42,6 +42,8 @@ export interface RowHooks {
   extra?(info: ComponentInfo): HTMLElement[];
   /** Installs (and resuming them) are refused while the trust root or manifest is unavailable or expired. */
   canInstall: boolean;
+  verified?(info: ComponentInfo): boolean;
+  onVerify?(info: ComponentInfo, verdict: string): void;
 }
 
 /** One component: name, state, sizes, live progress and the actions its state allows. */
@@ -60,6 +62,7 @@ export function componentRow(info: ComponentInfo, hooks: RowHooks): {element: HT
   if (info.state === "unverified") note.textContent = `Found an earlier download${info.legacy_path ? ` at ${info.legacy_path}` : ""}. Its files do not match the signed manifest, so Murmur does not load it. Nothing was deleted; Reinstall downloads a verified copy.`;
   if (info.state === "corrupt") note.textContent = "Installed files are missing or changed. Reinstall to repair, or remove.";
   if (info.migrated) note.textContent = "Adopted from an earlier version after its SHA-256 matched the signed manifest.";
+  if (hooks.verified?.(info)) note.textContent = "Files verified.";
   const actions = el("div", "button-group");
   const act = (label: string, run: () => Promise<unknown>, kind = "secondary", aria = `${label} ${info.display_name}`): HTMLButtonElement => {
     const b = button(label, async () => { error.textContent = ""; try { await run(); } catch (e) { error.textContent = String(e); hooks.fail(String(e)); } }, kind);
@@ -86,7 +89,10 @@ export function componentRow(info: ComponentInfo, hooks: RowHooks): {element: HT
       actions.append(...(hooks.extra?.(info) ?? []));
       if (info.update_available) actions.append(install("Update"));
       actions.append(act("Verify", async () => { const {verdict} = await call("components_verify", {id: info.id});
-        error.textContent = verdict === "verified" ? "" : "Verification failed: reinstall this component."; note.textContent = verdict === "verified" ? "Files verified." : note.textContent; }), remove);
+        hooks.onVerify?.(info, verdict);
+        error.textContent = verdict === "verified" ? "" : "Verification failed: reinstall this component.";
+        if (verdict === "verified") note.textContent = "Files verified.";
+      }), remove);
   }
   box.append(head, description, meta, bar.element, note, error, actions);
   const update = (job: ComponentJob): void => {

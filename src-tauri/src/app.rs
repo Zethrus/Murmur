@@ -204,10 +204,16 @@ impl AppState {
         let _transaction = lock(&self.transaction)?;
         Ok(self.enhance.service.cancel_download(operation_id))
     }
-    /// Setup is pending while no engine is installed and the user has not postponed it.
+    /// Setup is pending while the engine or selected model is missing and the user has not postponed it.
     pub fn postpone_setup_if_pending(&self) {
-        let pending = self.components.engine_dir().is_none()
-            && self.config().map(|c| !c.setup.postponed).unwrap_or(false);
+        let pending = self
+            .config()
+            .map(|c| {
+                !c.setup.postponed
+                    && (self.components.engine_dir().is_none()
+                        || self.components.speech_model_dir(&c.engine.model).is_none())
+            })
+            .unwrap_or(false);
         if pending {
             if let Err(error) = self.update(json!({"setup":{"postponed":true}})) {
                 tracing::warn!(%error, "Postpone setup");

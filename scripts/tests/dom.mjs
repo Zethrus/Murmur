@@ -20,10 +20,13 @@ export class Element {
   getAttribute(key) { if(key === "id")return this.id??null;if(key === "class")return this.className;return this.attributes.get(key)??null; }
   removeAttribute(key) { this.attributes.delete(key); }
   addEventListener(type,handler) { const list=this.listeners.get(type)??[];list.push(handler);this.listeners.set(type,list); }
+  removeEventListener(type,handler) { this.listeners.set(type,(this.listeners.get(type)??[]).filter(fn=>fn!==handler)); }
   async dispatch(type,props={}) { if(type === "click" && this.disabled)return;const event={type,target:this,preventDefault(){},stopPropagation(){},...props};for(const fn of this.listeners.get(type)??[])await fn(event); }
   focus() { this.ownerDocument.activeElement=this; }
   /** Layout is not emulated; tests assign `rect` to model a rendered size. */
   getBoundingClientRect() { const r=this.rect??{width:0,height:0};return {x:0,y:0,top:0,left:0,right:r.width,bottom:r.height,...r}; }
+  contains(node) { for(let current=node;current;current=current.parentNode)if(current===this)return true;return false; }
+  closest(selector) { for(let current=this;current;current=current.parentNode)if(current.matches(selector))return current;return null; }
   matches(selector) {
     return selector.split(",").some(part=>{
       const chain=part.trim().split(/\s+/);const simple=chain.pop();if(!this.simple(simple))return false;

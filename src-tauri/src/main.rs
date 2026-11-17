@@ -31,19 +31,60 @@ use tauri::{
     Manager,
 };
 
-fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
-    let handle = app.handle().clone();
-    let overlay_view = handle
-        .get_webview_window("overlay")
-        .ok_or_else(|| anyhow::anyhow!("Overlay webview unavailable"))?;
+fn validate_overlay_drag_acl(webview: &tauri::Webview) -> anyhow::Result<()> {
     anyhow::ensure!(
-        overlay_view
+        webview
             .resolve_command_scope::<serde_json::Value>("window", "start_dragging")?
             .is_some(),
         "Overlay start-dragging permission denied by the runtime ACL"
     );
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn validate_overlay_acl_on_load(label: &str, event: tauri::webview::PageLoadEvent) -> bool {
+    label == "overlay" && event == tauri::webview::PageLoadEvent::Finished
+}
+
+/// Webview labels created with WebView2 host input processing (vendored Wry patch).
+#[cfg(windows)]
+const OVERLAY_HOST_INPUT: &[&str] = &["overlay"];
+
+fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
+    let handle = app.handle().clone();
+    // Configured webviews can execute IPC before this hook runs. Create them only after
+    // AppState is managed, so the first get_config/get_status cannot race startup.
     let runtime = app::AppState::new(handle.clone())?;
     app.manage(runtime);
+    // Before any WebView2 controller exists: the overlay alone routes input through the host
+    // queue, so a click on it starts the drag even while Settings (same UI thread) is the
+    // foreground window (docs/parity/desktop-44041874181-o9-host-input.md).
+    #[cfg(windows)]
+    if !wry::set_host_input_processing_ids(OVERLAY_HOST_INPUT) {
+        tracing::warn!("WebView2 host input processing list was already set");
+    }
+    for window in &app.config().app.windows {
+        tauri::WebviewWindowBuilder::from_config(&handle, window)?.build()?;
+    }
+    let overlay_view = handle
+        .get_webview_window("overlay")
+        .ok_or_else(|| anyhow::anyhow!("Overlay webview unavailable"))?;
+    // An unsupported WebView2 runtime is an explicit result, never a silent "enabled".
+    #[cfg(windows)]
+    match wry::host_input_processing_applied("overlay") {
+        Some(true) => tracing::info!("Overlay WebView2 host input processing applied"),
+        Some(false) => tracing::warn!(
+            "Overlay WebView2 host input processing unsupported by this runtime; \
+             dragging may fail while another Murmur window is in the foreground"
+        ),
+        None => tracing::warn!("Overlay WebView2 host input processing outcome unknown"),
+    }
+    // WebView2 can still report its initial blank URL here. Tauri classifies that as a
+    // remote origin, so the local-only capability must be checked after navigation.
+    #[cfg(not(windows))]
+    validate_overlay_drag_acl(overlay_view.as_ref())?;
+    #[cfg(windows)]
+    let _ = overlay_view;
     let state = app.state::<app::AppState>();
     state.companion.start();
     state.companion_network.start();
@@ -238,7 +279,17 @@ fn main() {
     if let Some(code) = install_component_cli(&args) {
         std::process::exit(code);
     }
-    let application = tauri::Builder::default()
+    let application_builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let application_builder = application_builder.on_page_load(|webview, payload| {
+        if validate_overlay_acl_on_load(webview.label(), payload.event()) {
+            if let Err(error) = validate_overlay_drag_acl(webview) {
+                eprintln!("Murmur failed to start: {error:#}");
+                webview.app_handle().exit(1);
+            }
+        }
+    });
+    let application = application_builder
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if show_settings_on_launch(args) {
                 if let Err(error) = platform::open_settings(app) {
@@ -325,17 +376,21 @@ fn main() {
             ipc::get_overlay_snapshot,
             ipc::reset_overlay_position,
             ipc::set_overlay_size,
-            ipc::start_overlay_drag
+            ipc::start_overlay_drag,
+            ipc::qa_overlay_drag_probe
         ])
         .build(tauri::generate_context!());
     match application {
         Ok(app) => app.run(|handle, event| match event {
-            tauri::RunEvent::ExitRequested { api, .. } => {
-                if let Some(state) = handle.try_state::<app::AppState>() {
-                    if !state.closed() {
-                        api.prevent_exit();
-                        if let Err(error) = state.begin_shutdown() {
-                            state.error(&error.to_string());
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
+                // A denied startup capability is fatal; preserve its failure exit code.
+                if !cfg!(windows) || code != Some(1) {
+                    if let Some(state) = handle.try_state::<app::AppState>() {
+                        if !state.closed() {
+                            api.prevent_exit();
+                            if let Err(error) = state.begin_shutdown() {
+                                state.error(&error.to_string());
+                            }
                         }
                     }
                 }
@@ -376,5 +431,49 @@ mod cli_tests {
             info_cli(&args(&["murmur", "--install-component", "--help"])),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod overlay_acl_tests {
+    use super::validate_overlay_acl_on_load;
+    use tauri::webview::PageLoadEvent;
+
+    #[test]
+    fn windows_acl_check_waits_for_completed_overlay_navigation() {
+        assert!(!validate_overlay_acl_on_load(
+            "overlay",
+            PageLoadEvent::Started
+        ));
+        assert!(!validate_overlay_acl_on_load(
+            "settings",
+            PageLoadEvent::Finished
+        ));
+        assert!(validate_overlay_acl_on_load(
+            "overlay",
+            PageLoadEvent::Finished
+        ));
+    }
+
+    #[test]
+    fn overlay_drag_capability_is_local_and_scoped_to_overlay() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/overlay.json")).unwrap();
+        assert_eq!(capability["windows"], serde_json::json!(["overlay"]));
+        assert_eq!(
+            capability["permissions"],
+            serde_json::json!(["core:window:allow-start-dragging"])
+        );
+        assert!(capability.get("remote").is_none());
+
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert!(config["app"]["security"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("overlay-drag")));
+        let windows = config["app"]["windows"].as_array().unwrap();
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|window| window["create"] == false));
     }
 }
