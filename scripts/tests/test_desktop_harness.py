@@ -1724,6 +1724,26 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
                 with self.assertRaisesRegex(Fail, error):
                     common_checks.overlay_drag_snapshot(ctx, (934, 964, 986, 1004), {}, timeout=0)
 
+    def test_o8_selector_accepts_native_statusbar_after_tooltip(self):
+        ctx = SimpleNamespace(murmur=SimpleNamespace(), guard=SimpleNamespace(check=mock.Mock()),
+                              sleep=lambda _seconds: None)
+        # Exact control types and rectangles captured by run 43984316462.
+        self._selector(ctx, {object(): (50022, (970, 999, 1059, 1024), 0),
+                             object(): (50017, (938, 968, 982, 1000), 0)})
+        details = {}
+        self.assertEqual(common_checks.overlay_drag_snapshot(
+            ctx, (934, 964, 986, 1004), details, timeout=0),
+            ((960, 984), (938, 968, 982, 1000)))
+        self.assertEqual(details["uia_selected"]["control_type"], 50017)
+
+    def test_o8_selector_rejects_mixed_statusbar_group_ambiguity(self):
+        ctx = SimpleNamespace(murmur=SimpleNamespace(), guard=SimpleNamespace(check=mock.Mock()),
+                              sleep=lambda _seconds: None)
+        self._selector(ctx, {object(): (50017, (938, 968, 982, 1000), 0),
+                             object(): (uia.GROUP, (938, 968, 982, 1000), 0)})
+        with self.assertRaisesRegex(Fail, "ambiguous"):
+            common_checks.overlay_drag_snapshot(ctx, (934, 964, 986, 1004), {}, timeout=0)
+
     def test_o8_selector_records_unreadable_stale_bounds(self):
         ctx = SimpleNamespace(murmur=SimpleNamespace(), guard=SimpleNamespace(check=mock.Mock()),
                               sleep=lambda _seconds: None)
@@ -1754,7 +1774,7 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
             for row in cases[0]["readiness_geometry_history"]:
                 self.assertEqual(len(row["uia_candidates"]), 3)
                 self.assertEqual([item["rejections"] for item in row["uia_candidates"]],
-                                 [["not status group", "outside native overlay or unusable"],
+                                 [["not status affordance", "outside native overlay or unusable"],
                                   ["outside native overlay or unusable"], ["foreign native root"]])
 
     def test_o8_guard_trip_during_candidate_enumeration_stops_before_input(self):

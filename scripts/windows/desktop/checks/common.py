@@ -90,8 +90,10 @@ def overlay_drag_snapshot(ctx, native_bounds, details, timeout=0.5):
                 bounds = None
                 candidate["bounds_error"] = f"{type(error).__name__}: {error}"
                 reasons.append("bounds unreadable")
-            if kind != uia.GROUP:  # icon pill has role=status; hidden handle has role=img
-                reasons.append("not status group")
+            # Edison exposes role=status as StatusBar; Group is the Core-AAM mapping.
+            # Both still require exact name, ownership, containment and uniqueness.
+            if kind not in (uia.GROUP, uia.STATUSBAR):
+                reasons.append("not status affordance")
             if native_hwnd and native_root != hwnd:
                 reasons.append("foreign native root")
             if bounds is not None:
@@ -113,7 +115,7 @@ def overlay_drag_snapshot(ctx, native_bounds, details, timeout=0.5):
             bounds = selected["bounds"]
             return ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2), bounds
         if time.monotonic() >= deadline:
-            raise uia.NotFound("No unique visible status-group drag affordance in owned overlay")
+            raise uia.NotFound("No unique visible status drag affordance in owned overlay")
         ctx.sleep(0.25)
 
 
