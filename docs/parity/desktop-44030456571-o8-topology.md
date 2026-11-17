@@ -45,3 +45,16 @@ hand-back variants.
 
 The Wry 0.57.2 run (plan step 2) is still pending. It addresses a later movement stage
 and is not expected to change the failed pre-drag cases.
+
+## Run 2: Wry 0.57.2 (44032865194)
+
+Exact build 44030918182 of `8ee45d10cd470ae9c6e3ccc40d7251c2fbc9a539` (adds Wry 0.57.2).
+Guarded `--only O8 --repeat 1` completed without an abort. The outcome was identical:
+cold and Settings gestures did not move while held, with no drag log line; both Notepad
+gestures moved, with seven drag log lines each. There were no same-root focus changes,
+all three typed tokens landed exactly, the restart error was 0 px, and topology was
+unchanged (foreign immediate parent).
+
+As expected, Wry 0.57.2 neither fixes the pre-drag failure nor regresses the passing
+cases. Keep it as an independent dependency update, still subject to Linux regression
+evidence, and do not count it as an O2 repair.
