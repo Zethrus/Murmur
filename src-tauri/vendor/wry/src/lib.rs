@@ -547,6 +547,30 @@ pub fn set_host_input_processing_ids(ids: &'static [&'static str]) -> bool {
   HOST_INPUT_PROCESSING_IDS.set(ids).is_ok()
 }
 
+/// MURMUR PATCH: per listed id, whether the option was actually applied (`None` until that
+/// webview's controller is created). Lets the app log an unsupported runtime explicitly.
+static HOST_INPUT_PROCESSING_APPLIED: std::sync::Mutex<Vec<(String, bool)>> =
+  std::sync::Mutex::new(Vec::new());
+
+/// MURMUR PATCH: `Some(true)` when the listed webview's controller got the option,
+/// `Some(false)` when the runtime refused it, `None` when not (yet) created.
+pub fn host_input_processing_applied(id: &str) -> Option<bool> {
+  HOST_INPUT_PROCESSING_APPLIED
+    .lock()
+    .ok()?
+    .iter()
+    .rev()
+    .find(|(listed, _)| listed == id)
+    .map(|(_, applied)| *applied)
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_host_input_processing(id: &str, applied: bool) {
+  if let Ok(mut outcomes) = HOST_INPUT_PROCESSING_APPLIED.lock() {
+    outcomes.push((id.to_string(), applied));
+  }
+}
+
 #[allow(dead_code)]
 pub(crate) fn host_input_processing_enabled(id: &str) -> bool {
   HOST_INPUT_PROCESSING_IDS

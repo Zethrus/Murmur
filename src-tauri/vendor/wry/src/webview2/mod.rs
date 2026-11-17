@@ -143,14 +143,14 @@ impl InnerWebView {
       Self::create_environment(&attributes, pl_attrs.clone())?
     };
     // MURMUR PATCH (vendor/README.md): opt-in host input processing for listed webview ids.
-    let allow_host_input_processing = crate::host_input_processing_enabled(&id);
+    let host_input_id = crate::host_input_processing_enabled(&id).then_some(id.as_str());
     let controller = Self::create_controller(
       hwnd,
       &env,
       attributes.incognito,
       background_color,
       pl_attrs.profile_name.as_deref(),
-      allow_host_input_processing,
+      host_input_id,
     )?;
     let webview = Self::init_webview(
       parent,
@@ -388,7 +388,7 @@ impl InnerWebView {
     incognito: bool,
     background_color: Option<(u8, u8, u8, u8)>,
     profile_name: Option<&str>,
-    allow_host_input_processing: bool,
+    host_input_id: Option<&str>,
   ) -> Result<ICoreWebView2Controller> {
     let (tx, rx) = mpsc::channel();
 
@@ -433,19 +433,23 @@ impl InnerWebView {
 
           // MURMUR PATCH: as tauri-apps/wry#1850. Older runtimes lack the interface; the
           // option is then simply absent, exactly as the upstream proposal behaves.
-          if allow_host_input_processing {
-            match controller_opts.cast::<ICoreWebView2ControllerOptions4>() {
-              Ok(opts4) => opts4.SetAllowHostInputProcessing(true)?,
-              Err(_) => {
-                #[cfg(feature = "tracing")]
-                tracing::warn!("WebView2 runtime does not support AllowHostInputProcessing");
-              }
-            }
+          if let Some(id) = host_input_id {
+            let applied = match controller_opts.cast::<ICoreWebView2ControllerOptions4>() {
+              Ok(opts4) => opts4.SetAllowHostInputProcessing(true).is_ok(),
+              Err(_) => false,
+            };
+            crate::record_host_input_processing(id, applied);
           }
 
           env10.CreateCoreWebView2ControllerWithOptions(hwnd, &controller_opts, &handler)?;
         }
-        _ => env.CreateCoreWebView2Controller(hwnd, &handler)?,
+        _ => {
+          // MURMUR PATCH: no controller options at all, so the option cannot apply.
+          if let Some(id) = host_input_id {
+            crate::record_host_input_processing(id, false);
+          }
+          env.CreateCoreWebView2Controller(hwnd, &handler)?
+        }
       }
     }
 

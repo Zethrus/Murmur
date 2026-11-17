@@ -1,7 +1,7 @@
 diff -ru a/wry b/wry
---- a/wry/src/lib.rs	2026-11-17 01:55:52.667236718 -0600
-+++ b/wry/src/lib.rs	2026-11-17 01:55:52.692512245 -0600
-@@ -534,6 +534,26 @@
+--- a/wry/src/lib.rs	2006-07-23 19:21:28.000000000 -0600
++++ b/wry/src/lib.rs	2026-11-17 02:25:00.837319556 -0600
+@@ -534,6 +534,50 @@
  /// An id for a webview
  pub type WebViewId<'a> = &'a str;
  
@@ -18,6 +18,30 @@ diff -ru a/wry b/wry
 +  HOST_INPUT_PROCESSING_IDS.set(ids).is_ok()
 +}
 +
++/// MURMUR PATCH: per listed id, whether the option was actually applied (`None` until that
++/// webview's controller is created). Lets the app log an unsupported runtime explicitly.
++static HOST_INPUT_PROCESSING_APPLIED: std::sync::Mutex<Vec<(String, bool)>> =
++  std::sync::Mutex::new(Vec::new());
++
++/// MURMUR PATCH: `Some(true)` when the listed webview's controller got the option,
++/// `Some(false)` when the runtime refused it, `None` when not (yet) created.
++pub fn host_input_processing_applied(id: &str) -> Option<bool> {
++  HOST_INPUT_PROCESSING_APPLIED
++    .lock()
++    .ok()?
++    .iter()
++    .rev()
++    .find(|(listed, _)| listed == id)
++    .map(|(_, applied)| *applied)
++}
++
++#[allow(dead_code)]
++pub(crate) fn record_host_input_processing(id: &str, applied: bool) {
++  if let Ok(mut outcomes) = HOST_INPUT_PROCESSING_APPLIED.lock() {
++    outcomes.push((id.to_string(), applied));
++  }
++}
++
 +#[allow(dead_code)]
 +pub(crate) fn host_input_processing_enabled(id: &str) -> bool {
 +  HOST_INPUT_PROCESSING_IDS
@@ -29,21 +53,21 @@ diff -ru a/wry b/wry
  struct WebViewAttributes<'a> {
    /// An id that will be passed when this webview makes requests in certain callbacks.
 diff -ru a/wry b/wry
---- a/wry/src/webview2/mod.rs	2026-11-17 01:55:52.667750912 -0600
-+++ b/wry/src/webview2/mod.rs	2026-11-17 01:55:52.692179044 -0600
+--- a/wry/src/webview2/mod.rs	2006-07-23 19:21:28.000000000 -0600
++++ b/wry/src/webview2/mod.rs	2026-11-17 02:25:19.353636076 -0600
 @@ -142,12 +142,15 @@
      } else {
        Self::create_environment(&attributes, pl_attrs.clone())?
      };
 +    // MURMUR PATCH (vendor/README.md): opt-in host input processing for listed webview ids.
-+    let allow_host_input_processing = crate::host_input_processing_enabled(&id);
++    let host_input_id = crate::host_input_processing_enabled(&id).then_some(id.as_str());
      let controller = Self::create_controller(
        hwnd,
        &env,
        attributes.incognito,
        background_color,
        pl_attrs.profile_name.as_deref(),
-+      allow_host_input_processing,
++      host_input_id,
      )?;
      let webview = Self::init_webview(
        parent,
@@ -51,26 +75,34 @@ diff -ru a/wry b/wry
      incognito: bool,
      background_color: Option<(u8, u8, u8, u8)>,
      profile_name: Option<&str>,
-+    allow_host_input_processing: bool,
++    host_input_id: Option<&str>,
    ) -> Result<ICoreWebView2Controller> {
      let (tx, rx) = mpsc::channel();
  
-@@ -427,6 +431,18 @@
+@@ -427,9 +431,25 @@
              controller_opts.SetProfileName(&HSTRING::from(name))?;
            }
  
 +          // MURMUR PATCH: as tauri-apps/wry#1850. Older runtimes lack the interface; the
 +          // option is then simply absent, exactly as the upstream proposal behaves.
-+          if allow_host_input_processing {
-+            match controller_opts.cast::<ICoreWebView2ControllerOptions4>() {
-+              Ok(opts4) => opts4.SetAllowHostInputProcessing(true)?,
-+              Err(_) => {
-+                #[cfg(feature = "tracing")]
-+                tracing::warn!("WebView2 runtime does not support AllowHostInputProcessing");
-+              }
-+            }
++          if let Some(id) = host_input_id {
++            let applied = match controller_opts.cast::<ICoreWebView2ControllerOptions4>() {
++              Ok(opts4) => opts4.SetAllowHostInputProcessing(true).is_ok(),
++              Err(_) => false,
++            };
++            crate::record_host_input_processing(id, applied);
 +          }
 +
            env10.CreateCoreWebView2ControllerWithOptions(hwnd, &controller_opts, &handler)?;
          }
-         _ => env.CreateCoreWebView2Controller(hwnd, &handler)?,
+-        _ => env.CreateCoreWebView2Controller(hwnd, &handler)?,
++        _ => {
++          // MURMUR PATCH: no controller options at all, so the option cannot apply.
++          if let Some(id) = host_input_id {
++            crate::record_host_input_processing(id, false);
++          }
++          env.CreateCoreWebView2Controller(hwnd, &handler)?
++        }
+       }
+     }
+ 

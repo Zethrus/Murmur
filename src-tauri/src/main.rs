@@ -69,6 +69,16 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let overlay_view = handle
         .get_webview_window("overlay")
         .ok_or_else(|| anyhow::anyhow!("Overlay webview unavailable"))?;
+    // An unsupported WebView2 runtime is an explicit result, never a silent "enabled".
+    #[cfg(windows)]
+    match wry::host_input_processing_applied("overlay") {
+        Some(true) => tracing::info!("Overlay WebView2 host input processing applied"),
+        Some(false) => tracing::warn!(
+            "Overlay WebView2 host input processing unsupported by this runtime; \
+             dragging may fail while another Murmur window is in the foreground"
+        ),
+        None => tracing::warn!("Overlay WebView2 host input processing outcome unknown"),
+    }
     // WebView2 can still report its initial blank URL here. Tauri classifies that as a
     // remote origin, so the local-only capability must be checked after navigation.
     #[cfg(not(windows))]
