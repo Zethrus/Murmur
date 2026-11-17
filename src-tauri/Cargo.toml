@@ -84,4 +84,12 @@ gdkx11 = "0.18"
 # StationsAndDesktops), overlay no-activate subclass and Settings links (Shell), microphone
 # privacy consent (Registry).
 [target.'cfg(windows)'.dependencies]
+# Only for the vendored patch's set_host_input_processing_ids; Tauri selects its features.
+wry = { version = "=0.57.2", default-features = false }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Com"] }
+
+# Wry 0.57.2 plus one opt-in WebView2 option (AllowHostInputProcessing) for the overlay
+# webview only, as proposed upstream in tauri-apps/wry#1850. See vendor/README.md; remove
+# this patch when a released Wry exposes the option.
+[patch.crates-io]
+wry = { path = "vendor/wry" }

@@ -46,12 +46,23 @@ fn validate_overlay_acl_on_load(label: &str, event: tauri::webview::PageLoadEven
     label == "overlay" && event == tauri::webview::PageLoadEvent::Finished
 }
 
+/// Webview labels created with WebView2 host input processing (vendored Wry patch).
+#[cfg(windows)]
+const OVERLAY_HOST_INPUT: &[&str] = &["overlay"];
+
 fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let handle = app.handle().clone();
     // Configured webviews can execute IPC before this hook runs. Create them only after
     // AppState is managed, so the first get_config/get_status cannot race startup.
     let runtime = app::AppState::new(handle.clone())?;
     app.manage(runtime);
+    // Before any WebView2 controller exists: the overlay alone routes input through the host
+    // queue, so a click on it starts the drag even while Settings (same UI thread) is the
+    // foreground window (docs/parity/desktop-44041874181-o9-host-input.md).
+    #[cfg(windows)]
+    if !wry::set_host_input_processing_ids(OVERLAY_HOST_INPUT) {
+        tracing::warn!("WebView2 host input processing list was already set");
+    }
     for window in &app.config().app.windows {
         tauri::WebviewWindowBuilder::from_config(&handle, window)?.build()?;
     }
