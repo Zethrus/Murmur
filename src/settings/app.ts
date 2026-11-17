@@ -46,6 +46,9 @@ function appLogo(){
   return svg;
 }
 
+/** Inputs that take no typed text: a config refresh may rebuild the page under them. */
+const NON_TEXT_INPUTS = new Set(["checkbox","radio","range","button","submit","reset","color","file","image"]);
+
 export async function mountSettings(root: HTMLElement): Promise<void> {
   root.replaceChildren(el("p","boot-message","Opening your workspace…"));
   let config: Config, status: Status, version = "", page: Page = "General", disposed = false, saving = 0, lastTranscript = "", generation = 0;
@@ -104,8 +107,22 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
     finally { saving--; }
     renderPage();
   };
+  // An external config change (the overlay saving its dragged position, a tray toggle…) must
+  // not rebuild the page under a field the user is typing in: that discards focus, caret and
+  // text. Defer the rebuild until focus leaves the field (Windows O8, run 44051172677).
+  let deferredRender = false;
+  const typingInPage = (): boolean => {
+    const active = document.activeElement as (HTMLElement & {type?: string}) | null;
+    if (!active || !content.contains(active)) return false;
+    if (active.tagName === "TEXTAREA" || active.isContentEditable) return true;
+    return active.tagName === "INPUT" && !NON_TEXT_INPUTS.has(active.type ?? "text");
+  };
+  const renderUnlessTyping = (): void => { if (typingInPage()) deferredRender = true; else renderPage(); };
+  content.addEventListener("focusout",()=>{ if (!deferredRender) return;
+    setTimeout(()=>{ if (deferredRender && !disposed && !typingInPage()) renderPage(); },0); });
   function renderPage(): void {
     if (setupOpen) return;
+    deferredRender = false;
     generation++; const current = generation; pageDisposers.splice(0).forEach(f=>f());
     const focused = document.activeElement instanceof HTMLElement ? document.activeElement.id : "";
     const scroll = main.scrollTop;
@@ -126,7 +143,7 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
     const off = await on(event,handler); if (disposed) off(); else disposers.push(off);
   };
   // Closing the window during setup postpones it (Rust side); hide the wizard to match.
-  await subscribe("config",next=>{config = next; theme(); if (setupOpen && next.setup.postponed) closeSetup(); else if (!saving) renderPage();});
+  await subscribe("config",next=>{config = next; theme(); if (setupOpen && next.setup.postponed) closeSetup(); else if (!saving) renderUnlessTyping();});
   await subscribe("latency",event=>{if (event.text !== undefined) lastTranscript = event.text;});
   const refreshStatus = (): void => { if (refreshTimer !== undefined) return;
     refreshTimer = setTimeout(()=>{refreshTimer = undefined; void call("get_status").then(next=>{

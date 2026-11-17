@@ -315,6 +315,21 @@ test("general offers reset position and describes a clickable, draggable overlay
   h.config.overlay.position="custom";h.emit("config",structuredClone(h.config));await settle();const position=h.document.getElementById("field-position");
   assert.equal(position.value,"custom");assert.match(h.root.textContent,/Where you dragged it/);h.unload();
 });
+test("an external config change never rebuilds the page under a focused text field",async()=>{
+  const h=await settings();await button(h.root,"Privacy").dispatch("click");await settle();
+  const search=()=>h.root.querySelectorAll("input").find(i=>i.getAttribute("aria-label")==="Search history");
+  const field=search();field.value="half-typed";field.focus();
+  // The overlay drag persists its placement: Settings receives an external config event.
+  h.config.overlay.position="custom";h.emit("config",structuredClone(h.config));await settle();
+  assert.equal(search(),field,"the focused field survives");assert.equal(field.value,"half-typed");
+  assert.equal(h.document.activeElement,field);
+  // Leaving the field applies the deferred refresh.
+  h.document.activeElement=null;await h.root.querySelector(".page-content").dispatch("focusout");h.timers.tick(1);await settle();
+  assert.notEqual(search(),field,"the deferred render ran once focus left");
+  // Without a focused text field the refresh is immediate, as before.
+  const fresh=search();h.config.overlay.scale=1.2;h.emit("config",structuredClone(h.config));await settle();
+  assert.notEqual(search(),fresh);h.unload();
+});
 test("general replaces the hide toggle with a When idle choice",async()=>{
   const h=await settings();assert.doesNotMatch(h.root.textContent,/Hide when idle/);const idle=h.document.getElementById("field-when-idle");
   assert.equal(idle.value,"icon");idle.value="pill";await idle.dispatch("change");assert.equal(h.config.overlay.idle_view,"pill");h.unload();
