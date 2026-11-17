@@ -149,6 +149,19 @@ impl Drop for StreamReader {
     }
 }
 
+/// What the user sees when the server answers with anything but the requested bytes. The status
+/// code is included so a missing release file (404) is not mistaken for a refusal.
+fn rejected(status: u16) -> String {
+    match status {
+        404 => "The file is not on the download server (HTTP 404). A new release may not be published yet".into(),
+        401 | 403 => format!("The download server refused access (HTTP {status})"),
+        429 => "The download server is limiting requests (HTTP 429); try again later".into(),
+        500..=599 => format!("The download server had a problem (HTTP {status}); try again later"),
+        206 => "The download server sent the wrong part of the file".into(),
+        _ => format!("The download server rejected the request (HTTP {status})"),
+    }
+}
+
 /// `Content-Range: bytes <start>-<end>/<total>` must start exactly at `offset`.
 fn content_range_start(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     let value = headers.get(reqwest::header::CONTENT_RANGE)?.to_str().ok()?;
@@ -229,7 +242,7 @@ impl Transport for Https {
                     if !(status == reqwest::StatusCode::OK || resumed)
                         || (resumed && content_range_start(response.headers()) != Some(offset))
                     {
-                        let _ = headers_tx.send(Err(network("The download server rejected the request")));
+                        let _ = headers_tx.send(Err(network(&rejected(status.as_u16()))));
                         return;
                     }
                     if headers_tx.send(Ok((response.content_length(), resumed))).is_err() {
@@ -602,6 +615,21 @@ mod tests {
 
     fn transport() -> Https {
         Https::new(Duration::from_millis(400)).unwrap()
+    }
+    #[test]
+    fn rejected_downloads_name_the_status() {
+        assert!(rejected(404).contains("not on the download server (HTTP 404)"));
+        assert!(rejected(403).contains("refused access (HTTP 403)"));
+        assert!(rejected(429).contains("HTTP 429"));
+        assert!(rejected(503).contains("had a problem (HTTP 503)"));
+        assert_eq!(
+            rejected(206),
+            "The download server sent the wrong part of the file"
+        );
+        assert_eq!(
+            rejected(410),
+            "The download server rejected the request (HTTP 410)"
+        );
     }
     fn fast() -> Retry {
         Retry {

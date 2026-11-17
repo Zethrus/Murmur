@@ -211,6 +211,12 @@ test("sidecar errors refresh the footer without a polling loop",async()=>{
   const h=await settings();h.status.sidecar_alive=false;h.emit("error",{message:"Sidecar stopped"});h.timers.tick(250);await settle();
   assert.match(h.root.querySelector(".sidebar-footer").textContent,/Engine offline/);h.unload();
 });
+test("a status error clears once the engine reports none, but action errors stay",async()=>{
+  const h=await settings();h.status.error="Speech engine not installed — open Settings";h.emit("state",{state:"idle"});h.timers.tick(250);await settle();
+  const notice=h.root.querySelector(".app-notice");assert.match(notice.textContent,/Speech engine not installed/);
+  h.status.error=null;h.emit("state",{state:"idle"});h.timers.tick(250);await settle();assert.equal(notice.textContent,"");assert.equal(notice.dataset.tone,undefined);
+  h.emit("error",{message:"Microphone disconnected"});h.timers.tick(250);await settle();assert.match(notice.textContent,/Microphone disconnected/);h.unload();
+});
 test("GPU fallback warning refreshes and clears in Engine settings",async()=>{
   const h=await settings();await button(h.root,"Components").dispatch("click");await settle();
   h.status.fallback_reason="A required CUDA library could not be loaded.";h.emit("state",{state:"idle"});h.timers.tick(250);await settle();
