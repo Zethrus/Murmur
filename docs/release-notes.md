@@ -84,6 +84,13 @@ Murmur, and what you expected.
 
 ## Known limitations
 
+- **"Speech engine not installed" can stay after first-run setup.** If Murmur
+  started without the speech engine, Settings may keep showing "Speech engine
+  not installed — open Settings" after setup has installed it, even though the
+  footer says "Ready when you are". The engine is installed and works: start one
+  dictation, or quit Murmur from the tray and open it again, and the message
+  goes away. Fixed for the next version
+  ([#30](https://github.com/Zethrus/Murmur/pull/30)).
 - **Check for updates fails during the beta.** Settings → Components → Check
   for updates reads the newest *official* release, which is still 0.4.7 and has
   no component list, so it reports an error. First-run setup and installing
