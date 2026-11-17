@@ -2198,8 +2198,8 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
         self.settings_field = self.enterContext(mock.patch.object(
             overlay_checks, "_o8_settings_field", side_effect=lambda *_a: events.append("settings_field") or "field"))
         self.typed = []
-        def type_after(_ctx, observed, expected, _read, token):
-            self.typed.append((observed["case"], expected, token))
+        def type_after(_ctx, observed, expected, _read, token, element_focused):
+            self.typed.append((observed["case"], expected, token, element_focused is not None))
             observed["typing"] = {"token": token, "landed": not observed.get("typing_fails")}
             return observed["typing"]
         self.enterContext(mock.patch.object(overlay_checks, "_o8_type_after_release", side_effect=type_after))
@@ -2443,31 +2443,60 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
                  "focus_hwnd": 61}
         for label, contexts in (("focus moved", [dict(owned, focus_hwnd=0x660bd4)]),
                                 ("foreign owner", [dict(owned, process_id=7)]),
-                                ("changed during UIA read", [owned, dict(owned, focus_hwnd=0x660bd4)])):
+                                ("changed during UIA read", [owned, dict(owned, focus_hwnd=0x660bd4)]),
+                                ("null focus before and after", [dict(owned, focus_hwnd=0)] * 3)):
             with self.subTest(label=label):
                 ctx = self._typing_context(contexts)
+                before = dict(owned, focus_hwnd=0) if label.startswith("null") else dict(owned)
                 with mock.patch.object(win32, "type_unicode") as typed:
                     probe = overlay_checks._o8_type_after_release(
-                        ctx, {"foreground_before": dict(owned)}, (52, 99), lambda: "start", "o8k2")
+                        ctx, {"foreground_before": before}, (52, 99), lambda: "start", "o8k2")
                 typed.assert_not_called()
                 self.assertFalse(probe["attempted"])
                 self.assertFalse(probe["landed"])
                 self.assertIn("keyboard target not verified", probe["reason"])
+
+    def test_o8_settings_typing_requires_the_exact_control_to_keep_uia_focus(self):
+        owned = {"hwnd": 33, "process_id": 71, "input_desktop": "Default", "gui_status": "ok",
+                 "focus_hwnd": 0x480cc2}
+        for label, contexts, focused in (
+                ("another page control took focus", [owned], [False]),
+                ("native focus moved during the UIA check", [owned, dict(owned, focus_hwnd=0x660bd4)], [True])):
+            with self.subTest(label=label):
+                ctx = self._typing_context(contexts)
+                with mock.patch.object(win32, "type_unicode") as typed:
+                    probe = overlay_checks._o8_type_after_release(
+                        ctx, {"foreground_before": dict(owned)}, (33, 71), lambda: "", "o8k2",
+                        lambda: focused.pop(0))
+                typed.assert_not_called()
+                self.assertFalse(probe["attempted"])
+        ctx = self._typing_context([owned] * 4)
+        values = ["", "o8k2"]
+        with mock.patch.object(win32, "type_unicode") as typed:
+            probe = overlay_checks._o8_type_after_release(
+                ctx, {"foreground_before": dict(owned)}, (33, 71), lambda: values.pop(0), "o8k2",
+                lambda: True)
+        typed.assert_called_once_with("o8k2")
+        self.assertTrue(probe["landed"])
 
     def test_o8_settings_field_is_clicked_only_inside_owned_settings_and_must_take_focus(self):
         owned = {"hwnd": 33, "process_id": 71, "input_desktop": "Default", "gui_status": "ok"}
         session = SimpleNamespace(running=lambda: True, process=SimpleNamespace(pid=71),
                                   page=mock.Mock(return_value="settings-window"))
         ctx = SimpleNamespace(murmur=session, guard=SimpleNamespace(check=mock.Mock()), sleep=lambda _s: None)
+        hit = {"window": 0x3301}
         self.enterContext(mock.patch.object(win32, "foreground_context", return_value=owned))
-        self.enterContext(mock.patch.object(win32, "user32", SimpleNamespace(GetAncestor=lambda h, _k: h)))
+        self.enterContext(mock.patch.object(win32, "user32", SimpleNamespace(
+            GetAncestor=lambda h, _k: {0x3301: 33}.get(h, h), WindowFromPoint=lambda _p: hit["window"])))
         self.enterContext(mock.patch.object(win32, "window_text", return_value="Murmur Settings"))
         self.enterContext(mock.patch.object(win32, "window_rect", return_value=(0, 0, 1000, 780)))
         self.enterContext(mock.patch.object(uia, "find", return_value="field"))
-        self.enterContext(mock.patch.object(uia, "center", return_value=(500, 100)))
-        for bounds, focused, error in (((400, 90, 600, 110), True, None),
-                                       ((400, 90, 1200, 110), True, "not inside Settings"),
-                                       ((400, 90, 600, 110), False, "did not take keyboard focus")):
+        handle = self.enterContext(mock.patch.object(uia, "handle", return_value=33))
+        for bounds, focused, covered, error in (((400, 90, 600, 110), True, False, None),
+                                                ((400, 90, 1200, 110), True, False, "not inside Settings"),
+                                                ((400, 90, 600, 110), True, True, "covered"),
+                                                ((400, 90, 600, 110), False, False, "did not take keyboard focus")):
+            hit["window"] = 44 if covered else 0x3301  # e.g. the topmost overlay over the field
             with self.subTest(error=error), \
                  mock.patch.object(uia, "rect", return_value=bounds), \
                  mock.patch.object(uia, "focused", return_value="focus"), \
@@ -2478,10 +2507,16 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
                         overlay_checks._o8_settings_field(ctx, 71, 33)
                 else:
                     self.assertEqual(overlay_checks._o8_settings_field(ctx, 71, 33), "field")
-                if "inside" in (error or ""):
+                if error in ("not inside Settings", "covered"):
                     click.assert_not_called()
                 else:
-                    click.assert_called_once_with(500, 100)
+                    click.assert_called_once_with(500, 100)  # the validated bounds' centre
+        handle.return_value = 34
+        with mock.patch.object(win32, "click") as click:
+            with self.assertRaisesRegex(Fail, "different window"):
+                overlay_checks._o8_settings_field(ctx, 71, 33)
+            click.assert_not_called()
+        handle.return_value = 33
         session.page.assert_called_with("Privacy")
         with mock.patch.object(win32, "foreground_context", return_value=dict(owned, process_id=5)), \
              mock.patch.object(win32, "click") as click:
@@ -2508,9 +2543,10 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
     def test_o8_types_into_each_preselected_target_but_never_the_cold_hidden_settings(self):
         with tempfile.TemporaryDirectory() as directory:
             events, record = self._run_o8(directory)
-        self.assertEqual(self.typed, [("owned Notepad foreground", (52, 99), "o8k1"),
-                                      ("owned Murmur Settings foreground", (33, 71), "o8k2"),
-                                      ("same owned Notepad foreground", (52, 99), "o8k3")])
+        # Only Settings needs a UIA control recheck: its renderer HWND is shared by the page.
+        self.assertEqual(self.typed, [("owned Notepad foreground", (52, 99), "o8k1", False),
+                                      ("owned Murmur Settings foreground", (33, 71), "o8k2", True),
+                                      ("same owned Notepad foreground", (52, 99), "o8k3", False)])
         self.assertLess(events.index("settings_field"),
                         events.index(("drag", "owned Murmur Settings foreground", 71, (33, 71), -1, True)))
         self.assertEqual(record["status"], "inconclusive")
@@ -2637,7 +2673,19 @@ class TopologyTests(unittest.TestCase):
         failed = topology.parse_host_log(line.replace("parent_hresult=0x0", "parent_hresult=0x80004005"))
         self.assertFalse(failed["valid"])
         self.assertEqual(failed["parent_hresult"], 0x80004005)
-        self.assertEqual(topology.classify(snap, 71, 7, broken)["controller_host"], "malformed app record")
+        unreadable = topology.parse_host_log(line.replace("controller_parent_pid=71", "controller_parent_pid=0")
+                                             .replace("controller_parent_tid=7", "controller_parent_tid=0"))
+        self.assertFalse(unreadable["valid"])  # never reported as a confidently foreign host
+        unavailable = topology.parse_host_log(
+            "INFO murmur::qa_overlay_topology: QA overlay webview host unavailable error=closed\n")
+        self.assertEqual(unavailable, {"valid": False, "unavailable": True})
+        self.assertEqual(topology.classify(snap, 71, 7, unavailable)["controller_host"],
+                         "app could not queue the host read")
+        stale = topology.parse_host_log(line.replace("process=71", "process=70"))
+        self.assertEqual(topology.classify(snap, 71, 7, stale)["controller_host"],
+                         "app record is for a different overlay or process")
+        self.assertEqual(topology.classify(snap, 71, 7, broken)["controller_host"],
+                         "malformed or unreadable app record")
 
     def test_snapshot_never_writes_window_state(self):
         api = FakeTopology(self.tree())
@@ -2669,6 +2717,11 @@ class TopologyTests(unittest.TestCase):
             self.assertIsNone(evidence["app_host"])
             self.assertEqual(evidence["renderer_parents"][0]["parent_class"], "Chrome_WidgetWin_0")
             ctx.note.assert_called_once_with("children=1")
+            with mock.patch.object(topology, "snapshot", side_effect=OSError("enumeration failed")):
+                overlay_checks.o7_subclass_log(ctx)  # evidence failure cannot replace O7's result
+            evidence = json.loads((Path(directory) / "webview-topology.json").read_text())
+            self.assertFalse(evidence["complete"])
+            self.assertIn("enumeration failed", evidence["errors"][0])
 
     def test_win32_topology_declarations_preserve_pointer_width(self):
         from ctypes import wintypes

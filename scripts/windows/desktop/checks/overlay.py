@@ -427,14 +427,23 @@ def _o8_settings_field(ctx, pid, settings):
             raise Fail(f"Murmur Settings ownership changed while preselecting its text field: root={root}")
     verify()
     window = ctx.murmur.page("Privacy")  # UIA invoke; no pointer input
+    if uia.handle(window) != settings:
+        raise Fail("Settings page navigation used a different window than the verified Settings")
     verify()
     field = uia.find(window, name_="Search history", control_type_=uia.EDIT, timeout=10, sleep=ctx.sleep)
     bounds = uia.rect(field)
     left, top, right, bottom = win32.window_rect(settings)
     if not (left <= bounds[0] < bounds[2] <= right and top <= bounds[1] < bounds[3] <= bottom):
         raise Fail(f"Settings search field {bounds} is not inside Settings {(left, top, right, bottom)}")
+    # Click the validated point itself, and only when Settings is the window under it: the
+    # topmost overlay or another window may cover the field after earlier gestures.
+    point = ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
     verify()
-    win32.click(*uia.center(field))
+    hit = win32.user32.WindowFromPoint(win32.POINT(*point))
+    hit_root = win32.user32.GetAncestor(hit, win32.GA_ROOT) if hit else 0
+    if hit_root != settings:
+        raise Fail(f"Settings search field is covered at {point}: hit root {hit_root}, expected {settings}")
+    win32.click(*point)
     ctx.sleep(0.4)
     verify()
     if not uia.same(uia.focused(), field):
@@ -442,20 +451,34 @@ def _o8_settings_field(ctx, pid, settings):
     return field
 
 
-def _o8_type_after_release(ctx, observed, expected_foreground, read_text, token):
-    """Type into the preselected target without clicking or refocusing it; exact text decides."""
+def _o8_type_after_release(ctx, observed, expected_foreground, read_text, token, element_focused=None):
+    """Type into the preselected target without clicking or refocusing it; exact text decides.
+
+    `element_focused` re-proves the exact control when the native focus window is shared by
+    every element of a page (Settings' WebView2 renderer); Notepad's editor has its own HWND.
+    """
     probe = {"token": token, "attempted": False, "landed": False}
     observed["typing"] = probe
     focus_before = observed["foreground_before"].get("focus_hwnd")
 
-    def target_verified():
+    def native_verified():
         ctx.guard.check()
         context, root, owned = _o8_owned_foreground(*expected_foreground)
-        if owned and context.get("focus_hwnd") == focus_before:
+        if owned and focus_before and context.get("focus_hwnd") == focus_before:
             return True
         probe["reason"] = (f"keyboard target not verified: root={root}, "
                            f"focus={context.get('focus_hwnd')}, expected={focus_before}")
         return False
+
+    def target_verified():
+        if not native_verified():
+            return False
+        if element_focused is not None:
+            if not element_focused():
+                probe["reason"] = "keyboard target not verified: preselected control lost UIA focus"
+                return False
+            return native_verified()  # the UIA read can block while focus changes
+        return True
 
     if not target_verified():
         return probe
@@ -628,7 +651,10 @@ def o8_foreground_drag(ctx):
                 expected = (settings, pid)
                 field = _o8_settings_field(ctx, pid, settings)
                 read_text = lambda field=field: uia.value(field)  # noqa: E731
-            elif label == "same owned Notepad foreground":
+                element_focused = lambda field=field: uia.same(uia.focused(), field)  # noqa: E731
+            else:
+                element_focused = None
+            if label == "same owned Notepad foreground":
                 _o8_focus_notepad(ctx, pad)
             if label != "owned Murmur Settings foreground" and not pad.owns_keyboard_focus():
                 raise Fail(f"Owned Notepad editor lost keyboard focus before {label}")
@@ -637,7 +663,8 @@ def o8_foreground_drag(ctx):
                 raise Fail(f"Owned Notepad editor lost keyboard focus during {label}")
             if observed["keyboard_focus_changes"]:
                 record["failures"].append(f"{label}: keyboard focus changed")
-            typed = _o8_type_after_release(ctx, observed, expected, read_text, f"o8k{index + 1}")
+            typed = _o8_type_after_release(ctx, observed, expected, read_text, f"o8k{index + 1}",
+                                           element_focused)
             if not typed["landed"]:
                 record["failures"].append(f"{label}: typing after release did not land exactly "
                                           f"({typed.get('reason') or 'text mismatch'})")
@@ -771,9 +798,13 @@ def o7_subclass_log(ctx):
     path = ctx.artifact("subclass-log.txt")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     # Read-only Batch A evidence for every full run: who owns each renderer's parent.
-    snap = topology.snapshot(ctx.murmur.overlay_hwnd(), 0)
-    snap["app_host"] = topology.parse_host_log(ctx.murmur.log(since_launch=True))
-    snap["renderer_parents"] = topology.renderer_parents(snap)
+    # Evidence only: a topology failure must not replace O7's own result.
+    try:
+        snap = topology.snapshot(ctx.murmur.overlay_hwnd(), 0)
+        snap["app_host"] = topology.parse_host_log(ctx.murmur.log(since_launch=True))
+        snap["renderer_parents"] = topology.renderer_parents(snap)
+    except Exception as error:  # noqa: BLE001
+        snap = {"complete": False, "errors": [f"{type(error).__name__}: {error}"]}
     ctx.artifact("webview-topology.json").write_text(json.dumps(snap, indent=2) + "\n", encoding="utf-8")
     if not lines:
         raise Fail("murmur.log has no 'Overlay no-activate subclass' line")

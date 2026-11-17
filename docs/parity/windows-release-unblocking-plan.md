@@ -352,12 +352,12 @@ ETA until the first candidate preserves both mouse delivery and keyboard focus.
 
 Committed locally on `fix/windows-desktop-startup`, not pushed, no Edison run:
 
-| Commit | Batch | Change |
+| Commit subject | Batch | Change |
 | --- | --- | --- |
-| `b154ef1` | A (harness) | O2/O4 icon gestures use O8's role/ownership/containment/uniqueness selector; rejected candidates are recorded. F11's pill-view handle lookup is unchanged. |
-| `d8db230` | A (oracle) | O8 latches same-root keyboard-focus changes, types a unique token after release into the preselected Notepad editor or Settings history-search field without refocusing, and requires exact text. A bounded, twice-read, read-only topology snapshot classifies the renderer's immediate parent as owned/foreign per gesture; O7 writes `webview-topology.json` in full runs. |
-| `9f2de01` | A (QA app) | QA builds log one text-free `QA overlay webview host` record: controller `ParentWindow`, its owner PID/TID and parent, and the loaded `BrowserVersionString`. |
-| `b054e32` | B | Wry 0.57.1 → 0.57.2 only; resolver-only `windows-sys` edge churn excluded, lock accepted by `--locked`. |
+| select O2/O4 icon drag target by role and bounds | A (harness) | O2/O4 icon gestures use O8's role/ownership/containment/uniqueness selector; rejected candidates are recorded. F11's pill-view handle lookup is unchanged. |
+| assert O8 keyboard target and record renderer topology | A (oracle) | O8 latches same-root keyboard-focus changes, types a unique token after release into the preselected Notepad editor or Settings history-search field without refocusing, and requires exact text. A bounded, twice-read, read-only topology snapshot classifies the renderer's immediate parent as owned/foreign per gesture; O7 writes `webview-topology.json` in full runs. |
+| log overlay WebView2 host and runtime in QA builds | A (QA app) | QA builds log one text-free `QA overlay webview host` record: controller `ParentWindow`, its owner PID/TID and parent, and the loaded `BrowserVersionString`. |
+| update wry 0.57.1 -> 0.57.2 (last commit) | B | Wry 0.57.1 → 0.57.2 only; resolver-only `windows-sys` edge churn excluded, lock accepted by `--locked`. |
 
 Source reading during implementation: Wry hosts the controller in an in-process
 `WRY_WEBVIEW` child (`WS_CHILD | WS_CLIPCHILDREN`, no `WS_EX_NOACTIVATE`) of the
@@ -366,11 +366,21 @@ the Notepad cases. Whether the renderer's *immediate* parent is that owned host 
 foreign `Chrome_WidgetWin_*` window is exactly what the new snapshot answers; Batch C
 must not be chosen before it does.
 
-Local gates passed: 469 script tests; 305 Rust tests on Linux with Wry 0.57.2; Windows
+An independent review then tightened the O8 input path (separate commit): the
+Settings field is clicked at its validated centre only when `WindowFromPoint` resolves
+to the verified Settings root; Settings typing also re-proves UIA focus on that exact
+field, because its native focus window is shared by the whole page; a null focus never
+authorizes typing; unreadable or stale app host records are not classified; and O7's
+topology evidence cannot replace O7's own result. The Settings case now starts from a
+real click into that field, so its results are not directly comparable with earlier
+Settings observations.
+
+Local gates passed: 470 script tests; 305 Rust tests on Linux with Wry 0.57.2; Windows
 (`x86_64-pc-windows-gnu`, no default features) check and clippy, with no new warnings
 in changed files. Frontend unchanged.
 
-Next native order, one Edison job at a time: (1) exact build of `9f2de01`, then O7 and
-`--only O8 --repeat 1` for topology plus the stronger oracle; (2) exact build of
-`b054e32` and the same O8 run to isolate the Wry change; (3) read both, then choose one
+Next native order, one Edison job at a time: (1) exact build of the commit just before
+the Wry update (instrumentation and hardening, Wry 0.57.1), then O7 and
+`--only O8 --repeat 1` for topology plus the stronger oracle; (2) exact build of the
+Wry commit and the same O8 run to isolate the Wry change; (3) read both, then choose one
 Batch C row. Ordinary O2, the 48-check suite and Linux regression follow.

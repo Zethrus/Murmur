@@ -18,6 +18,7 @@ GWL_STYLE, GWL_EXSTYLE = -16, -20
 WS_EX_NOACTIVATE = 0x08000000
 WRY_HOST_CLASS = "WRY_WEBVIEW"
 HOST_LOG = "QA overlay webview host"
+HOST_UNAVAILABLE = "QA overlay webview host unavailable"
 # Fields that identify one window; style, visibility and bounds may legitimately differ.
 IDENTITY = ("hwnd", "parent", "owner", "pid", "tid", "class")
 
@@ -107,7 +108,10 @@ def parse_host_log(log):
     """Last app-side controller-host record (QA builds only); None when absent or malformed."""
     found = None
     for line in log.splitlines():
-        if HOST_LOG not in line:
+        if HOST_UNAVAILABLE in line:
+            found = {"valid": False, "unavailable": True}
+            continue
+        if HOST_LOG + " " not in line:
             continue
         fields = dict(token.split("=", 1) for token in line.split(HOST_LOG, 1)[1].split() if "=" in token)
         record = {"valid": False, "fields": fields}
@@ -124,7 +128,9 @@ def parse_host_log(log):
                 record[key] = int(fields[key], 16)
             record["browser_version"] = fields["browser_version"]
             # A failed COM read is a recorded result; it never becomes a host identity.
-            record["valid"] = record["parent_hresult"] == 0 and record["controller_parent"] != 0
+            # An unreadable host (IsWindow failed) logs pid/tid 0: never treat it as "foreign".
+            record["valid"] = (record["parent_hresult"] == 0 and record["controller_parent"] != 0 and
+                               record["controller_parent_pid"] != 0 and record["controller_parent_tid"] != 0)
         except (KeyError, ValueError):
             pass
         found = record
@@ -148,8 +154,12 @@ def classify(snapshot, process_pid, overlay_tid, host=None):
            "owned_wry_hosts": [node["hwnd"] for node in hosts],
            "chain_classes": [node["class"] for node in chain]}
     if host is not None:
-        if not host.get("valid"):
-            out["controller_host"] = "malformed app record"
+        if host.get("unavailable"):
+            out["controller_host"] = "app could not queue the host read"
+        elif not host.get("valid"):
+            out["controller_host"] = "malformed or unreadable app record"
+        elif host["overlay"] != chain[-1]["hwnd"] or host["process"] != process_pid:
+            out["controller_host"] = "app record is for a different overlay or process"
         else:
             matched = [node for node in chain if node["hwnd"] == host["controller_parent"]]
             out["controller_host"] = {"hwnd": host["controller_parent"],
