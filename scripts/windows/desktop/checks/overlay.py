@@ -6,8 +6,7 @@ import time
 import fixtures
 import uia
 import win32
-from checks.common import (click_overlay, overlay_drag_point, overlay_drag_snapshot,
-                           produce_held, wait_not_held)
+from checks.common import click_overlay, overlay_drag_snapshot, produce_held, wait_not_held
 from context import Fail
 
 GWL_EXSTYLE = -20
@@ -90,6 +89,18 @@ def _o8_activation_trace_evidence(launch_log, gesture_delta):
             "valid_capture": valid, "validation_errors": errors,
             "no_activation_entry_interpretable": armed and not capped and valid and activation_entries == 0,
             "log_delta": lines}
+
+
+def _icon_drag_point(ctx, hwnd, details):
+    """Icon-view status affordance through O8's ownership/type/containment/uniqueness selector.
+
+    The first same-named UIA element can be the native ToolTip (run 43984316462), so O2 and
+    O4 no longer click whichever "Drag to move" element UIA returns first.
+    """
+    try:
+        return overlay_drag_snapshot(ctx, win32.window_rect(hwnd), details, timeout=5)
+    except uia.NotFound as error:
+        raise Fail(f"No unique visible status drag affordance in the overlay: {error}") from None
 
 
 def _exstyle(hwnd):
@@ -175,7 +186,8 @@ def o2_drag(ctx):
     log_before = len(ctx.murmur.log())
     before = win32.window_rect(hwnd)
     ctx.screenshot(hwnd, "drag-before.png")
-    start, handle_rect = overlay_drag_point(ctx, return_bounds=True)
+    selection = {}
+    start, handle_rect = _icon_drag_point(ctx, hwnd, selection)
     # Sample UIA and native geometry at this gesture, after the settled-icon handshake.
     # The mount's stage-5 DOM probe alone may predate a WebView2 viewport resize.
     native_geometry = {"visible": win32.window_rect(hwnd), "outer": win32.outer_rect(hwnd),
@@ -209,6 +221,7 @@ def o2_drag(ctx):
     ctx.artifact("drag-diagnostic.txt").write_text(
         f"start: {start}; end: {end}\nbefore: {before}; held: {held}; after: {after}\n"
         f"gesture-time UIA drag bounds: {handle_rect}; native overlay: {native_geometry!r}; "
+        f"UIA candidates: {selection.get('uia_candidates')!r}; "
         f"hit child: {hit_geometry!r}\n"
         f"click relative to overlay/hit client (physical px): {client_click}; {hit_client_click}\n"
         f"hit hwnd: {hex(hit)}; root: {hex(hit_root)}; overlay: {hex(hwnd)}; "
@@ -629,7 +642,7 @@ def o4_empty_area(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"overlay": {"idle_view": "icon"}})
     pad.focus()
     before = win32.window_rect(ctx.murmur.overlay_hwnd())
-    start = overlay_drag_point(ctx)
+    start, _bounds = _icon_drag_point(ctx, ctx.murmur.overlay_hwnd(), {})
     win32.drag(start, (start[0] + 150, start[1] - 120), steps=20)
     ctx.sleep(1.0)
     after = win32.window_rect(ctx.murmur.overlay_hwnd())

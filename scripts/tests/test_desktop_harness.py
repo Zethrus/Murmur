@@ -1390,7 +1390,11 @@ class DesktopFollowupTests(unittest.TestCase):
             user32 = SimpleNamespace(WindowFromPoint=lambda _point: 77,
                                      GetAncestor=lambda _hwnd, _kind: 42,
                                      GetAsyncKeyState=lambda _key: 0)
-            with mock.patch.object(overlay, "overlay_drag_point", return_value=((960, 984), (940, 970, 980, 998))), \
+            def snapshot(_ctx, native, details, timeout):
+                self.assertEqual((native, timeout), ((934, 964, 986, 1004), 5))
+                details["uia_candidates"] = [{"control_type": uia.TOOLTIP, "rejections": ["not status affordance"]}]
+                return (960, 984), (940, 970, 980, 998)
+            with mock.patch.object(overlay, "overlay_drag_snapshot", side_effect=snapshot), \
                  mock.patch.object(win32, "wait_for", return_value=True), \
                  mock.patch.object(win32, "window_rect", return_value=(934, 964, 986, 1004)), \
                  mock.patch.object(win32, "outer_rect", return_value=(934, 964, 986, 1004)), \
@@ -1411,6 +1415,7 @@ class DesktopFollowupTests(unittest.TestCase):
             session.restart.assert_not_called()
             evidence = (Path(directory) / "drag-diagnostic.txt").read_text()
             self.assertIn("gesture-time UIA drag bounds: (940, 970, 980, 998)", evidence)
+            self.assertIn("not status affordance", evidence)  # rejected ToolTip is retained
             self.assertIn("click relative to overlay/hit client (physical px): (26, 20); (26, 20)", evidence)
             self.assertIn("stage=6", evidence)
 
@@ -2363,6 +2368,22 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
                 self.assertIn(record["status"], ("aborted", "fail"))
                 self.assertNotIn("show_settings", events)
                 session.restart.assert_not_called()
+
+    def test_o2_and_o4_icon_selector_skips_first_tooltip_and_requires_one_status(self):
+        ctx = SimpleNamespace(murmur=SimpleNamespace(), guard=SimpleNamespace(check=mock.Mock()),
+                              sleep=lambda _seconds: None)
+        self._selector(ctx, {object(): (uia.TOOLTIP, (938, 968, 982, 1000), 0),
+                             object(): (uia.STATUSBAR, (938, 968, 982, 1000), 0)})
+        details = {}
+        with mock.patch.object(win32, "window_rect", return_value=(934, 964, 986, 1004)):
+            self.assertEqual(overlay_checks._icon_drag_point(ctx, 44, details),
+                             ((960, 984), (938, 968, 982, 1000)))
+        self.assertEqual(details["uia_selected"]["control_type"], uia.STATUSBAR)
+        self._selector(ctx, {object(): (uia.TOOLTIP, (938, 968, 982, 1000), 0)})
+        with mock.patch.object(win32, "window_rect", return_value=(934, 964, 986, 1004)), \
+             mock.patch.object(common_checks.time, "monotonic", side_effect=[0, 0, 10]):
+            with self.assertRaisesRegex(Fail, "No unique visible status drag affordance"):
+                overlay_checks._icon_drag_point(ctx, 44, {})
 
 
 class ReportTests(unittest.TestCase):
