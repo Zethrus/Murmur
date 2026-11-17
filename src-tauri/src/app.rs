@@ -103,6 +103,9 @@ pub struct AppState {
     config: Mutex<Config>,
     transaction: Mutex<()>,
     status: Mutex<Status>,
+    /// The last error from an engine status check that failed (e.g. no engine installed yet).
+    /// Callers may copy it into `status.error`; it is stale once the engine answers again.
+    engine_error: Mutex<Option<String>>,
     sender: mpsc::Sender<Action>,
     receiver: Mutex<Option<mpsc::Receiver<Action>>>,
     controller: Mutex<Option<JoinHandle<()>>>,
@@ -188,6 +191,7 @@ impl AppState {
             config: Mutex::new(config),
             transaction: Mutex::new(()),
             status: Mutex::new(status),
+            engine_error: Mutex::new(None),
             sender,
             receiver: Mutex::new(Some(receiver)),
             controller: Mutex::new(None),
@@ -238,12 +242,20 @@ impl AppState {
     }
     pub fn refresh_engine(&self) -> Result<Value> {
         let c = self.config()?;
-        let result = self.engine.request(
+        let result = match self.engine.request(
             "status",
             json!({"model":c.engine.model,"device":c.engine.device,"compute_type":c.engine.compute_type}),
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                *lock(&self.engine_error)? = Some(error.to_string());
+                return Err(error);
+            }
+        };
         {
+            let stale = lock(&self.engine_error)?.take();
             let mut s = lock(&self.status)?;
+            clear_stale_engine_error(&mut s, stale);
             s.model = c.engine.model;
             s.model_available = result["model_available"].as_bool().unwrap_or(false);
             s.device = result["device"].as_str().unwrap_or("unloaded").into();
@@ -566,9 +578,17 @@ fn component_host(app: &AppHandle) -> components::Host {
     }
 }
 
+/// Once the engine answers, an error that only said it could not answer is no longer true.
+/// Any other error (audio, configuration, a failed dictation) is left for its own path to clear.
+fn clear_stale_engine_error(status: &mut Status, stale: Option<String>) {
+    if stale.is_some() && status.error == stale {
+        status.error = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_warm_status, persist_overlay_placement, Status};
+    use super::{apply_warm_status, clear_stale_engine_error, persist_overlay_placement, Status};
     use crate::config::{Config, Engine, Placement};
     use serde_json::json;
 
@@ -600,6 +620,31 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path)?, "[general");
         std::fs::remove_dir_all(dir)?;
         Ok(())
+    }
+
+    #[test]
+    fn engine_answering_clears_only_its_own_stale_error() {
+        let missing = crate::engine::MISSING_MESSAGE.to_string();
+        let mut status = Status {
+            state: "idle".into(),
+            source: None,
+            model: String::new(),
+            device: "unloaded".into(),
+            compute: "unloaded".into(),
+            sidecar_alive: true,
+            model_available: true,
+            fallback_reason: None,
+            error: Some(missing.clone()),
+        };
+        // Startup without an engine recorded the missing-engine error; the engine now answers.
+        clear_stale_engine_error(&mut status, Some(missing.clone()));
+        assert_eq!(status.error, None);
+        // A different error (here a microphone failure) is not the engine's to clear.
+        status.error = Some("Microphone disconnected".into());
+        clear_stale_engine_error(&mut status, Some(missing));
+        assert_eq!(status.error.as_deref(), Some("Microphone disconnected"));
+        clear_stale_engine_error(&mut status, None);
+        assert_eq!(status.error.as_deref(), Some("Microphone disconnected"));
     }
 
     #[test]

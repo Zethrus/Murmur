@@ -72,7 +72,10 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   const heading = el("div","page-heading"), headingText = el("div","page-heading-text");
   headingText.append(eyebrow,title,description); heading.append(appLogo(),headingText); header.append(heading);
   main.append(header,banner,notice,content); sidebar.append(brand,nav,footer); shell.append(sidebar,main); root.replaceChildren(shell,layer);
-  const report = (e: unknown): void => { notice.textContent = String(e); notice.dataset.tone = "error"; };
+  // A notice copied from status.error clears once the status no longer carries it (for example
+  // "Speech engine not installed" after the engine installs); action errors stay until replaced.
+  let statusNotice = false;
+  const report = (e: unknown): void => { notice.textContent = String(e); notice.dataset.tone = "error"; statusNotice = false; };
   const theme = (): void => { document.documentElement.dataset.theme = config.general.theme; };
   const noEngine = (): boolean => snapshot !== null && !snapshot.engine_installed;
   const needsSetup = (): boolean => noEngine() || (snapshot !== null && !snapshot.components.some(c =>
@@ -81,7 +84,8 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
     banner.hidden = status.model_available && !noEngine();
     bannerText.textContent = noEngine() ? "The speech engine is not installed. Dictation needs it and one speech model." : "Choose a speech model to start dictating";
     bannerAction.textContent = noEngine() ? "Finish setup" : "Choose model";
-    if (status.error && !noEngine()) report(status.error); };
+    if (status.error && !noEngine()) { report(status.error); statusNotice = true; }
+    else if (statusNotice && !status.error) { notice.textContent = ""; delete notice.dataset.tone; statusNotice = false; } };
   let setupOpen = false;
   function closeSetup(): void { if (!setupOpen) return; setupOpen = false; layer.hidden = true; layer.replaceChildren(); shell.hidden = false; pageDisposers.splice(0).forEach(f=>f()); void refreshSnapshot().then(()=>{chrome(); renderPage();}); }
   function openSetup(): void {
@@ -101,7 +105,7 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
     return job;
   };
   const persist = async (patch: ConfigPatch): Promise<void> => {
-    saving++; notice.textContent = "Saving…"; notice.dataset.tone = "";
+    saving++; notice.textContent = "Saving…"; notice.dataset.tone = ""; statusNotice = false;
     try { config = await call("set_config",{patch}); theme(); notice.textContent = "All changes saved"; }
     catch(e) { report(e); throw e; }
     finally { saving--; }
