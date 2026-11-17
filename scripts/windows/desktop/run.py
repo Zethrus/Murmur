@@ -32,6 +32,9 @@ BANNER_SECONDS = 10
 # Checks that drive Notepad: Windows 11 Notepad restores its tabs, so it must not be running.
 NOTEPAD_CHECKS = {"O3", "O4", "O8", "O9", "H1", "H8", "I1", "I4", "I5", "I6"}
 REPRO_EXE = "webview2-input-repro.exe"  # O9 only; scripts/windows/desktop/repro.py
+# Run-alone diagnostics whose first guard probe stays passive until Notepad is verified (run
+# 44037195020: O9 on the ordinary guard start lost its first probe before any input).
+LEASED_ALONE = ("O8", "O9")
 
 
 def base_config(hotkey):
@@ -158,9 +161,9 @@ class StartupProbeLease:
 
 
 def start_input_guard(guard, selected, win32, meta):
-    """For H8 or O8 alone, keep the first probe passive until a verified target focuses."""
+    """For H8, or O8/O9 alone, keep the first probe passive until a verified target focuses."""
     if not (any(check.id == "H8" for check in selected) or
-            len(selected) == 1 and selected[0].id == "O8"):
+            len(selected) == 1 and selected[0].id in LEASED_ALONE):
         guard.start()
         return None
 
@@ -360,7 +363,7 @@ def main(argv=None):
     results, aborted = [], ""
     # Include hook/pump state in the actual suite report, where P4 has lost the probe.
     guard = Guard(diagnostic=True)
-    probe_lease_selected = any(check.id == "H8" for check in selected) or selected[0].id == "O8"
+    probe_lease_selected = any(check.id == "H8" for check in selected) or selected[0].id in LEASED_ALONE
     session = None
     startup_lease = None
     ctx = None

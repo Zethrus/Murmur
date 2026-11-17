@@ -708,6 +708,8 @@ def o9_webview2_repro(ctx):
     try:
         pad = ctx.notepad("repro")
         pad.focus(guard_check=ctx.guard.check)
+        if ctx.startup_probe_lease is not None and not ctx.startup_probe_lease.closed:
+            raise Fail("Passive startup probe did not hand off to the verified Notepad target")
         for mode in repro.MODES:
             ctx.guard.check()
             result = repro.run_mode(ctx, mode, pad, record)

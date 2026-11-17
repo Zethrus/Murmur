@@ -2886,11 +2886,23 @@ class WebView2ReproTests(unittest.TestCase):
             (Path(directory) / repro.EXE).write_bytes(b"MZ")
             self.assertEqual(run.preflight(directory, catalog.select("O9"), api), [])
 
+    def test_o9_refuses_to_launch_the_reproducer_while_the_startup_probe_is_still_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix,
+                                  notepad=lambda _n: SimpleNamespace(focus=mock.Mock()),
+                                  guard=SimpleNamespace(check=mock.Mock()), note=mock.Mock(),
+                                  startup_probe_lease=SimpleNamespace(closed=False))
+            with mock.patch.object(repro, "run_mode") as run_mode:
+                with self.assertRaisesRegex(Fail, "did not hand off"):
+                    overlay_checks.o9_webview2_repro(ctx)
+            run_mode.assert_not_called()
+
     def test_o9_baseline_that_does_not_reproduce_is_inconclusive_not_a_candidate_pass(self):
         with tempfile.TemporaryDirectory() as directory:
             pad = SimpleNamespace(focus=mock.Mock())
             ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix, notepad=lambda _n: pad,
-                                  guard=SimpleNamespace(check=mock.Mock()), note=mock.Mock())
+                                  guard=SimpleNamespace(check=mock.Mock()), note=mock.Mock(),
+                                  startup_probe_lease=SimpleNamespace(closed=True))
             results = {"off": self.result(settings_moves=True, mode="off"), "on": self.result()}
             def run_mode(_ctx, mode, _pad, record):
                 record["modes"].append({"mode": mode})
@@ -4275,7 +4287,7 @@ class OwnedProbeWindowTests(unittest.TestCase):
         window_factory.assert_not_called()
 
     def test_h1_first_and_h8_only_keep_one_guard_and_window_until_target_focus(self):
-        for selection in ("H1,H8", "H8", "O8"):
+        for selection in ("H1,H8", "H8", "O8", "O9"):
             with self.subTest(selection=selection):
                 self._assert_startup_lease(selection)
 
