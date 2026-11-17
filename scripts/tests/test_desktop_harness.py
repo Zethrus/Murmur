@@ -1924,7 +1924,7 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
         self.enterContext(mock.patch.object(win32, "work_area_at", return_value=(0, 0, 1920, 1040)))
         rect = [(934, 964, 986, 1004)]
         session = SimpleNamespace(process=SimpleNamespace(pid=71), running=lambda: True,
-                                  overlay_hwnd=lambda: 44, log=lambda: "drag started\n")
+                                  overlay_hwnd=lambda: 44, log=lambda **_kw: "drag started\n")
         ctx = SimpleNamespace(murmur=session, guard=SimpleNamespace(check=mock.Mock()),
                               restorer=SimpleNamespace(push=mock.Mock()), sleep=lambda _: None)
         context = {"hwnd": 52, "process_id": 99, "input_desktop": "Default", "gui_status": "ok"}
@@ -1978,9 +1978,27 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
         self.assertEqual(sampled.call_count, 5)  # mismatch, two matches, then two matches
         self.assertEqual(snapshots, [])
         self.assertIs(observations[0], row)
+        self.assertFalse(row["activation_trace"]["armed"])
+        self.assertFalse(row["activation_trace"]["no_activation_entry_interpretable"])
         self.assertEqual(len(observations), 2)
         self.assertIn("cannot fit", observations[1]["error"])
         self.assertEqual(len(observations[1]["readiness_geometry_history"]), 2)
+
+    def test_o8_activation_trace_absence_requires_armed_uncapped_capture(self):
+        armed = "QA overlay activation trace armed cap=128\n"
+        entry = "QA overlay activation trace id=1 parent=0 phase=entry message=WM_ACTIVATE\n"
+        focus = "QA overlay activation trace id=2 parent=1 phase=entry message=WM_SETFOCUS\n"
+        cap = "QA overlay activation trace id=128 phase=entry cap_reached=true\n"
+        evidence = overlay_checks._o8_activation_trace_evidence(armed, focus)
+        self.assertEqual(evidence["activation_entries"], 0)
+        self.assertTrue(evidence["no_activation_entry_interpretable"])
+        self.assertEqual(evidence["log_delta"], focus.splitlines())
+        self.assertEqual(overlay_checks._o8_activation_trace_evidence(armed + entry, entry)
+                         ["activation_entries"], 1)
+        self.assertFalse(overlay_checks._o8_activation_trace_evidence(entry, "")
+                         ["no_activation_entry_interpretable"])
+        self.assertFalse(overlay_checks._o8_activation_trace_evidence(armed + cap, "")
+                         ["no_activation_entry_interpretable"])
 
     def _o8_readiness_context(self, directory):
         session = SimpleNamespace(process=SimpleNamespace(pid=71), running=lambda: True,

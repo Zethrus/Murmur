@@ -19,12 +19,15 @@
 
 // The decision helpers are used by the Windows subclass and by tests on every platform.
 #![cfg_attr(not(windows), allow(dead_code))]
+use std::cell::Cell;
 
 /// `WM_MOUSEACTIVATE` / `MA_NOACTIVATE` / `WM_ACTIVATE` / `WA_INACTIVE` (winuser.h), local so the
 /// decision logic is testable on every platform.
 pub const WM_MOUSEACTIVATE: u32 = 0x0021;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
+const WM_SETFOCUS: u32 = 0x0007;
+const WM_KILLFOCUS: u32 = 0x0008;
 pub const MA_NOACTIVATE: isize = 3;
 pub const WM_ACTIVATE: u32 = 0x0006;
 pub const WA_INACTIVE: usize = 0;
@@ -43,6 +46,50 @@ fn qa_mouse_message(message: u32) -> Option<&'static str> {
         WM_LBUTTONUP => Some("WM_LBUTTONUP"),
         _ => None,
     }
+}
+
+/// One activation/focus message consumes one slot, even though it can emit an entry,
+/// hand-back, and exit line. The first over-limit message emits one final cap line.
+const QA_ACTIVATION_TRACE_LIMIT: usize = 128;
+
+fn qa_activation_message(message: u32) -> Option<&'static str> {
+    match message {
+        WM_ACTIVATE => Some("WM_ACTIVATE"),
+        WM_SETFOCUS => Some("WM_SETFOCUS"),
+        WM_KILLFOCUS => Some("WM_KILLFOCUS"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QaTraceSlot {
+    Off,
+    Record { id: usize, cap_reached: bool },
+    FirstDropped,
+    Dropped,
+}
+
+fn qa_trace_slot(enabled: bool, prior: usize) -> QaTraceSlot {
+    if !enabled {
+        QaTraceSlot::Off
+    } else if prior < QA_ACTIVATION_TRACE_LIMIT {
+        QaTraceSlot::Record {
+            id: prior + 1,
+            cap_reached: prior + 1 == QA_ACTIVATION_TRACE_LIMIT,
+        }
+    } else if prior == QA_ACTIVATION_TRACE_LIMIT {
+        QaTraceSlot::FirstDropped
+    } else {
+        QaTraceSlot::Dropped
+    }
+}
+
+fn qa_trace_enter(current: &Cell<usize>, id: usize) -> usize {
+    current.replace(id)
+}
+
+fn qa_trace_exit(current: &Cell<usize>, parent: usize) {
+    current.set(parent);
 }
 
 /// Whether an activation of the overlay should hand the foreground back: it was activated
@@ -84,15 +131,16 @@ pub fn log_key(top_level: bool, children: usize) -> usize {
 #[cfg(windows)]
 mod native {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use windows_sys::Win32::{
         Foundation::{BOOL, HWND, LPARAM, LRESULT, WPARAM},
         System::Threading::{GetCurrentProcessId, GetCurrentThreadId},
         UI::{
+            Input::KeyboardAndMouse::GetFocus,
             Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::{
-                EnumChildWindows, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
-                WM_NCDESTROY,
+                EnumChildWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
+                SetForegroundWindow, WM_NCDESTROY,
             },
         },
     };
@@ -103,6 +151,82 @@ mod native {
     static LOGGED: AtomicUsize = AtomicUsize::new(usize::MAX);
     const QA_MOUSE_LOG_LIMIT: usize = 64;
     static QA_MOUSE_LOGGED: AtomicUsize = AtomicUsize::new(0);
+    static QA_TRACE_MESSAGES: AtomicUsize = AtomicUsize::new(0);
+    static QA_TRACE_ARMED: AtomicBool = AtomicBool::new(false);
+    thread_local! { static QA_TRACE_CURRENT: Cell<usize> = const { Cell::new(0) }; }
+
+    struct QaTrace {
+        id: usize,
+        parent: usize,
+        name: &'static str,
+        window: HWND,
+    }
+
+    impl QaTrace {
+        fn begin(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<Self> {
+            let name = qa_activation_message(message)?;
+            if std::env::var_os("MURMUR_QA_WAV").is_none() {
+                return None;
+            }
+            let prior = QA_TRACE_MESSAGES
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(1).min(QA_ACTIVATION_TRACE_LIMIT + 1))
+                })
+                .unwrap_or(QA_ACTIVATION_TRACE_LIMIT + 1);
+            let (id, cap_reached) = match qa_trace_slot(true, prior) {
+                QaTraceSlot::Record { id, cap_reached } => (id, cap_reached),
+                QaTraceSlot::FirstDropped => {
+                    tracing::info!(target: "murmur::qa_overlay_activation",
+                                   cap = QA_ACTIVATION_TRACE_LIMIT, dropped_at_least = 1,
+                                   "QA overlay activation trace cap reached");
+                    return None;
+                }
+                _ => return None,
+            };
+            let parent = QA_TRACE_CURRENT
+                .try_with(|current| qa_trace_enter(current, id))
+                .unwrap_or(0);
+            let trace = Self {
+                id,
+                parent,
+                name,
+                window,
+            };
+            // lparam is a peer HWND for exactly these three messages. No title or text is read.
+            let peer = lparam as HWND;
+            unsafe {
+                tracing::info!(target: "murmur::qa_overlay_activation",
+                               id, parent, phase = "entry", message = name, hwnd = ?window,
+                               peer = ?peer, state = wparam & 0xFFFF,
+                               thread = GetCurrentThreadId(),
+                               foreground = ?GetForegroundWindow(), focus = ?GetFocus(),
+                               cap_reached, "QA overlay activation trace");
+            }
+            Some(trace)
+        }
+
+        fn handback(&self, succeeded: bool) {
+            unsafe {
+                tracing::info!(target: "murmur::qa_overlay_activation",
+                               id = self.id, parent = self.parent, phase = "handback",
+                               message = self.name, hwnd = ?self.window, succeeded,
+                               foreground = ?GetForegroundWindow(), focus = ?GetFocus(),
+                               "QA overlay activation trace");
+            }
+        }
+
+        fn finish(self, result: LRESULT, handback_attempted: bool) {
+            unsafe {
+                tracing::info!(target: "murmur::qa_overlay_activation",
+                               id = self.id, parent = self.parent, phase = "exit",
+                               message = self.name, hwnd = ?self.window,
+                               result, handback_attempted,
+                               foreground = ?GetForegroundWindow(), focus = ?GetFocus(),
+                               "QA overlay activation trace");
+            }
+            let _ = QA_TRACE_CURRENT.try_with(|current| qa_trace_exit(current, self.parent));
+        }
+    }
 
     unsafe extern "system" fn overlay_proc(
         window: HWND,
@@ -125,17 +249,23 @@ mod native {
         if let Some(reply) = mouse_activate_reply(message) {
             return reply;
         }
+        let trace = QaTrace::begin(window, message, wparam, lparam);
         // Only WM_ACTIVATE carries a window in lparam; never probe it for other messages.
         let previous = lparam as HWND;
         let previous_is_window =
             message == WM_ACTIVATE && !previous.is_null() && IsWindow(previous) != 0;
-        dispatch_activation(
+        let mut handback_attempted = false;
+        let result = dispatch_activation(
             message,
             wparam,
             previous_is_window,
             || {
                 // The click gave Murmur the foreground right; hand it straight back.
-                SetForegroundWindow(previous);
+                handback_attempted = true;
+                let succeeded = SetForegroundWindow(previous) != 0;
+                if let Some(trace) = &trace {
+                    trace.handback(succeeded);
+                }
             },
             || {
                 if message == WM_NCDESTROY {
@@ -143,7 +273,11 @@ mod native {
                 }
                 DefSubclassProc(window, message, wparam, lparam)
             },
-        )
+        );
+        if let Some(trace) = trace {
+            trace.finish(result, handback_attempted);
+        }
+        result
     }
 
     fn subclass(window: HWND) -> bool {
@@ -178,6 +312,14 @@ mod native {
             EnumChildWindows(top, Some(each_child), &mut children as *mut usize as LPARAM);
         }
         let key = log_key(top_level, children);
+        if top_level
+            && std::env::var_os("MURMUR_QA_WAV").is_some()
+            && !QA_TRACE_ARMED.swap(true, Ordering::Relaxed)
+        {
+            tracing::info!(target: "murmur::qa_overlay_activation", top_level, children,
+                           cap = QA_ACTIVATION_TRACE_LIMIT,
+                           "QA overlay activation trace armed");
+        }
         if LOGGED.swap(key, Ordering::Relaxed) != key {
             // Evidence for the Edison checklist (O7): children=0 is expected when all of
             // WebView2's windows live in msedgewebview2.exe.
@@ -269,6 +411,111 @@ mod tests {
         assert_eq!(mouse_activate_reply(WM_MOUSEACTIVATE), Some(MA_NOACTIVATE));
         assert_eq!(mouse_activate_reply(WM_LBUTTONDOWN), None);
         assert_eq!(mouse_activate_reply(WM_LBUTTONUP), None);
+    }
+
+    #[test]
+    fn qa_activation_trace_is_off_by_default_and_bounded_when_enabled() {
+        assert_eq!(qa_trace_slot(false, 0), QaTraceSlot::Off);
+        assert_eq!(
+            qa_trace_slot(false, QA_ACTIVATION_TRACE_LIMIT),
+            QaTraceSlot::Off
+        );
+        assert_eq!(
+            qa_trace_slot(true, 0),
+            QaTraceSlot::Record {
+                id: 1,
+                cap_reached: false
+            }
+        );
+        assert_eq!(
+            qa_trace_slot(true, QA_ACTIVATION_TRACE_LIMIT - 1),
+            QaTraceSlot::Record {
+                id: QA_ACTIVATION_TRACE_LIMIT,
+                cap_reached: true
+            }
+        );
+        assert_eq!(
+            qa_trace_slot(true, QA_ACTIVATION_TRACE_LIMIT),
+            QaTraceSlot::FirstDropped
+        );
+        assert_eq!(
+            qa_trace_slot(true, QA_ACTIVATION_TRACE_LIMIT + 1),
+            QaTraceSlot::Dropped
+        );
+    }
+
+    #[test]
+    fn qa_trace_nesting_restores_parent_in_exit_order() {
+        let current = Cell::new(0);
+        let outer_parent = qa_trace_enter(&current, 1);
+        assert_eq!(outer_parent, 0);
+        let focus_parent = qa_trace_enter(&current, 2);
+        assert_eq!(focus_parent, 1);
+        qa_trace_exit(&current, focus_parent);
+        assert_eq!(current.get(), 1);
+        qa_trace_exit(&current, outer_parent);
+        assert_eq!(current.get(), 0);
+    }
+
+    #[test]
+    fn handled_activation_can_nest_focus_before_its_terminal_exit() {
+        use std::cell::RefCell;
+        let current = Cell::new(0);
+        let phases = RefCell::new(Vec::new());
+        let outer_parent = qa_trace_enter(&current, 1);
+        phases.borrow_mut().push("activation entry");
+        let result = dispatch_activation(
+            WM_ACTIVATE,
+            1,
+            true,
+            || {
+                phases.borrow_mut().push("handback attempt");
+                let focus_parent = qa_trace_enter(&current, 2);
+                assert_eq!(focus_parent, 1);
+                phases.borrow_mut().push("focus entry");
+                phases.borrow_mut().push("focus exit");
+                qa_trace_exit(&current, focus_parent);
+                phases.borrow_mut().push("handback result");
+            },
+            || panic!("handled activation must not forward"),
+        );
+        phases.borrow_mut().push("activation exit");
+        qa_trace_exit(&current, outer_parent);
+        assert_eq!(result, 0);
+        assert_eq!(current.get(), 0);
+        assert_eq!(
+            phases.into_inner(),
+            [
+                "activation entry",
+                "handback attempt",
+                "focus entry",
+                "focus exit",
+                "handback result",
+                "activation exit"
+            ]
+        );
+    }
+
+    #[test]
+    fn activation_trace_selection_does_not_change_message_replies() {
+        assert_eq!(qa_activation_message(WM_ACTIVATE), Some("WM_ACTIVATE"));
+        assert_eq!(qa_activation_message(WM_SETFOCUS), Some("WM_SETFOCUS"));
+        assert_eq!(qa_activation_message(WM_KILLFOCUS), Some("WM_KILLFOCUS"));
+        assert_eq!(qa_activation_message(WM_MOUSEACTIVATE), None);
+        for message in [WM_ACTIVATE, WM_SETFOCUS, WM_KILLFOCUS, WM_LBUTTONDOWN] {
+            assert_eq!(mouse_activate_reply(message), None);
+            assert_eq!(
+                dispatch_activation(
+                    message,
+                    WA_INACTIVE,
+                    false,
+                    || panic!("unexpected hand-back"),
+                    || 99
+                ),
+                99
+            );
+        }
+        assert_eq!(mouse_activate_reply(WM_MOUSEACTIVATE), Some(MA_NOACTIVATE));
     }
 
     #[test]

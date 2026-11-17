@@ -13,6 +13,18 @@ from context import Fail
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x00000080, 0x08000000
 O8_GEOMETRY_ATTEMPTS = 4
+O8_ACTIVATION_TRACE = "QA overlay activation trace"
+
+
+def _o8_activation_trace_evidence(launch_log, gesture_delta):
+    """Keep absence meaningful only while the owned-HWND trace is armed and uncapped."""
+    lines = [line for line in gesture_delta.splitlines() if O8_ACTIVATION_TRACE in line]
+    activated = [line for line in lines if "phase=entry" in line and "message=WM_ACTIVATE" in line]
+    armed = "QA overlay activation trace armed" in launch_log
+    capped = "cap_reached=true" in launch_log or "QA overlay activation trace cap reached" in launch_log
+    return {"armed": armed, "cap_reached": capped, "activation_entries": len(activated),
+            "no_activation_entry_interpretable": armed and not capped and len(activated) == 0,
+            "log_delta": lines}
 
 
 def _exstyle(hwnd):
@@ -400,6 +412,8 @@ def _o8_drag(ctx, label, pid, expected_foreground, direction, observations):
             delta = ctx.murmur.log()[log_before:]
             observation["log_delta"] = delta.splitlines()
             observation["drag_log_delta"] = [line for line in delta.splitlines() if "drag" in line.lower()]
+            observation["activation_trace"] = _o8_activation_trace_evidence(
+                ctx.murmur.log(since_launch=True), delta)
         except Exception as error:  # noqa: BLE001 - preserve the gesture's original outcome
             observation["log_read_error"] = f"{type(error).__name__}: {error}"
 
