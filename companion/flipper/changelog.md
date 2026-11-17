@@ -1,3 +1,6 @@
+v0.5.1:
+Version synchronized with Murmur 0.5.1; companion protocol unchanged.
+
 v0.5.0:
 Version synchronized with Murmur 0.5.0; companion protocol unchanged.
 
