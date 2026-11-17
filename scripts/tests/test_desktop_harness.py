@@ -4895,6 +4895,7 @@ class SettingsCheckTests(unittest.TestCase):
                               restorer=restore.Restorer(log=lambda _: None), sleep=lambda _: None, note=lambda _: None,
                               screenshot=lambda *_: None)
         with mock.patch.object(win32, "outer_rect", return_value=(0, 0, 1016, 819)), \
+             mock.patch.object(win32, "work_area_at", return_value=(0, 0, 1920, 1040)), \
              mock.patch.object(win32, "dpi_scale", return_value=1), \
              mock.patch.object(win32, "client_size", side_effect=[(1000, 780), (700, 500)]), \
              mock.patch.object(win32, "activate"), \
@@ -4907,6 +4908,29 @@ class SettingsCheckTests(unittest.TestCase):
             set_pos.assert_not_called()
             ctx.restorer.restore_all()
             set_pos.assert_called_once()
+
+    def test_minimum_size_first_moves_a_window_whose_grip_is_under_the_taskbar(self):
+        from checks import settings as checks_settings
+        ctx = SimpleNamespace(murmur=SimpleNamespace(ensure=lambda _: None, show_settings=lambda: 42),
+                              fixtures={"A": SimpleNamespace(path="fixture.wav")},
+                              restorer=restore.Restorer(log=lambda _: None), sleep=lambda _: None,
+                              note=mock.Mock(), screenshot=lambda *_: None)
+        frames = [(234, 234, 1250, 1053), (234, 221, 1250, 1040)]  # run 44059056563, then fitted
+        with mock.patch.object(win32, "outer_rect", side_effect=lambda _h: frames[0] if len(frames) > 1 else frames[-1]), \
+             mock.patch.object(win32, "work_area_at", return_value=(0, 0, 1920, 1040)), \
+             mock.patch.object(win32, "dpi_scale", return_value=1), \
+             mock.patch.object(win32, "client_size", side_effect=[(1000, 780), (760, 560)]), \
+             mock.patch.object(win32, "activate"), \
+             mock.patch.object(win32, "resize_grip", return_value=(1246, 1036)), \
+             mock.patch.object(win32, "drag"), \
+             mock.patch.object(win32, "set_window_pos", side_effect=lambda *_a: frames.pop(0)) as set_pos:
+            try:
+                checks_settings.s4_minimum_size(ctx)
+            except Exception:  # noqa: BLE001 - only the placement step is under test here
+                pass
+            set_pos.assert_called_once_with(42, 234, 221, 1016, 819)  # same size, inside the work area
+            ctx.restorer.restore_all()
+            self.assertEqual(set_pos.call_args_list[-1].args, (42, 234, 234, 1016, 819))  # original restored
 
 
 class GoldenDuplicateTests(unittest.TestCase):

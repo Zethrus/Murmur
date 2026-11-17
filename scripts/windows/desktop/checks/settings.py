@@ -84,8 +84,19 @@ def s4_minimum_size(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     hwnd = ctx.murmur.show_settings()
     left, top, right, bottom = win32.outer_rect(hwnd)
-    ctx.restorer.push("restore the Settings size", lambda: win32.set_window_pos(hwnd, left, top, right - left,
-                                                                                bottom - top))
+    original = (left, top, right - left, bottom - top)  # not the fitted frame below
+    ctx.restorer.push("restore the Settings size", lambda: win32.set_window_pos(hwnd, *original))
+    # A cascaded window can put its bottom-right corner under the taskbar (run 44059056563:
+    # outer frame ending at y=1053 on a 1040 px work area), where no grip is reachable. Move
+    # it, unchanged in size, fully into its work area; placement is not what S4 tests.
+    width, height = right - left, bottom - top
+    work = win32.work_area_at(((left + right) // 2, (top + bottom) // 2))
+    fitted = (min(max(left, work[0]), work[2] - width), min(max(top, work[1]), work[3] - height))
+    if fitted != (left, top) and width <= work[2] - work[0] and height <= work[3] - work[1]:
+        win32.set_window_pos(hwnd, fitted[0], fitted[1], width, height)
+        ctx.sleep(0.5)
+        ctx.note(f"moved Settings into the work area {work} from {(left, top)} to {fitted}")
+        left, top, right, bottom = win32.outer_rect(hwnd)
     scale = win32.dpi_scale(hwnd)
     # The configured minimum is a user resize limit. SetWindowPos can set an
     # undersized outer frame directly, so reproduce a user's corner drag.
