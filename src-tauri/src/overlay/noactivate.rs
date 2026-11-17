@@ -123,6 +123,21 @@ fn dispatch_activation(
     forward()
 }
 
+/// Text-free token for the QA host record: version characters only, never spaces or quotes,
+/// so one record stays one whitespace-separated field for the harness parser.
+fn qa_version_token(version: &str) -> String {
+    let token: String = version
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .take(64)
+        .collect();
+    if token.is_empty() {
+        "unavailable".into()
+    } else {
+        token
+    }
+}
+
 /// Only windows owned by this thread can be subclassed (`SetWindowSubclass` refuses others).
 /// WebView2's renderer windows belong to `msedgewebview2.exe`, so in practice this excludes all
 /// of them; see the module documentation.
@@ -142,13 +157,14 @@ mod native {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use windows_sys::Win32::{
         Foundation::{BOOL, HWND, LPARAM, LRESULT, WPARAM},
+        System::Com::CoTaskMemFree,
         System::Threading::{GetCurrentProcessId, GetCurrentThreadId},
         UI::{
             Input::KeyboardAndMouse::GetFocus,
             Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::{
-                EnumChildWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
-                SetForegroundWindow, WM_NCDESTROY,
+                EnumChildWindows, GetAncestor, GetForegroundWindow, GetWindowThreadProcessId,
+                IsWindow, SetForegroundWindow, GA_PARENT, WM_NCDESTROY,
             },
         },
     };
@@ -236,6 +252,59 @@ mod native {
                                "QA overlay activation trace");
             }
             let _ = QA_TRACE_CURRENT.try_with(|current| qa_trace_exit(current, self.parent));
+        }
+    }
+
+    /// QA-only, read-only: which window hosts the overlay's WebView2 controller, who owns it,
+    /// and which WebView2 runtime this process actually loaded (not the registry's). Runs once
+    /// per process on the UI thread through `with_webview`; it reads no title or page text and
+    /// writes no window state. A failed read is logged as its HRESULT, never as a success.
+    fn qa_log_webview_host(window: &tauri::WebviewWindow, overlay: HWND) {
+        let overlay = overlay as usize;
+        let queued = window.with_webview(move |webview| unsafe {
+            let mut parent: *mut core::ffi::c_void = std::ptr::null_mut();
+            let parent_hresult = webview
+                .controller()
+                .ParentWindow((&mut parent as *mut *mut core::ffi::c_void).cast())
+                .err()
+                .map_or(0, |error| error.code().0 as u32);
+            let mut raw: *mut u16 = std::ptr::null_mut();
+            let version_hresult = webview
+                .environment()
+                .BrowserVersionString((&mut raw as *mut *mut u16).cast())
+                .err()
+                .map_or(0, |error| error.code().0 as u32);
+            let mut version = String::new();
+            if !raw.is_null() {
+                let length = (0..256).take_while(|&i| *raw.add(i) != 0).count();
+                version = String::from_utf16_lossy(std::slice::from_raw_parts(raw, length));
+                CoTaskMemFree(raw as *const core::ffi::c_void);
+            }
+            let host = parent as HWND;
+            let mut host_process = 0u32;
+            let (host_thread, host_parent) = if host.is_null() || IsWindow(host) == 0 {
+                (0, 0usize)
+            } else {
+                (
+                    GetWindowThreadProcessId(host, &mut host_process),
+                    GetAncestor(host, GA_PARENT) as usize,
+                )
+            };
+            tracing::info!(target: "murmur::qa_overlay_topology",
+                           overlay = %format!("{overlay:#x}"),
+                           controller_parent = %format!("{:#x}", parent as usize),
+                           controller_parent_parent = %format!("{host_parent:#x}"),
+                           controller_parent_pid = host_process,
+                           controller_parent_tid = host_thread,
+                           process = GetCurrentProcessId(), thread = GetCurrentThreadId(),
+                           parent_hresult = %format!("{parent_hresult:#x}"),
+                           version_hresult = %format!("{version_hresult:#x}"),
+                           browser_version = %qa_version_token(&version),
+                           "QA overlay webview host");
+        });
+        if let Err(error) = queued {
+            tracing::info!(target: "murmur::qa_overlay_topology", %error,
+                           "QA overlay webview host unavailable");
         }
     }
 
@@ -330,6 +399,7 @@ mod native {
             tracing::info!(target: "murmur::qa_overlay_activation", top_level, children,
                            cap = QA_ACTIVATION_TRACE_LIMIT,
                            "QA overlay activation trace armed");
+            qa_log_webview_host(window, top);
         }
         if LOGGED.swap(key, Ordering::Relaxed) != key {
             // Evidence for the Edison checklist (O7): children=0 is expected when all of
@@ -621,6 +691,16 @@ mod tests {
             WA_ACTIVE,
             true
         ));
+    }
+
+    #[test]
+    fn qa_version_token_is_one_text_free_field() {
+        assert_eq!(qa_version_token("157.0.4341.46"), "157.0.4341.46");
+        assert_eq!(qa_version_token("158.0.1 beta"), "158.0.1beta");
+        assert_eq!(qa_version_token("x=\"1\" y"), "x1y");
+        assert_eq!(qa_version_token(""), "unavailable");
+        assert_eq!(qa_version_token(" \t"), "unavailable");
+        assert_eq!(qa_version_token(&"9".repeat(300)).len(), 64);
     }
 
     #[test]
