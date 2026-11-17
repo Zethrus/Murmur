@@ -17,9 +17,10 @@ windows on one UI thread the way Murmur and Wry 0.57.2 do:
 
 - **Hosting:** each window gets a `WRY_WEBVIEW` child (`WS_CHILD | WS_CLIPCHILDREN`)
   with a windowed controller, Wry's parent subclass (bounds on `WM_SIZE`, `MoveFocus` on
-  `WM_SETFOCUS` only, move notifications), and Wry's environment arguments. The windows
-  share one environment.
-- **Overlay:** undecorated, transparent, topmost, skip-taskbar and `focusable(false)`,
+  `WM_SETFOCUS` only, move notifications), Wry's environment arguments and its non-client
+  region support setting. The windows share one environment. Wry's file drag-and-drop
+  target is not reproduced.
+- **Overlay:** undecorated, shadowless, transparent, topmost, skip-taskbar and `focusable(false)`,
   with Murmur's no-activate subclass on the root and on the in-thread descendants. That
   subclass answers `WM_MOUSEACTIVATE` with `MA_NOACTIVATE` and hands activation back on
   `WM_ACTIVATE`. A DOM `mousedown` starts tao's native move loop only while the physical
@@ -59,9 +60,10 @@ typing gate into the preselected Notepad editor or the Settings field.
 
 Interpretation:
 
-- **Inconclusive:** the baseline does not show Murmur's renderer chain, a Notepad pass
-  and a Settings failure.
-- **Candidate rejected:** in the candidate, a drag fails to move while held, the button
+- **Inconclusive:** the baseline does not show Murmur's renderer chain with a
+  foreign-owned immediate parent, a Notepad pass and a Settings failure.
+- **Candidate rejected:** in the candidate, the option is not exactly `enabled`, a drag
+  (including the leave-work-area and hide cases) fails to move while held, the button
   stays down, a move loop is left unbalanced, the overlay keeps moving after release,
   focus or foreground changes, or a typed token does not land exactly.
 - **Candidate passed reproducer:** none of the above. This justifies, at most, a

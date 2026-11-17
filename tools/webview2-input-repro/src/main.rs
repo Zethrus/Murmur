@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! Diagnostic reproducer for Murmur's Windows overlay drag (docs/parity/webview2-input-repro.md).
 //!
 //! Two tao windows on one UI thread, hosted like Murmur through Wry 0.57.2: each window gets a

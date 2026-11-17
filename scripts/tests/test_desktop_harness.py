@@ -2744,14 +2744,16 @@ class WebView2ReproTests(unittest.TestCase):
         base.update(extra)
         return base
 
-    def result(self, settings_moves=True, **changes):
+    def result(self, settings_moves=True, mode="on", **changes):
         cases = [self.row("notepad drag", "drag")]
-        cases += [self.row(label, kind, moved_while_held=(settings_moves if kind == "drag" else False))
+        cases += [self.row(label, kind, moved_while_held=(settings_moves if kind != "hold" else False))
                   for label, kind in repro.SETTINGS_CASES]
         cases.append(self.row("notepad drag after sequence", "drag"))
         for case in cases:
             case.update(changes.get(case["case"], {}))
-        return {"cases": cases, "topology_matches_murmur": True}
+        option = "enabled" if mode == "on" else "not requested"
+        return {"cases": cases, "topology_matches_murmur": True, "mode": mode,
+                "host_input": [{"event": "host_input", "result": option}]}
 
     def test_baseline_must_reproduce_murmur_before_a_candidate_means_anything(self):
         baseline = repro.summarize(self.result(settings_moves=False))
@@ -2763,12 +2765,21 @@ class WebView2ReproTests(unittest.TestCase):
 
     def test_candidate_needs_movement_clean_release_focus_and_exact_typing(self):
         self.assertEqual(repro.summarize(self.result())["problems"], [])
+        self.assertEqual(repro.summarize(self.result(mode="off"))["problems"], [])
+        unsupported = self.result()
+        unsupported["host_input"] = [{"event": "host_input", "result": "unsupported runtime"}]
+        self.assertIn("host input option was not exactly 'enabled'", repro.summarize(unsupported)["problems"])
+        # The rapid case may legitimately not move; it is never a movement failure.
+        self.assertEqual(repro.summarize(self.result(
+            **{"settings rapid click-drag-release": {"moved_while_held": False}}))["problems"], [])
         for change, expected in (
                 ({"settings repeat 2": {"moved_while_held": False}}, "settings repeat 2: no held movement"),
                 ({"settings hide during gesture": {"release_clean": False}}, "release not clean"),
                 ({"settings hold without moving": {"settled": (5, 5, 6, 6)}}, "kept moving after release"),
                 ({"notepad drag": {"focus_changes": [{"stage": "moving"}]}}, "focus or foreground changed"),
-                ({"settings drag": {"typing": {"landed": False}}}, "typing after release")):
+                ({"settings drag": {"typing": {"landed": False}}}, "typing after release"),
+                ({"settings leave work area": {"moved_while_held": False}}, "leave work area: no held movement"),
+                ({"settings hide during gesture": {"moved_while_held": False}}, "hide during gesture: no held")):
             with self.subTest(expected=expected):
                 problems = repro.summarize(self.result(**change))["problems"]
                 self.assertTrue(any(expected in problem for problem in problems), problems)
@@ -2847,6 +2858,18 @@ class WebView2ReproTests(unittest.TestCase):
                     proc.start()
             ctx.restorer.push.assert_called_once()  # cleanup registered before waiting
 
+    def test_build_workflow_hands_over_the_reproducer_from_the_shared_target_dir(self):
+        workflow = (HARNESS.parents[2] / ".github" / "workflows" / "windows-build.yml").read_text()
+        build = workflow.split("Build the O9 WebView2 input reproducer", 1)[1].split("- name:", 1)[0]
+        self.assertIn("continue-on-error: true", build)
+        self.assertIn("workflow_dispatch", build)  # never on pull requests or tags
+        self.assertIn("--locked --target x86_64-pc-windows-msvc", build)
+        handoff_step = workflow.split("Hand the build to the desktop runner", 1)[1]
+        self.assertIn("Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\\release\\" + repro.EXE + "'",
+                      handoff_step)
+        self.assertIn("steps.repro.outcome }}' -eq 'success'", handoff_step)
+        self.assertLess(handoff_step.index("$Files += $Repro"), handoff_step.index("Copy-Item"))
+
     def test_o9_must_run_alone_once_and_needs_the_handed_over_exe(self):
         self.assertNotIn("O9", [check.id for check in catalog.select()])
         self.assertIn("O9", run.NOTEPAD_CHECKS)
@@ -2868,7 +2891,7 @@ class WebView2ReproTests(unittest.TestCase):
             pad = SimpleNamespace(focus=mock.Mock())
             ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix, notepad=lambda _n: pad,
                                   guard=SimpleNamespace(check=mock.Mock()), note=mock.Mock())
-            results = {"off": self.result(settings_moves=True), "on": self.result()}
+            results = {"off": self.result(settings_moves=True, mode="off"), "on": self.result()}
             def run_mode(_ctx, mode, _pad, record):
                 record["modes"].append({"mode": mode})
                 return results[mode]
@@ -2877,7 +2900,7 @@ class WebView2ReproTests(unittest.TestCase):
                     overlay_checks.o9_webview2_repro(ctx)
             record = json.loads((Path(directory) / "webview2-repro.json").read_text())
             self.assertEqual(record["status"], "inconclusive")
-            results["off"] = self.result(settings_moves=False)
+            results["off"] = self.result(settings_moves=False, mode="off")
             with mock.patch.object(repro, "run_mode", side_effect=run_mode):
                 overlay_checks.o9_webview2_repro(ctx)
             record = json.loads((Path(directory) / "webview2-repro.json").read_text())

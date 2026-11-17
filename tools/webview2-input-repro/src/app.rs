@@ -46,6 +46,12 @@ const NOACTIVATE_SUBCLASS: usize = 0x4D52_4E41; // Murmur's id ("MRNA")
 static START: OnceLock<Instant> = OnceLock::new();
 static LOG: OnceLock<Mutex<File>> = OnceLock::new();
 static HOME: OnceLock<(i32, i32)> = OnceLock::new();
+/// The overlay root; harness messages are honoured there only, never on in-thread children.
+static OVERLAY_ROOT: OnceLock<usize> = OnceLock::new();
+
+fn is_overlay_root(hwnd: HWND) -> bool {
+    OVERLAY_ROOT.get() == Some(&(hwnd.0 as usize))
+}
 
 /// One JSON line: elapsed milliseconds, event name, then pre-formatted fields.
 pub fn log(event: &str, fields: &str) {
@@ -346,6 +352,10 @@ fn host_window(
         })?;
         controller.SetIsVisible(true)?;
         let webview = controller.CoreWebView2()?;
+        // Wry 0.57.2 always enables non-client region support; it changes hit-testing.
+        if let Ok(settings9) = webview.Settings()?.cast::<ICoreWebView2Settings9>() {
+            settings9.SetIsNonClientRegionSupportEnabled(true)?;
+        }
         let mut token = 0i64;
         webview.add_WebMessageReceived(
             &WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
@@ -430,13 +440,13 @@ unsafe extern "system" fn noactivate_proc(
                 hex(HWND(lparam.0 as _))
             ),
         ),
-        WM_REPRO_HIDE => {
+        WM_REPRO_HIDE if is_overlay_root(hwnd) => {
             let _ = ShowWindow(hwnd, SW_HIDE);
             SetTimer(Some(hwnd), HIDE_TIMER, 1000, None);
             log("hidden", "");
             return LRESULT(0);
         }
-        WM_REPRO_RESET => {
+        WM_REPRO_RESET if is_overlay_root(hwnd) => {
             if let Some(&(x, y)) = HOME.get() {
                 let _ = SetWindowPos(
                     hwnd,
@@ -451,7 +461,7 @@ unsafe extern "system" fn noactivate_proc(
             }
             return LRESULT(0);
         }
-        WM_TIMER if wparam.0 == HIDE_TIMER => {
+        WM_TIMER if wparam.0 == HIDE_TIMER && is_overlay_root(hwnd) => {
             let _ = KillTimer(Some(hwnd), HIDE_TIMER);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             log("shown", "");
@@ -531,6 +541,7 @@ pub fn run() -> Result<(), String> {
         .with_resizable(false)
         .with_focusable(false)
         .with_skip_taskbar(true)
+        .with_undecorated_shadow(false) // Murmur: "shadow": false
         .with_visible(false)
         .build(&event_loop)
         .map_err(|e| e.to_string())?;
@@ -563,6 +574,7 @@ pub fn run() -> Result<(), String> {
     .map_err(|e| format!("overlay webview: {e}"))?;
 
     let overlay_root = HWND(overlay.hwnd() as _);
+    let _ = OVERLAY_ROOT.set(overlay_root.0 as usize);
     let (overlay_id, settings_id) = (overlay.id(), settings.id());
     let mut overlay_shown = false;
     event_loop.run(move |event, _, flow| {

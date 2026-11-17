@@ -262,7 +262,9 @@ def run_mode(ctx, mode, pad, record):
                               "chain": [node["class"] for node in snap["ancestors"]],
                               "classification": topology.classify(snap, repro.process.pid,
                                                                   win32.window_thread(repro.overlay))}
-        result["topology_matches_murmur"] = bool(topology_matches(snap))
+        # Class names alone are not enough: O8's finding is a foreign-owned immediate parent.
+        result["topology_matches_murmur"] = bool(
+            topology_matches(snap) and result["topology"]["classification"].get("result") == "foreign-immediate-parent")
         ctx.guard.check()
         pid = repro.process.pid
         sequence = [("notepad drag", "drag", "notepad")] + [(l, k, "settings") for l, k in SETTINGS_CASES] + \
@@ -288,7 +290,6 @@ def run_mode(ctx, mode, pad, record):
 
 def summarize(result):
     cases = {row["case"]: row for row in result["cases"]}
-    drags = [row for row in result["cases"] if row["kind"] == "drag"]
     problems = []
     for row in result["cases"]:
         if not row["release_clean"]:
@@ -297,9 +298,13 @@ def summarize(result):
             problems.append(f"{row['case']}: focus or foreground changed")
         if not row.get("typing", {}).get("landed"):
             problems.append(f"{row['case']}: typing after release did not land exactly")
-    for row in drags:
-        if not row["moved_while_held"]:
+    # Every full-travel gesture must move while held; only the rapid case may legitimately not.
+    for row in result["cases"]:
+        if row["kind"] in ("drag", "edge", "hide") and not row["moved_while_held"]:
             problems.append(f"{row['case']}: no held movement")
+    expected_option = "enabled" if result.get("mode") == "on" else "not requested"
+    if [e.get("result") for e in result.get("host_input", [])] != [expected_option]:
+        problems.append(f"host input option was not exactly {expected_option!r}")
     for kind in ("hold", "rapid"):
         for row in result["cases"]:
             if row["kind"] == kind and row["after"] != row["settled"]:

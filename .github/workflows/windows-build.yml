@@ -486,8 +486,12 @@ jobs:
           )
           foreach ($File in $Files) { if (-not (Test-Path -LiteralPath $File)) { throw "Missing hand-off file $File" } }
           # Optional (handoff.py OPTIONAL): only a reproducer this run just built successfully.
-          $Repro = 'tools/webview2-input-repro/target/x86_64-pc-windows-msvc/release/webview2-input-repro.exe'
-          if ('${{ steps.repro.outcome }}' -eq 'success' -and (Test-Path -LiteralPath $Repro)) { $Files += $Repro }
+          # CARGO_TARGET_DIR is set job-wide by ci-cache.py, as for the product binaries.
+          $Repro = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release\webview2-input-repro.exe'
+          if ('${{ steps.repro.outcome }}' -eq 'success') {
+            if (Test-Path -LiteralPath $Repro) { $Files += $Repro }
+            else { Write-Host "::warning::The O9 reproducer built but $Repro is missing; O9 will be refused." }
+          }
           # Folder ACLs are inherited from C:\murmur-ci-out (set when Edison was provisioned).
           $Dest = Join-Path $Root $Commit
           if (Test-Path -LiteralPath $Dest) { Remove-Retrying $Dest }
