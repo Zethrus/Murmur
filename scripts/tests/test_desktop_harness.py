@@ -1986,19 +1986,69 @@ class O8ForegroundDiagnosticTests(unittest.TestCase):
 
     def test_o8_activation_trace_absence_requires_armed_uncapped_capture(self):
         armed = "QA overlay activation trace armed cap=128\n"
-        entry = "QA overlay activation trace id=1 parent=0 phase=entry message=WM_ACTIVATE\n"
-        focus = "QA overlay activation trace id=2 parent=1 phase=entry message=WM_SETFOCUS\n"
-        cap = "QA overlay activation trace id=128 phase=entry cap_reached=true\n"
+        entry = self._activation_record(1, 0, "entry", "WM_ACTIVATE", activation_state=1)
+        exit_ = self._activation_record(1, 0, "exit", "WM_ACTIVATE")
+        focus = (self._activation_record(2, 0, "entry", "WM_SETFOCUS") +
+                 self._activation_record(2, 0, "exit", "WM_SETFOCUS"))
         evidence = overlay_checks._o8_activation_trace_evidence(armed, focus)
         self.assertEqual(evidence["activation_entries"], 0)
         self.assertTrue(evidence["no_activation_entry_interpretable"])
         self.assertEqual(evidence["log_delta"], focus.splitlines())
-        self.assertEqual(overlay_checks._o8_activation_trace_evidence(armed + entry, entry)
-                         ["activation_entries"], 1)
+        activation = overlay_checks._o8_activation_trace_evidence(armed, entry + exit_)
+        self.assertEqual(activation["activation_entries"], 1)
+        self.assertTrue(activation["valid_capture"])
+        self.assertFalse(activation["no_activation_entry_interpretable"])
         self.assertFalse(overlay_checks._o8_activation_trace_evidence(entry, "")
                          ["no_activation_entry_interpretable"])
-        self.assertFalse(overlay_checks._o8_activation_trace_evidence(armed + cap, "")
-                         ["no_activation_entry_interpretable"])
+        for cap in (self._activation_record(128, 0, "entry", "WM_SETFOCUS", cap_reached=True),
+                    "QA overlay activation trace cap reached cap=128 dropped_at_least=1\n"):
+            evidence = overlay_checks._o8_activation_trace_evidence(armed + cap, focus)
+            self.assertTrue(evidence["cap_reached"])
+            self.assertFalse(evidence["no_activation_entry_interpretable"])
+
+    @staticmethod
+    def _activation_record(ident, parent, phase, message, **extra):
+        fields = dict(id=ident, parent=parent, phase=phase, native_message=message,
+                      thread=7, hwnd="0x12", foreground="0x13", focus="0x14")
+        if phase == "entry":
+            fields.update(peer="0x15", cap_reached=False)
+        elif phase == "exit":
+            fields.update(result=0, handback_attempted=False)
+        elif phase == "handback":
+            fields.update(succeeded=True)
+        fields.update(extra)
+        return "QA overlay activation trace " + " ".join(
+            f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in fields.items()) + "\n"
+
+    def test_o8_activation_trace_rejects_incomplete_or_malformed_evidence(self):
+        record = self._activation_record
+        entry = record(1, 0, "entry", "WM_SETFOCUS")
+        exit_ = record(1, 0, "exit", "WM_SETFOCUS")
+        broken = ["", "QA overlay activation trace nonsense\n", entry, exit_,
+                  entry + entry + exit_, record(1, 3, "entry", "WM_SETFOCUS") + exit_,
+                  entry + record(1, 0, "unknown", "WM_SETFOCUS") + exit_,
+                  entry + exit_.replace("focus=0x14", "focus="),
+                  'QA overlay activation trace id=1 parent=0 phase="entry" WM_ACTIVATE cap_reached=false\n']
+        for capture in broken:
+            with self.subTest(capture=capture):
+                evidence = overlay_checks._o8_activation_trace_evidence(
+                    "QA overlay activation trace armed cap=128", capture)
+                self.assertFalse(evidence["valid_capture"])
+                self.assertFalse(evidence["no_activation_entry_interpretable"])
+                self.assertTrue(evidence["validation_errors"])
+
+    def test_o8_activation_trace_correlates_nested_focus_and_handback(self):
+        record = self._activation_record
+        capture = (record(1, 0, "entry", "WM_ACTIVATE", activation_state=2) +
+                   record(2, 1, "entry", "WM_SETFOCUS") +
+                   record(2, 1, "exit", "WM_SETFOCUS") +
+                   record(1, 0, "handback", "WM_ACTIVATE") +
+                   record(1, 0, "exit", "WM_ACTIVATE", handback_attempted=True))
+        evidence = overlay_checks._o8_activation_trace_evidence(
+            "QA overlay activation trace armed cap=128", capture)
+        self.assertTrue(evidence["valid_capture"], evidence["validation_errors"])
+        self.assertEqual(evidence["activation_entries"], 1)
+        self.assertFalse(evidence["no_activation_entry_interpretable"])
 
     def _o8_readiness_context(self, directory):
         session = SimpleNamespace(process=SimpleNamespace(pid=71), running=lambda: True,

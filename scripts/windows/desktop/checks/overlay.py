@@ -17,13 +17,78 @@ O8_ACTIVATION_TRACE = "QA overlay activation trace"
 
 
 def _o8_activation_trace_evidence(launch_log, gesture_delta):
-    """Keep absence meaningful only while the owned-HWND trace is armed and uncapped."""
+    """Only complete, correlated records can support an absence inference."""
     lines = [line for line in gesture_delta.splitlines() if O8_ACTIVATION_TRACE in line]
-    activated = [line for line in lines if "phase=entry" in line and "message=WM_ACTIVATE" in line]
-    armed = "QA overlay activation trace armed" in launch_log
-    capped = "cap_reached=true" in launch_log or "QA overlay activation trace cap reached" in launch_log
-    return {"armed": armed, "cap_reached": capped, "activation_entries": len(activated),
-            "no_activation_entry_interpretable": armed and not capped and len(activated) == 0,
+    armed = bool(re.search(r"QA overlay activation trace armed\b", launch_log))
+    capture_log = launch_log + "\n" + gesture_delta
+    capped = (bool(re.search(r"\bcap_reached=true(?:\s|$)", capture_log)) or
+              "QA overlay activation trace cap reached" in capture_log)
+    errors, seen, active, stacks = [], set(), {}, {}
+    entries = activation_entries = 0
+    for index, line in enumerate(lines):
+        tail = line.split(O8_ACTIVATION_TRACE, 1)[1].strip()
+        if tail.startswith("armed ") or tail.startswith("cap reached"):
+            continue
+        try:
+            fields = {}
+            for token in tail.split():
+                key, value = token.split("=", 1)
+                if not key or not value or key in fields:
+                    raise ValueError("missing or duplicate field")
+                fields[key] = value
+            ident, parent, thread = (int(fields[key]) for key in ("id", "parent", "thread"))
+            phase, message = fields["phase"], fields["native_message"]
+            for key in ("hwnd", "foreground", "focus"):
+                if not re.fullmatch(r"0x[0-9a-fA-F]+", fields[key]):
+                    raise ValueError(f"invalid {key}")
+            if not 1 <= ident <= 128 or parent < 0 or thread <= 0:
+                raise ValueError("invalid identity")
+            if message not in ("WM_ACTIVATE", "WM_SETFOCUS", "WM_KILLFOCUS"):
+                raise ValueError("unknown native message")
+            stack = stacks.setdefault(thread, [])
+            if phase == "entry":
+                if not re.fullmatch(r"0x[0-9a-fA-F]+", fields["peer"]):
+                    raise ValueError("invalid peer")
+                if fields.get("cap_reached") not in ("true", "false"):
+                    raise ValueError("missing entry cap state")
+                if ident in seen or parent != (stack[-1] if stack else 0):
+                    raise ValueError("duplicate identity or broken parent")
+                if message == "WM_ACTIVATE":
+                    if fields.get("activation_state") not in ("0", "1", "2"):
+                        raise ValueError("missing activation state")
+                    activation_entries += 1
+                elif "activation_state" in fields:
+                    raise ValueError("focus message has activation state")
+                seen.add(ident)
+                active[ident] = (parent, thread, message, False)
+                stack.append(ident)
+                entries += 1
+            elif phase in ("handback", "exit"):
+                current = active.get(ident)
+                if not current or current[:3] != (parent, thread, message) or not stack or stack[-1] != ident:
+                    raise ValueError("unmatched or out-of-order record")
+                if phase == "handback":
+                    if message != "WM_ACTIVATE" or current[3] or fields.get("succeeded") not in ("true", "false"):
+                        raise ValueError("invalid handback")
+                    active[ident] = (parent, thread, message, True)
+                else:
+                    int(fields["result"])
+                    if fields.get("handback_attempted") != str(current[3]).lower():
+                        raise ValueError("missing or inconsistent handback result")
+                    stack.pop()
+                    del active[ident]
+            else:
+                raise ValueError("unknown phase")
+        except (KeyError, ValueError) as error:
+            errors.append(f"record {index + 1}: {error}")
+    if not entries:
+        errors.append("no complete trace evidence")
+    if active:
+        errors.append("unclosed entry records")
+    valid = not errors
+    return {"armed": armed, "cap_reached": capped, "activation_entries": activation_entries,
+            "valid_capture": valid, "validation_errors": errors,
+            "no_activation_entry_interpretable": armed and not capped and valid and activation_entries == 0,
             "log_delta": lines}
 
 

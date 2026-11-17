@@ -61,6 +61,14 @@ fn qa_activation_message(message: u32) -> Option<&'static str> {
     }
 }
 
+fn qa_activation_parameters(message: u32, wparam: usize, lparam: isize) -> (usize, Option<usize>) {
+    if message == WM_ACTIVATE {
+        (lparam as usize, Some(wparam & 0xFFFF))
+    } else {
+        (wparam, None)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum QaTraceSlot {
     Off,
@@ -192,12 +200,13 @@ mod native {
                 name,
                 window,
             };
-            // lparam is a peer HWND for exactly these three messages. No title or text is read.
-            let peer = lparam as HWND;
+            // Focus messages carry the peer HWND in wparam; their lparam is unused.
+            let (peer, activation_state) = qa_activation_parameters(message, wparam, lparam);
+            let peer = peer as HWND;
             unsafe {
                 tracing::info!(target: "murmur::qa_overlay_activation",
-                               id, parent, phase = "entry", message = name, hwnd = ?window,
-                               peer = ?peer, state = wparam & 0xFFFF,
+                               id, parent, phase = %"entry", native_message = %name, hwnd = ?window,
+                               peer = ?peer, activation_state,
                                thread = GetCurrentThreadId(),
                                foreground = ?GetForegroundWindow(), focus = ?GetFocus(),
                                cap_reached, "QA overlay activation trace");
@@ -208,8 +217,9 @@ mod native {
         fn handback(&self, succeeded: bool) {
             unsafe {
                 tracing::info!(target: "murmur::qa_overlay_activation",
-                               id = self.id, parent = self.parent, phase = "handback",
-                               message = self.name, hwnd = ?self.window, succeeded,
+                               id = self.id, parent = self.parent, phase = %"handback",
+                               native_message = %self.name, hwnd = ?self.window, succeeded,
+                               thread = GetCurrentThreadId(),
                                foreground = ?GetForegroundWindow(), focus = ?GetFocus(),
                                "QA overlay activation trace");
             }
@@ -218,8 +228,9 @@ mod native {
         fn finish(self, result: LRESULT, handback_attempted: bool) {
             unsafe {
                 tracing::info!(target: "murmur::qa_overlay_activation",
-                               id = self.id, parent = self.parent, phase = "exit",
-                               message = self.name, hwnd = ?self.window,
+                               id = self.id, parent = self.parent, phase = %"exit",
+                               native_message = %self.name, hwnd = ?self.window,
+                               thread = GetCurrentThreadId(),
                                result, handback_attempted,
                                foreground = ?GetForegroundWindow(), focus = ?GetFocus(),
                                "QA overlay activation trace");
@@ -341,6 +352,71 @@ pub fn install(_window: &tauri::WebviewWindow) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qa_focus_parameters_use_wparam_without_activation_state() {
+        assert_eq!(
+            qa_activation_parameters(WM_ACTIVATE, 0x10002, 0x3456),
+            (0x3456, Some(2))
+        );
+        for message in [WM_SETFOCUS, WM_KILLFOCUS] {
+            assert_eq!(
+                qa_activation_parameters(message, 0x1234, 0x5678),
+                (0x1234, None)
+            );
+            assert_eq!(qa_activation_parameters(message, 0, 0x5678), (0, None));
+        }
+    }
+
+    #[test]
+    fn qa_trace_formatter_uses_explicit_parseable_fields() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for (id, message) in [(1, WM_ACTIVATE), (2, WM_SETFOCUS)] {
+                let name = qa_activation_message(message).unwrap();
+                let (_, activation_state) = qa_activation_parameters(message, 1, 0x15);
+                tracing::info!(target: "murmur::qa_overlay_activation",
+                    id, parent = 0, phase = %"entry", native_message = %name,
+                    thread = 7, hwnd = %"0x12", peer = %"0x15", activation_state,
+                    foreground = %"0x13", focus = %"0x14", cap_reached = false,
+                    "QA overlay activation trace");
+                tracing::info!(target: "murmur::qa_overlay_activation",
+                    id, parent = 0, phase = %"exit", native_message = %name,
+                    thread = 7, hwnd = %"0x12", result = 0, handback_attempted = false,
+                    foreground = %"0x13", focus = %"0x14", "QA overlay activation trace");
+            }
+        });
+        let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("phase=entry native_message=WM_ACTIVATE"));
+        assert!(output.contains("activation_state=1"));
+        assert!(
+            !output
+                .lines()
+                .find(|line| line.contains("native_message=WM_SETFOCUS")
+                    && line.contains("phase=entry"))
+                .unwrap()
+                .contains("activation_state=")
+        );
+        println!("TRACE_FORMATTER_FIXTURE_START\n{output}TRACE_FORMATTER_FIXTURE_END");
+    }
 
     #[test]
     fn handled_activation_never_runs_default_focus_processing() {

@@ -26,16 +26,31 @@ later zero-entry gesture as absence. O8 stores per-gesture trace lines and an
 armed/capped/activation-entry summary without changing the movement oracle.
 
 On a new exact-SHA build, run guarded `--only O8 --repeat 1` once. If a failed
-gesture has an armed, uncapped trace but no `WM_ACTIVATE` entry, activation
+gesture has an armed, uncapped, valid paired focus trace but no `WM_ACTIVATE` entry, activation
 hand-back is falsified as its explanation at this subclass boundary. Stop this
 branch rather than widening instrumentation or guessing a product repair.
 An entry and its nested focus/hand-back result can instead be reviewed as
 the one planned discriminator; it cannot by itself prove a renderer-side cause.
 This local change has no native acceptance result yet.
 
+Review found three diagnostic defects, corrected before native dispatch: the
+reserved tracing field `message` is now `native_message` with display formatting;
+focus peers come from `wParam` while activation peers come from `lParam`, and
+activation state is omitted for focus messages. O8 validates exact fields,
+unique IDs, thread/parent nesting, hand-back correlation and matched exits.
+Empty, malformed, truncated, unknown-phase or unmatched captures are inconclusive,
+even when an arm marker exists. A cap reached before the gesture also prevents
+absence inference. This stricter interpretation does not guarantee trace delivery.
+
+The actual installed Rust formatter output was fed through the Python parser:
+activation was counted and prohibited absence; complete focus-only records were
+accepted. All 13 focused Rust tests and 30 O8 tests passed locally. Native message
+delivery and the original drag failure remain unresolved.
+
 Ordinary O2 and its assertions remain unchanged. Native acceptance still needs
 ordinary O2, the full 48 checks, manual DPI/Narrator/visual parity, signature,
 and GPU gates. Windows run 43985322971 and Linux run 43985323276 were
 intentionally cancelled; final CI must be restored before merge. Release
-signing remains owner-approved and cannot substitute an unsigned Authenticode
-artifact for the primary key. Edison FREE currently has no native availability.
+signing requires owner environment approval. The user authorized an unsigned
+Authenticode installer; retrieving the primary key remains prohibited.
+Edison is free for user activity; coordinate availability before a native run.
