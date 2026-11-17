@@ -539,6 +539,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn('environment:', gpu)
         self.assertNotIn('secrets.', gpu)
         self.assertIn('test-linux-inference.py --artifacts "$assets" --components "$assets"', gpu)
+        # gh downloads are 0644 and the test executes the AppImage.
+        self.assertLess(gpu.index('chmod +x "$assets/Murmur_${version}_amd64.AppImage"'),
+                        gpu.index('test-linux-inference.py'))
         self.assertIn('gh release upload "$GITHUB_REF_NAME" "$assets/GPU-VALIDATION.json"', gpu)
         windows_gpu = job('windows-gpu')
         self.assertIn('needs: [windows, linux, linux-gpu]', windows_gpu)

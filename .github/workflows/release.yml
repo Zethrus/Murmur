@@ -281,6 +281,8 @@ jobs:
             --pattern murmur-linux-x86_64.tar.gz \
             --pattern "murmur-engine-linux-x86_64-${version}.zip" --pattern "murmur-cuda-linux-x86_64-${version}.zip" \
             --pattern components-manifest.json --pattern components-manifest.json.sig --pattern murmur-release.asc
+          # gh saves assets as 0644; the test runs the AppImage (--appimage-extract). Mode is not hashed.
+          chmod +x "$assets/Murmur_${version}_amd64.AppImage"
           # A runner-staged model folder is used as is; otherwise the pinned files are fetched once
           # into the runner's tool cache. The app's verifier checks them against the signed manifest.
           models="${MURMUR_GPU_TEST_MODELS:-}"
