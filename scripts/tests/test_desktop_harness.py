@@ -2842,6 +2842,103 @@ class WebView2ReproTests(unittest.TestCase):
         self.assertTrue(row["release_clean"])
         self.assertFalse(row["moved_while_held"])  # mocked rect never moved
 
+    def test_run_mode_end_to_end_on_a_fake_desktop(self):
+        """Every real harness call in one O9 mode, with only Win32/UIA/process boundaries faked."""
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / repro.EXE).write_bytes(b"MZ")
+            log = work / "repro-on.jsonl"
+            state = {"rect": (900, 900, 1020, 980), "fg": (52, 99), "focus": 61, "text": "", "field": ""}
+            log.write_text("".join(json.dumps(row) + "\n" for row in (
+                {"event": "host_input", "window": "overlay", "requested": "on", "result": "enabled"},
+                {"event": "hosted", "window": "settings", "root": "0x21", "host": "0x22"},
+                {"event": "hosted", "window": "overlay", "root": "0x2c", "host": "0x2d"},
+                {"event": "page", "window": "settings", "message": "ready"},
+                {"event": "page", "window": "overlay", "message": "ready"},
+                {"event": "overlay_shown", "root": "0x2c"})))
+            restorer = SimpleNamespace(push=mock.Mock())
+            ctx = SimpleNamespace(build=SimpleNamespace(root=work), work=work, restorer=restorer,
+                                  guard=SimpleNamespace(check=mock.Mock()), sleep=lambda _s: None)
+            process = SimpleNamespace(pid=71, poll=lambda: None, wait=mock.Mock())
+            pad = SimpleNamespace(hwnd=52, owner_pid=99, owns_keyboard_focus=lambda: True,
+                                  text=lambda: state["text"])
+            pad.focus = lambda **_k: state.update(fg=(52, 99), focus=61)
+            def context():
+                return {"hwnd": state["fg"][0], "process_id": state["fg"][1], "input_desktop": "Default",
+                        "gui_status": "ok", "focus_hwnd": state["focus"]}
+            def drag(_start, end, **kwargs):
+                for step in (1, 12, 24):
+                    kwargs["sample"]("moving", step)
+                state["rect"] = (end[0] - 60, end[1] - 40, end[0] + 60, end[1] + 40)
+            def typed(token):
+                if state["fg"] == (52, 99):
+                    state["text"] += token
+                else:
+                    state["field"] += token
+            def activate(hwnd, **_k):
+                state.update(fg=(hwnd, 71), focus=0x480)
+                return True
+            ancestors = {0x2e: 0x2c, 0x23: 0x21}
+            user32 = SimpleNamespace(
+                GetAncestor=lambda h, _k: ancestors.get(h, h),
+                WindowFromPoint=lambda point: 0x2e if point.x > 600 else 0x23,
+                GetAsyncKeyState=lambda _k: 0,
+                PostMessageW=lambda hwnd, message, *_a: state.update(rect=(900, 900, 1020, 980))
+                if message == repro.WM_REPRO_RESET else None)
+            patches = [
+                mock.patch.object(win32, "user32", user32),
+                mock.patch.object(win32, "POINT", lambda x, y: SimpleNamespace(x=x, y=y)),
+                mock.patch.object(win32, "pids", return_value=[]),
+                mock.patch.object(win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()),
+                mock.patch.object(win32, "is_window", return_value=True),
+                mock.patch.object(win32, "window_pid", side_effect=lambda h: 71),
+                mock.patch.object(win32, "window_thread", return_value=7),
+                mock.patch.object(win32, "window_text", return_value="WebView2 Repro Settings"),
+                mock.patch.object(win32, "window_rect", side_effect=lambda h: state["rect"] if h == 0x2c
+                                  else (0, 0, 600, 400)),
+                mock.patch.object(win32, "work_area_at", return_value=(0, 0, 1920, 1040)),
+                mock.patch.object(win32, "foreground_context", side_effect=context),
+                mock.patch.object(win32, "activate", side_effect=activate),
+                mock.patch.object(win32, "drag", side_effect=drag),
+                mock.patch.object(win32, "mouse_up"), mock.patch.object(win32, "mouse_down"),
+                mock.patch.object(win32, "mouse_move"), mock.patch.object(win32, "click"),
+                mock.patch.object(win32, "close_window"),
+                mock.patch.object(win32, "type_unicode", side_effect=typed),
+                mock.patch.object(uia, "from_handle", return_value="settings"),
+                mock.patch.object(uia, "find", return_value="field"),
+                mock.patch.object(uia, "rect", return_value=(100, 100, 300, 130)),
+                mock.patch.object(uia, "focused", return_value="field"),
+                mock.patch.object(uia, "same", side_effect=lambda a, b: a == b),
+                mock.patch.object(uia, "value", side_effect=lambda _f: state["field"]),
+                mock.patch.object(topology, "snapshot", return_value={
+                    "complete": True, "errors": [], "descendants": [],
+                    "ancestors": [{"class": c, "hwnd": i, "pid": 200 if i < 2 else 71, "tid": 9 if i < 2 else 7,
+                                   "exstyle": 0}
+                                  for i, c in enumerate(repro.RENDERER_CHAIN + ["Window Class"])]}),
+                mock.patch.object(repro.subprocess, "Popen", return_value=process),
+            ]
+            for patch in patches:
+                self.enterContext(patch)
+            record = {"modes": []}
+            result = repro.run_mode(ctx, "on", pad, record)
+        self.assertTrue(result["topology_matches_murmur"], result["topology"])
+        self.assertEqual(len(result["cases"]), 2 + len(repro.SETTINGS_CASES))
+        self.assertEqual([row["case"] for row in result["cases"]][0], "notepad drag")
+        summary = repro.summarize(result)
+        self.assertEqual(summary["problems"], [], summary)
+        self.assertEqual(state["text"], "o9n0o9n9")
+        self.assertTrue(state["field"].startswith("o9n1o9n2"))
+        restorer.push.assert_called_once()
+
+    def test_reproducer_uses_the_verified_build_root_and_plain_paths(self):
+        self.assertEqual(repro.plain_path("\\\\?\\C:\\Temp\\x.exe"), "C:\\Temp\\x.exe")
+        self.assertEqual(repro.plain_path("\\\\?\\UNC\\srv\\share\\x"), "\\\\srv\\share\\x")
+        self.assertEqual(repro.plain_path("C:\\Temp"), "C:\\Temp")
+        with tempfile.TemporaryDirectory() as directory:
+            build = SimpleNamespace(root=Path(directory))  # murmur.Build is not path-like
+            ctx = SimpleNamespace(build=build, work=Path(directory))
+            self.assertEqual(repro.Reproducer(ctx, "off").exe, Path(directory) / repro.EXE)
+
     def test_reproducer_refuses_missing_exe_and_reports_fatal_start(self):
         with tempfile.TemporaryDirectory() as directory:
             ctx = SimpleNamespace(build=directory, work=Path(directory), guard=SimpleNamespace(check=mock.Mock()),

@@ -24,12 +24,21 @@ MODES = ("off", "on")
 RENDERER_CHAIN = ["Chrome_RenderWidgetHostHWND", "Chrome_WidgetWin_1", "Chrome_WidgetWin_0", "WRY_WEBVIEW"]
 
 
+def plain_path(path):
+    """Drop the verbatim prefix win32.long_path adds: WebView2 and command lines expect plain paths."""
+    text = str(path)
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    return text[4:] if text.startswith("\\\\?\\") else text
+
+
 class Reproducer:
     """One reproducer process: launch, ownership, event log, stop."""
 
     def __init__(self, ctx, mode):
         self.ctx, self.mode = ctx, mode
-        self.exe = Path(ctx.build) / EXE
+        # Context.build is murmur.Build (its .root is the verified hand-off folder).
+        self.exe = Path(getattr(ctx.build, "root", ctx.build)) / EXE
         self.log_path = ctx.work / f"repro-{mode}.jsonl"
         self.data = ctx.work / f"repro-{mode}-data"
         self.process = None
@@ -61,8 +70,9 @@ class Reproducer:
         if win32.pids(EXE):
             raise Fail("Another WebView2 reproducer is already running")
         self.data.mkdir(parents=True, exist_ok=True)
-        self.process = subprocess.Popen([str(self.exe), "--host-input", self.mode, "--log", str(self.log_path),
-                                         "--data", str(self.data)], cwd=str(self.ctx.work))
+        self.process = subprocess.Popen([plain_path(self.exe), "--host-input", self.mode,
+                                         "--log", plain_path(self.log_path), "--data", plain_path(self.data)],
+                                        cwd=plain_path(self.ctx.work))
         self.ctx.restorer.push(f"stop the WebView2 reproducer ({self.mode})", self.stop)
 
         def ready():
