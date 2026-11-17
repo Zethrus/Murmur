@@ -1,0 +1,27 @@
+[package]
+name = "webview2-input-repro"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Windows-only diagnostic: Murmur overlay WebView2 hosting with and without host input processing"
+license = "GPL-3.0-only"
+
+# Standalone: not part of the Murmur app, never shipped. Versions match src-tauri/Cargo.lock.
+[workspace]
+
+[target.'cfg(windows)'.dependencies]
+tao = "=0.37.2"
+webview2-com = "=0.39.1"
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+strip = true
