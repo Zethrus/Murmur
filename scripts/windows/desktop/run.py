@@ -30,7 +30,8 @@ DEFAULT_HOTKEY = "Ctrl+Alt+Shift+F9"
 IDLE_SECONDS = 60
 BANNER_SECONDS = 10
 # Checks that drive Notepad: Windows 11 Notepad restores its tabs, so it must not be running.
-NOTEPAD_CHECKS = {"O3", "O4", "O8", "H1", "H8", "I1", "I4", "I5", "I6"}
+NOTEPAD_CHECKS = {"O3", "O4", "O8", "O9", "H1", "H8", "I1", "I4", "I5", "I6"}
+REPRO_EXE = "webview2-input-repro.exe"  # O9 only; scripts/windows/desktop/repro.py
 
 
 def base_config(hotkey):
@@ -71,6 +72,11 @@ def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
     problems.extend(preflight_desktop(win32, idle_needed))
     if NOTEPAD_CHECKS & {c.id for c in selected} and win32.pids("Notepad.exe"):
         problems.append("Notepad is running; close it (the Notepad checks open and close their own windows)")
+    if any(c.id == "O9" for c in selected):
+        if not (Path(build_dir) / REPRO_EXE).is_file():
+            problems.append(f"{REPRO_EXE} is not in the verified build (manual windows-build.yml runs hand it over)")
+        if win32.pids(REPRO_EXE):
+            problems.append(f"{REPRO_EXE} is already running; close it")
     return problems
 
 
@@ -318,6 +324,8 @@ def main(argv=None):
         parser.error(str(error))
     if any(check.id == "O8" for check in selected) and (len(selected) != 1 or args.repeat != 1):
         parser.error("O8 requires --only O8 and --repeat 1 (four observations maximum)")
+    if any(check.id == "O9" for check in selected) and (len(selected) != 1 or args.repeat != 1):
+        parser.error("O9 requires --only O9 and --repeat 1 (one baseline and one candidate)")
 
     import win32
     win32.require_windows()

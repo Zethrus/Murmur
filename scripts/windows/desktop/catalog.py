@@ -35,6 +35,8 @@ CHECKS = (
     Check("O6", "overlay", "Overlay scale minimum and maximum", "o6_scale"),
     Check("O7", "overlay", "B7 evidence: no-activate subclass logged", "o7_subclass_log"),
     Check("O8", "overlay", "Diagnostic: idle drag across foreground owners", "o8_foreground_drag", diagnostic=True),
+    Check("O9", "overlay", "Diagnostic: WebView2 host-input reproducer, baseline and candidate",
+          "o9_webview2_repro", diagnostic=True),
     Check("H1", "hotkeys", "Hold hotkey into Notepad, key released first", "h1_hold"),
     Check("H2", "hotkeys", "Release order variants", "h2_release_order"),
     Check("H3", "hotkeys", "B8: Shift held after the key", "h3_shift_held"),

@@ -699,6 +699,40 @@ def o8_foreground_drag(ctx):
         artifact.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
 
+def o9_webview2_repro(ctx):
+    """Opt-in: fixed baseline (off) then candidate (on) of WebView2 host input processing."""
+    import repro
+    artifact = ctx.artifact("webview2-repro.json")
+    record = {"status": "running", "interpretation": "Diagnostic reproducer only; it cannot clear O2",
+              "modes": [], "summary": {}}
+    try:
+        pad = ctx.notepad("repro")
+        pad.focus(guard_check=ctx.guard.check)
+        for mode in repro.MODES:
+            ctx.guard.check()
+            result = repro.run_mode(ctx, mode, pad, record)
+            record["summary"][mode] = repro.summarize(result)
+        baseline, candidate = record["summary"]["off"], record["summary"]["on"]
+        if not baseline["reproduces_murmur"]:
+            record["status"] = "inconclusive"
+            raise Fail("Baseline did not reproduce Murmur (topology, Notepad pass and Settings failure); "
+                       "the candidate result cannot be interpreted")
+        if candidate["problems"]:
+            record["status"] = "candidate rejected"
+            raise Fail("Candidate rejected: " + "; ".join(candidate["problems"][:6]))
+        record["status"] = "candidate passed reproducer"
+        ctx.note("Host input processing passed the reproducer; this justifies a reviewed Murmur trial, "
+                 "not O2 acceptance")
+    except BaseException as error:
+        if record["status"] == "running":
+            from guard import UserInput
+            record["status"] = "aborted" if isinstance(error, UserInput) else "fail"
+        record["stop_reason"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        artifact.write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
+
+
 def _notepad_with_word(ctx):
     pad = ctx.notepad()
     pad.focus()

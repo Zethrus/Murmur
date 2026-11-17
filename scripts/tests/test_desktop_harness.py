@@ -36,6 +36,7 @@ import idle_diagnostic  # noqa: E402
 import manual  # noqa: E402
 import murmur  # noqa: E402
 import report  # noqa: E402
+import repro  # noqa: E402
 import restore  # noqa: E402
 import run  # noqa: E402
 import tomlconfig  # noqa: E402
@@ -2735,6 +2736,155 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(api.GetWindow.restype, wintypes.HWND)
 
 
+class WebView2ReproTests(unittest.TestCase):
+    def row(self, case, kind, **extra):
+        base = {"case": case, "kind": kind, "moved_while_held": True, "release_clean": True,
+                "focus_changes": [], "foreground_kept": True, "typing": {"landed": True},
+                "after": (1, 1, 2, 2), "settled": (1, 1, 2, 2)}
+        base.update(extra)
+        return base
+
+    def result(self, settings_moves=True, **changes):
+        cases = [self.row("notepad drag", "drag")]
+        cases += [self.row(label, kind, moved_while_held=(settings_moves if kind == "drag" else False))
+                  for label, kind in repro.SETTINGS_CASES]
+        cases.append(self.row("notepad drag after sequence", "drag"))
+        for case in cases:
+            case.update(changes.get(case["case"], {}))
+        return {"cases": cases, "topology_matches_murmur": True}
+
+    def test_baseline_must_reproduce_murmur_before_a_candidate_means_anything(self):
+        baseline = repro.summarize(self.result(settings_moves=False))
+        self.assertTrue(baseline["reproduces_murmur"])
+        self.assertFalse(repro.summarize(self.result(settings_moves=True))["reproduces_murmur"])
+        unlike = self.result(settings_moves=False)
+        unlike["topology_matches_murmur"] = False
+        self.assertFalse(repro.summarize(unlike)["reproduces_murmur"])
+
+    def test_candidate_needs_movement_clean_release_focus_and_exact_typing(self):
+        self.assertEqual(repro.summarize(self.result())["problems"], [])
+        for change, expected in (
+                ({"settings repeat 2": {"moved_while_held": False}}, "settings repeat 2: no held movement"),
+                ({"settings hide during gesture": {"release_clean": False}}, "release not clean"),
+                ({"settings hold without moving": {"settled": (5, 5, 6, 6)}}, "kept moving after release"),
+                ({"notepad drag": {"focus_changes": [{"stage": "moving"}]}}, "focus or foreground changed"),
+                ({"settings drag": {"typing": {"landed": False}}}, "typing after release")):
+            with self.subTest(expected=expected):
+                problems = repro.summarize(self.result(**change))["problems"]
+                self.assertTrue(any(expected in problem for problem in problems), problems)
+
+    def test_topology_must_match_murmurs_renderer_chain(self):
+        nodes = [{"class": name} for name in repro.RENDERER_CHAIN + ["Window Class"]]
+        self.assertTrue(repro.topology_matches({"complete": True, "ancestors": nodes}))
+        self.assertFalse(repro.topology_matches({"complete": False, "ancestors": nodes}))
+        self.assertFalse(repro.topology_matches({"complete": True, "ancestors": nodes[1:]}))
+
+    def _gesture_context(self, owned=True):
+        ctx = SimpleNamespace(guard=SimpleNamespace(check=mock.Mock()), sleep=lambda _s: None)
+        process = SimpleNamespace(pid=71, poll=lambda: None)
+        proc = repro.Reproducer.__new__(repro.Reproducer)
+        proc.mode, proc.process, proc.overlay, proc.settings = "on", process, 44, 33
+        proc.events = lambda: []
+        context = {"hwnd": 33, "process_id": 71, "input_desktop": "Default", "gui_status": "ok", "focus_hwnd": 5}
+        self.enterContext(mock.patch.object(win32, "foreground_context", return_value=context))
+        self.enterContext(mock.patch.object(win32, "is_window", return_value=owned))
+        self.enterContext(mock.patch.object(win32, "window_pid", return_value=71))
+        self.enterContext(mock.patch.object(win32, "window_rect", return_value=(900, 900, 1020, 980)))
+        self.enterContext(mock.patch.object(win32, "work_area_at", return_value=(0, 0, 1920, 1040)))
+        self.posted = []
+        self.enterContext(mock.patch.object(win32, "user32", SimpleNamespace(
+            GetAncestor=lambda h, _k: {45: 44}.get(h, h), WindowFromPoint=lambda _p: 45,
+            GetAsyncKeyState=lambda _k: 0, PostMessageW=lambda *a: self.posted.append(a))))
+        return ctx, proc
+
+    def test_gesture_releases_the_button_even_when_the_guard_trips_mid_drag(self):
+        ctx, proc = self._gesture_context()
+        def drag(_start, _end, **kwargs):
+            ctx.guard.check.side_effect = guard.UserInput("owner moved the mouse")
+            kwargs["sample"]("moving", 1)
+        with mock.patch.object(win32, "drag", side_effect=drag), mock.patch.object(win32, "mouse_up") as up:
+            with self.assertRaises(guard.UserInput):
+                repro.gesture(ctx, proc, "settings drag", "drag", (33, 71))
+        up.assert_called_once()
+        self.assertEqual(self.posted[0][1], repro.WM_REPRO_RESET)  # same start position first
+
+    def test_gesture_sends_no_input_when_ownership_or_foreground_is_wrong(self):
+        for label, owned, expected in (("lost window", False, (33, 71)), ("foreign foreground", True, (52, 99))):
+            with self.subTest(label=label):
+                ctx, proc = self._gesture_context(owned=owned)
+                with mock.patch.object(win32, "drag") as drag, mock.patch.object(win32, "mouse_up") as up, \
+                     mock.patch.object(win32, "mouse_down") as down:
+                    with self.assertRaises(Fail):
+                        repro.gesture(ctx, proc, "settings drag", "drag", expected)
+                drag.assert_not_called()
+                down.assert_not_called()
+                up.assert_not_called()
+
+    def test_hide_case_posts_hide_mid_gesture_and_records_clean_release(self):
+        ctx, proc = self._gesture_context()
+        def drag(_start, _end, **kwargs):
+            for step in (1, 12, 24):
+                kwargs["sample"]("moving", step)
+        with mock.patch.object(win32, "drag", side_effect=drag), mock.patch.object(win32, "mouse_up"):
+            row = repro.gesture(ctx, proc, "settings hide during gesture", "hide", (33, 71))
+        self.assertEqual([message[1] for message in self.posted], [repro.WM_REPRO_RESET, repro.WM_REPRO_HIDE])
+        self.assertTrue(row["release_clean"])
+        self.assertFalse(row["moved_while_held"])  # mocked rect never moved
+
+    def test_reproducer_refuses_missing_exe_and_reports_fatal_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = SimpleNamespace(build=directory, work=Path(directory), guard=SimpleNamespace(check=mock.Mock()),
+                                  restorer=SimpleNamespace(push=mock.Mock()), sleep=lambda _s: None)
+            with self.assertRaisesRegex(Fail, "not in the verified build"):
+                repro.Reproducer(ctx, "off").start()
+            (Path(directory) / repro.EXE).write_bytes(b"MZ")
+            proc = repro.Reproducer(ctx, "on")
+            proc.log_path.write_text('{"event":"start"}\n{"event":"fatal","error":"overlay webview: E_UNEXPECTED"}\n')
+            with mock.patch.object(win32, "pids", return_value=[]), \
+                 mock.patch.object(repro.subprocess, "Popen", return_value=SimpleNamespace(pid=7, poll=lambda: 1)), \
+                 mock.patch.object(win32, "wait_for", side_effect=lambda predicate, *_a, **_k: predicate()):
+                with self.assertRaisesRegex(Fail, "failed to start"):
+                    proc.start()
+            ctx.restorer.push.assert_called_once()  # cleanup registered before waiting
+
+    def test_o9_must_run_alone_once_and_needs_the_handed_over_exe(self):
+        self.assertNotIn("O9", [check.id for check in catalog.select()])
+        self.assertIn("O9", run.NOTEPAD_CHECKS)
+        for argv in (["--build", "b", "--out", "o", "--only", "O9,O8"],
+                     ["--build", "b", "--out", "o", "--only", "O9", "--repeat", "2"]):
+            with self.subTest(argv=argv), mock.patch("sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    run.main(argv)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "build.json").write_text("{}")
+            api = SimpleNamespace(input_desktop=lambda: "Default", pids=lambda _name: [], idle_seconds=lambda: 999)
+            problems = run.preflight(directory, catalog.select("O9"), api)
+            self.assertTrue(any(repro.EXE in problem for problem in problems), problems)
+            (Path(directory) / repro.EXE).write_bytes(b"MZ")
+            self.assertEqual(run.preflight(directory, catalog.select("O9"), api), [])
+
+    def test_o9_baseline_that_does_not_reproduce_is_inconclusive_not_a_candidate_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pad = SimpleNamespace(focus=mock.Mock())
+            ctx = SimpleNamespace(artifact=lambda suffix: Path(directory) / suffix, notepad=lambda _n: pad,
+                                  guard=SimpleNamespace(check=mock.Mock()), note=mock.Mock())
+            results = {"off": self.result(settings_moves=True), "on": self.result()}
+            def run_mode(_ctx, mode, _pad, record):
+                record["modes"].append({"mode": mode})
+                return results[mode]
+            with mock.patch.object(repro, "run_mode", side_effect=run_mode):
+                with self.assertRaisesRegex(Fail, "Baseline did not reproduce"):
+                    overlay_checks.o9_webview2_repro(ctx)
+            record = json.loads((Path(directory) / "webview2-repro.json").read_text())
+            self.assertEqual(record["status"], "inconclusive")
+            results["off"] = self.result(settings_moves=False)
+            with mock.patch.object(repro, "run_mode", side_effect=run_mode):
+                overlay_checks.o9_webview2_repro(ctx)
+            record = json.loads((Path(directory) / "webview2-repro.json").read_text())
+            self.assertEqual(record["status"], "candidate passed reproducer")
+            ctx.note.assert_called_once()
+
+
 class ReportTests(unittest.TestCase):
     def result(self, status, reason="", attempt=1, **extra):
         return report.Result("H1", status, reason, "Hold", "hotkeys", attempt=attempt, **extra)
@@ -3198,6 +3348,10 @@ class HandoffTests(unittest.TestCase):
         handoff.check_required(self.sums)
         with self.assertRaisesRegex(handoff.HandoffError, "Unexpected"):
             handoff.check_required(dict(self.sums, **{"evil.dll": "0" * 64}))
+        # O9's reproducer is optional, but never an unchecked wildcard.
+        handoff.check_required(dict(self.sums, **{"webview2-input-repro.exe": "0" * 64}))
+        with self.assertRaisesRegex(handoff.HandoffError, "Unexpected"):
+            handoff.check_required(dict(self.sums, **{"webview2-input-repro.dll": "0" * 64}))
         missing = dict(self.sums)
         del missing["murmur-release.asc"]
         with self.assertRaisesRegex(handoff.HandoffError, "murmur-release.asc"):

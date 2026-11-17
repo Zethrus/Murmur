@@ -437,6 +437,18 @@ jobs:
         shell: pwsh
         run: python scripts/ci-cache.py finish
 
+      # O9's diagnostic WebView2 reproducer (tools/webview2-input-repro): standalone, never
+      # released. A failure here must not block the product build or its hand-off.
+      - name: Build the O9 WebView2 input reproducer (self-hosted; manual runs; diagnostic only)
+        id: repro
+        if: runner.environment == 'self-hosted' && github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && steps.claim.outputs.build != 'false'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked --target x86_64-pc-windows-msvc --manifest-path tools/webview2-input-repro/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Reproducer build failed' }
+
       # The desktop runner (docs/ci-windows.md) cannot receive artifacts (billing lock), so the
       # build is handed over through a local folder on Edison. The desktop job re-checks every
       # file against SHA256SUMS and against the MURMUR-HANDOFF-SHA256 lines printed below in
@@ -473,6 +485,9 @@ jobs:
             '.cache/artifacts/components-windows/components-windows-inputs.json'
           )
           foreach ($File in $Files) { if (-not (Test-Path -LiteralPath $File)) { throw "Missing hand-off file $File" } }
+          # Optional (handoff.py OPTIONAL): only a reproducer this run just built successfully.
+          $Repro = 'tools/webview2-input-repro/target/x86_64-pc-windows-msvc/release/webview2-input-repro.exe'
+          if ('${{ steps.repro.outcome }}' -eq 'success' -and (Test-Path -LiteralPath $Repro)) { $Files += $Repro }
           # Folder ACLs are inherited from C:\murmur-ci-out (set when Edison was provisioned).
           $Dest = Join-Path $Root $Commit
           if (Test-Path -LiteralPath $Dest) { Remove-Retrying $Dest }
