@@ -89,6 +89,16 @@ def check_cuda(cuda):
     return manifest
 
 
+RELEASE_CERT = HERE.parent / 'src-tauri' / 'trust' / 'murmur-release.asc'
+
+
+def primary_fingerprint(path):
+    """Primary key fingerprint of an armored OpenPGP certificate."""
+    listing = subprocess.run(['gpg', '--batch', '--with-colons', '--show-keys', str(path)],
+                             check=True, capture_output=True, text=True).stdout
+    return next(line.split(':')[9] for line in listing.splitlines() if line.startswith('fpr:'))
+
+
 def check_components(app, components, work):
     """Install from the release zips exactly as a user would, then refuse tampered input."""
     env = linux_components.environment(work / 'home', components)
@@ -105,9 +115,16 @@ def check_components(app, components, work):
     assert linux_components.install(app, components, tampered, env, check=False) is None
     strange = dict(env, MURMUR_DEV_TRUST_ROOT=str(work / 'missing.asc'))
     assert linux_components.install(app, components, engine_zip, strange, check=False) is None
-    without_ack = {k: v for k, v in env.items() if k != 'MURMUR_DEV_TRUST_ROOT_ACK'}
-    assert linux_components.install(app, components, engine_zip, without_ack, check=False) is None, \
-        'a release binary must ignore a development trust root without the acknowledgement'
+    # Without the acknowledgement a release binary ignores the development trust root and keeps
+    # its built-in release root. A throwaway-signed build (pull requests) must then be refused;
+    # the tag build, signed with the real release key, must still install through the built-in root.
+    without_ack = {k: v for k, v in linux_components.environment(work / 'home-no-ack', components).items()
+                   if k != 'MURMUR_DEV_TRUST_ROOT_ACK'}
+    result = linux_components.install(app, components, engine_zip, without_ack, check=False)
+    if primary_fingerprint(components / linux_components.CERTIFICATE) == primary_fingerprint(RELEASE_CERT):
+        assert result == 'engine', 'a release binary must trust the release-signed manifest through its built-in root'
+    else:
+        assert result is None, 'a release binary must ignore a development trust root without the acknowledgement'
     return installed
 
 
