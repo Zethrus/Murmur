@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -491,7 +492,12 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_linux_release_requires_successful_windows_or_explicit_disable(self):
         release = (ROOT / '.github/workflows/release.yml').read_text()
-        for job in ('linux-build', 'linux'):
+        # The throwaway-key test build uploads nothing, so it runs alongside the Windows build;
+        # the signing job is the one that must wait for Windows.
+        test_build = release.split('  linux-build:\n', 1)[1].split('\n  linux:\n', 1)[0]
+        self.assertIn('    needs: prepare\n', test_build)
+        self.assertNotIn('contents: write', test_build)
+        for job in ('linux',):
             block = release.split('  ' + job + ':\n', 1)[1].split('    permissions:', 1)[0].split('    uses:', 1)[0]
             condition = block.split('    if: >-\n', 1)[1].strip()
             expression = condition.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
@@ -512,6 +518,41 @@ class WorkflowContractTests(unittest.TestCase):
                                     (enabled != 'true' and built == uploaded == 'skipped'))
                         self.assertEqual(eval(' '.join(evaluated.split()), {'__builtins__': {} }), expected,
                                          (job, enabled, built, uploaded))
+
+    def test_release_runs_gpu_work_on_edison_and_everything_else_hosted(self):
+        release = (ROOT / '.github/workflows/release.yml').read_text()
+
+        def job(name):
+            return release.split(f'\n  {name}:\n', 1)[1].split('\n  # ', 1)[0].split('\n  validate:\n', 1)[0]
+
+        for name in ('prepare', 'linux', 'flipper', 'validate'):
+            self.assertIn('    runs-on: ubuntu-24.04\n', release.split(f'\n  {name}:\n', 1)[1], name)
+        self.assertIn("runner: '[\"ubuntu-24.04\"]'", job('linux-build'))
+        linux = job('linux')
+        self.assertIn('environment: release-signing', linux)
+        self.assertNotIn('test-linux-inference.py', linux)
+        self.assertNotIn('GPU-VALIDATION.json', linux)
+        gpu = job('linux-gpu')
+        self.assertIn('runs-on: [self-hosted, Linux, X64, gpu, nvidia]', gpu)
+        # Skipped Windows ancestors (ENABLE_WINDOWS off) must not skip Linux GPU validation.
+        self.assertIn("    if: always() && needs.linux.result == 'success'\n", gpu)
+        self.assertNotIn('environment:', gpu)
+        self.assertNotIn('secrets.', gpu)
+        self.assertIn('test-linux-inference.py --artifacts "$assets" --components "$assets"', gpu)
+        # gh downloads are 0644 and the test executes the AppImage.
+        self.assertLess(gpu.index('chmod +x "$assets/Murmur_${version}_amd64.AppImage"'),
+                        gpu.index('test-linux-inference.py'))
+        self.assertIn('gh release upload "$GITHUB_REF_NAME" "$assets/GPU-VALIDATION.json"', gpu)
+        windows_gpu = job('windows-gpu')
+        self.assertIn('needs: [windows, linux, linux-gpu]', windows_gpu)
+        self.assertIn("needs['linux-gpu'].result == 'success'", windows_gpu)
+        validate = release.split('\n  validate:\n', 1)[1]
+        self.assertIn("needs['linux-gpu'].result == 'success'", validate)
+        # Every pinned GitHub CLI download is checked against its published SHA-256.
+        for download in re.findall(r'releases/download/v[0-9.]+/gh_[0-9.]+_(\w+)', release):
+            self.assertIn(download, ('windows_amd64', 'linux_amd64'))
+        self.assertEqual(release.count('Get-FileHash $Zip -Algorithm SHA256'), 2)
+        self.assertEqual(release.count('| sha256sum -c -'), 1)
 
     def test_reusable_builds_are_read_only_and_tag_writes_are_separate(self):
         workflows = ROOT / ".github" / "workflows"

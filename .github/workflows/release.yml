@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   prepare:
-    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,6 +30,9 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
               --title "Murmur $GITHUB_REF_NAME" --notes-file docs/release-notes.md
           fi
+  # Runner split: everything that needs no GPU (draft, Linux test build, signed Linux build,
+  # Flipper, final validation) runs on GitHub-hosted Ubuntu 24.04, the glibc 2.39 baseline.
+  # Edison keeps the Windows build and both GPU validations of the final signed assets.
   # Windows (vars.ENABLE_WINDOWS == 'true', Edison runner): builds the installer, portable zip
   # and component zips and attaches them to the draft; its component inputs go to the Linux job,
   # which signs one manifest for both platforms.
@@ -52,6 +55,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Ensure the GitHub CLI (pinned download when the runner has none)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Get-Command gh -ErrorAction SilentlyContinue) { gh --version | Select-Object -First 1; exit 0 }
+          $Dir = Join-Path $env:RUNNER_TEMP 'gh-2.103.3'
+          $Zip = "$Dir.zip"
+          Invoke-WebRequest -UseBasicParsing -OutFile $Zip `
+            -Uri 'https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_windows_amd64.zip'
+          if ((Get-FileHash $Zip -Algorithm SHA256).Hash -ne '98d0cfa794721665d7973dd728c78aff7bd836d58f10f6d7a03568eccb0a22e0') { throw 'GitHub CLI download failed its SHA-256 check' }
+          if (Test-Path $Dir) { Remove-Item $Dir -Recurse -Force }
+          Expand-Archive $Zip -DestinationPath $Dir
+          Join-Path $Dir 'bin' | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Verify and attach staged Windows assets to the draft
         shell: pwsh
         env:
@@ -74,13 +90,13 @@ jobs:
             (Join-Path $Stage "murmur-engine-windows-x86_64-${Version}.zip") `
             (Join-Path $Stage "murmur-cuda-windows-x86_64-${Version}.zip") --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+  # The throwaway-key test build needs no Windows output, so it runs on a hosted runner while
+  # Edison builds Windows.
   linux-build:
-    needs: [prepare, windows-build, windows]
-    if: >-
-      always() && needs.prepare.result == 'success' &&
-      ((needs['windows-build'].result == 'success' && needs.windows.result == 'success') ||
-       (vars.ENABLE_WINDOWS != 'true' && needs['windows-build'].result == 'skipped' && needs.windows.result == 'skipped'))
+    needs: prepare
     uses: ./.github/workflows/linux-build.yml
+    with:
+      runner: '["ubuntu-24.04"]'
   linux:
     needs: [linux-build, windows-build, windows]
     if: >-
@@ -92,10 +108,12 @@ jobs:
       contents: write
       actions: read
     environment: release-signing
-    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 120
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
     env:
       APPIMAGE_EXTRACT_AND_RUN: '1'
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+      CARGO_BUILD_JOBS: '4'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,6 +121,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Free hosted runner disk
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libayatana-appindicator3-dev librsvg2-dev libasound2-dev \
+            build-essential cmake clang libclang-dev llvm-dev pkg-config patchelf \
+            libxkbcommon-dev libx11-dev libgtk-3-dev librsvg2-bin file \
+            xdotool x11-utils squashfs-tools fonts-dejavu-core xvfb xauth dbus
       - name: Prepare isolated build caches
         run: python3 scripts/ci-cache.py prepare
       - name: Record starting resources and cache sizes
@@ -146,15 +177,6 @@ jobs:
           test -n "$MURMUR_SIGNING_SUBKEY" || { echo 'MURMUR_SIGNING_SUBKEY is not set in the release-signing environment' >&2; exit 1; }
           scripts/build-linux.sh
           python3 scripts/check-release.py signature .cache/artifacts/components "${{ vars.MURMUR_RELEASE_TRUST_FINGERPRINT }}"
-      - name: Validate final Linux assets on trusted GPU hardware
-        env:
-          MURMUR_GPU_TEST_MODELS: ${{ vars.MURMUR_GPU_TEST_MODELS }}
-        run: |
-          set -euo pipefail
-          test -n "$MURMUR_GPU_TEST_MODELS" || { echo 'Set MURMUR_GPU_TEST_MODELS to an offline staged model directory on the trusted runner.' >&2; exit 1; }
-          command -v nvidia-smi >/dev/null || { echo 'Trusted NVIDIA GPU runner required for release.' >&2; exit 1; }
-          python3 scripts/test-linux-inference.py --artifacts .cache/artifacts/linux \
-            --components .cache/artifacts/components --models-dir "$MURMUR_GPU_TEST_MODELS"
       - name: Release guard - no throwaway-signed manifest in the shipped binary
         # build-linux.sh embeds the manifest it just signed. The binary must carry the release
         # subkey's signature (the committed certificate checked above), never a throwaway one.
@@ -170,7 +192,6 @@ jobs:
             .cache/artifacts/linux/*.AppImage \
             .cache/artifacts/linux/*.deb \
             .cache/artifacts/linux/murmur-linux-x86_64.tar.gz \
-            .cache/artifacts/linux/GPU-VALIDATION.json \
             .cache/artifacts/components/murmur-*-linux-x86_64-*.zip \
             .cache/artifacts/components/components-manifest.json \
             .cache/artifacts/components/components-manifest.json.sig \
@@ -183,7 +204,7 @@ jobs:
     permissions:
       contents: write
     timeout-minutes: 20
-    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -217,13 +238,68 @@ jobs:
           test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
           cp companion/flipper/dist/murmur_companion.fap "murmur-companion-${GITHUB_REF_NAME}.fap"
           gh release upload "$GITHUB_REF_NAME" "murmur-companion-${GITHUB_REF_NAME}.fap" --clobber
+  # Linux GPU validation of the FINAL signed assets on Edison's WSL runner, downloaded from the
+  # draft so the evidence is tied to exactly what users get.
+  linux-gpu:
+    needs: linux
+    # always(): with Windows disabled its skipped jobs would otherwise skip this one too.
+    if: always() && needs.linux.result == 'success'
+    runs-on: [self-hosted, Linux, X64, gpu, nvidia]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Ensure the GitHub CLI (pinned download when the runner has none)
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null; then gh --version | head -1; exit 0; fi
+          dir="$RUNNER_TEMP/gh-2.103.3"
+          rm -rf "$dir" && mkdir -p "$dir"
+          curl -fsSL -o "$dir.tar.gz" \
+            https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_amd64.tar.gz
+          echo '4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d  '"$dir.tar.gz" | sha256sum -c -
+          tar -xzf "$dir.tar.gz" -C "$dir" --strip-components=1
+          echo "$dir/bin" >> "$GITHUB_PATH"
+      - name: Validate the released Linux engine and cuBLAS add-on on the GPU
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MURMUR_GPU_TEST_MODELS: ${{ vars.MURMUR_GPU_TEST_MODELS }}
+        run: |
+          set -euo pipefail
+          command -v nvidia-smi >/dev/null || { echo 'Trusted NVIDIA GPU runner required for release.' >&2; exit 1; }
+          version="${GITHUB_REF_NAME#v}"
+          assets="$RUNNER_TEMP/linux-release"
+          rm -rf "$assets" && mkdir -p "$assets"
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+          gh release download "$GITHUB_REF_NAME" --dir "$assets" \
+            --pattern "Murmur_${version}_amd64.AppImage" --pattern "Murmur_${version}_amd64.deb" \
+            --pattern murmur-linux-x86_64.tar.gz \
+            --pattern "murmur-engine-linux-x86_64-${version}.zip" --pattern "murmur-cuda-linux-x86_64-${version}.zip" \
+            --pattern components-manifest.json --pattern components-manifest.json.sig --pattern murmur-release.asc
+          # gh saves assets as 0644; the test runs the AppImage (--appimage-extract). Mode is not hashed.
+          chmod +x "$assets/Murmur_${version}_amd64.AppImage"
+          # A runner-staged model folder is used as is; otherwise the pinned files are fetched once
+          # into the runner's tool cache. The app's verifier checks them against the signed manifest.
+          models="${MURMUR_GPU_TEST_MODELS:-}"
+          if [ -z "$models" ] || [ ! -d "$models/distil-small.en" ]; then
+            models="$RUNNER_TOOL_CACHE/murmur-test-models"
+            python3 scripts/stage-test-model.py --model distil-small.en --dest "$models"
+          fi
+          python3 scripts/test-linux-inference.py --artifacts "$assets" --components "$assets" --models-dir "$models"
+          gh release upload "$GITHUB_REF_NAME" "$assets/GPU-VALIDATION.json" --clobber
   # Windows GPU validation of the FINAL signed assets on Edison (NVIDIA): tied to the release by
   # hash. Until it has passed for a release, the Windows GPU option stays hidden in the app
   # (components::detect::WINDOWS_GPU_OFFERED = false).
   windows-gpu:
-    needs: [windows, linux]
+    # After linux-gpu: both use Edison's one GPU, and timing evidence must not overlap.
+    needs: [windows, linux, linux-gpu]
     if: >-
-      always() && needs.linux.result == 'success' &&
+      always() && needs.linux.result == 'success' && needs['linux-gpu'].result == 'success' &&
       needs.windows.outputs.windows_inputs != '' && vars.WINDOWS_GPU_TEST_MODELS != ''
     runs-on: [self-hosted, Windows, X64, gpu, nvidia]
     timeout-minutes: 60
@@ -235,6 +311,19 @@ jobs:
         with:
           python-version: '3.12'
           architecture: x64
+      - name: Ensure the GitHub CLI (pinned download when the runner has none)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Get-Command gh -ErrorAction SilentlyContinue) { gh --version | Select-Object -First 1; exit 0 }
+          $Dir = Join-Path $env:RUNNER_TEMP 'gh-2.103.3'
+          $Zip = "$Dir.zip"
+          Invoke-WebRequest -UseBasicParsing -OutFile $Zip `
+            -Uri 'https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_windows_amd64.zip'
+          if ((Get-FileHash $Zip -Algorithm SHA256).Hash -ne '98d0cfa794721665d7973dd728c78aff7bd836d58f10f6d7a03568eccb0a22e0') { throw 'GitHub CLI download failed its SHA-256 check' }
+          if (Test-Path $Dir) { Remove-Item $Dir -Recurse -Force }
+          Expand-Archive $Zip -DestinationPath $Dir
+          Join-Path $Dir 'bin' | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Validate the released Windows engine and cuBLAS add-on on the GPU
         shell: pwsh
         env:
@@ -257,13 +346,14 @@ jobs:
           gh release upload $env:GITHUB_REF_NAME (Join-Path $Assets 'GPU-VALIDATION-windows.json') --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Evidence upload failed' }
   validate:
-    needs: [linux, flipper, windows-build, windows, windows-gpu]
+    needs: [linux, linux-gpu, flipper, windows-build, windows, windows-gpu]
     if: >-
-      always() && needs.linux.result == 'success' && needs.flipper.result == 'success' &&
+      always() && needs.linux.result == 'success' && needs['linux-gpu'].result == 'success' &&
+      needs.flipper.result == 'success' &&
       ((needs['windows-build'].result == 'success' && needs.windows.result == 'success') ||
        (vars.ENABLE_WINDOWS != 'true' && needs['windows-build'].result == 'skipped' && needs.windows.result == 'skipped')) &&
       (needs.windows-gpu.result == 'success' || needs.windows-gpu.result == 'skipped')
-    runs-on: ${{ fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -271,6 +361,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Tools for the asset checks (unsquashfs, dpkg-deb, gpg)
+        run: |
+          command -v unsquashfs >/dev/null || { sudo apt-get update && sudo apt-get install -y squashfs-tools; }
+          command -v dpkg-deb >/dev/null && command -v gpg >/dev/null
       - name: Verify all assets and retain the draft for testing
         env:
           GH_TOKEN: ${{ github.token }}

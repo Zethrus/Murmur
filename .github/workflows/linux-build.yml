@@ -7,6 +7,11 @@ on:
   # storage on this account is small.
   pull_request:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'JSON runner labels, e.g. ["ubuntu-24.04"]; empty uses LINUX_RUNNER'
+        type: string
+        default: ''
   workflow_call:
     inputs:
       fallback_sha:
@@ -16,6 +21,11 @@ on:
         type: string
         default: ''
       fallback_attempt:
+        type: string
+        default: ''
+      # JSON runner labels from a caller (release.yml runs this on a hosted runner); empty keeps
+      # the usual LINUX_RUNNER / fallback choice.
+      runner:
         type: string
         default: ''
 
@@ -32,11 +42,13 @@ jobs:
       actions: read
     # Fork PRs must never execute on a self-hosted runner; keep them on hosted or skip.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || vars.LINUX_RUNNER == ''
-    runs-on: ${{ inputs.fallback_sha != '' && 'ubuntu-22.04' || fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 90
+    runs-on: ${{ inputs.runner != '' && fromJSON(inputs.runner) || (inputs.fallback_sha != '' && 'ubuntu-22.04' || fromJSON(vars.LINUX_RUNNER || '["ubuntu-22.04"]')) }}
+    # A cold hosted build (release tags) has no runner-local cache.
+    timeout-minutes: ${{ inputs.runner != '' && 180 || 90 }}
     env:
-      CMAKE_BUILD_PARALLEL_LEVEL: '2'
-      CARGO_BUILD_JOBS: '2'
+      # Hosted runners have 4 cores and 16 GB; Edison's WSL runner shares RAM with Windows jobs.
+      CMAKE_BUILD_PARALLEL_LEVEL: ${{ inputs.runner != '' && '4' || '2' }}
+      CARGO_BUILD_JOBS: ${{ inputs.runner != '' && '4' || '2' }}
       RUSTFLAGS: '-C target-cpu=x86-64'
       GGML_NATIVE: 'OFF'
       GGML_AVX512: 'OFF'
@@ -48,6 +60,11 @@ jobs:
       GGML_SSE42: 'ON'
       GGML_CPU_ALL_VARIANTS: 'OFF'
     steps:
+      - name: Free hosted runner disk
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

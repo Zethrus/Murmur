@@ -36,13 +36,24 @@ own verifier, startup with and without an engine, the offline Docker clean
 install, and the size budgets.
 
 On tags, and only when the release key is configured
-([signing.md](signing.md)), the `release` job runs in the protected
+([signing.md](signing.md)), the `linux` job runs in the protected
 `release-signing` environment: it rebuilds, signs the manifest with the release
-subkey, embeds it, repeats the tests, and requires a trusted compatible NVIDIA GPU
-and an offline staged `distil-small.en` model at `MURMUR_GPU_TEST_MODELS`. Real
-inference with the installed engine and GPU add-on produces `GPU-VALIDATION.json`
-tied to the final asset hashes. Missing hardware or model fails the tag job before
-upload. Without the release key nothing is uploaded.
+subkey, embeds it, repeats the tests and uploads the Linux assets to the draft.
+Without the release key nothing is uploaded. The `linux-gpu` job then downloads
+those final assets from the draft on Edison's WSL runner (labels `self-hosted,
+Linux, X64, gpu, nvidia`) and runs real inference with the installed engine and
+GPU add-on. That produces `GPU-VALIDATION.json`, tied to the final asset hashes;
+missing hardware fails the release. It uses the `distil-small.en` folder at
+`MURMUR_GPU_TEST_MODELS` when the runner has one, and otherwise fetches the
+pinned files once into the runner's tool cache (`scripts/stage-test-model.py`);
+the app's verifier checks them against the signed manifest either way.
+
+**Where jobs run.** Everything that needs no GPU runs on GitHub-hosted
+`ubuntu-24.04` (the glibc 2.39 baseline): the draft, the throwaway-key Linux test
+build, the signed Linux build, Flipper and the final validation. Edison runs the
+Windows build and upload and both GPU validations, one after the other. Release
+jobs that call `gh` on Edison download a pinned, SHA-256-checked GitHub CLI when
+the runner has none.
 
 The final job downloads every asset and runs `scripts/check-release.py`. It
 requires the portable archive, `.deb`, AppImage, version-matched `.fap`,
@@ -98,7 +109,8 @@ still a draft. A published release cannot be overwritten by the prepare job.
 
 ## Runner settings
 
-`LINUX_RUNNER` is a JSON array of runner labels. When unset, builds use
+`LINUX_RUNNER` is a JSON array of runner labels for pull-request and manual Linux
+builds; release tags ignore it (see "Where jobs run"). When unset, builds use
 `ubuntu-22.04`. The machine needs the native Linux build dependencies, Python,
 Node, Rust, GitHub CLI, and sufficient disk space. Linux engine builds use
 CPython 3.12 and the checked-in wheel hash lock; release validation uses Python
