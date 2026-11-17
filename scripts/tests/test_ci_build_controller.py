@@ -544,6 +544,9 @@ class WorkflowContractTests(unittest.TestCase):
                         gpu.index('test-linux-inference.py'))
         self.assertIn('gh release upload "$GITHUB_REF_NAME" "$assets/GPU-VALIDATION.json"', gpu)
         windows_gpu = job('windows-gpu')
+        # Edison's runner user is not an administrator: setup-python's MSI install fails there.
+        self.assertNotIn('actions/setup-python', windows_gpu)
+        self.assertIn('py -3.12', windows_gpu)
         self.assertIn('needs: [windows, linux, linux-gpu]', windows_gpu)
         self.assertIn("needs['linux-gpu'].result == 'success'", windows_gpu)
         validate = release.split('\n  validate:\n', 1)[1]
