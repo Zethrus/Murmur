@@ -70,10 +70,12 @@ is unchanged. The corrected Rust test still requires CI execution.
 
 Windows CI 45172206326 stopped when applying the recorded Wry patch in the verifier.
 A local Git reproduction showed that a reused CRLF checkout retains its old bytes
-when new attributes arrive. Windows CI now restores only the tracked vendor inputs
-from its checked-out commit before running verification. A regression covers that
-transition; checksum, patch application and byte comparison remain strict. Native
-confirmation of the Windows checkout correction remains pending.
+when new attributes arrive. Run 45172785209 confirmed CRLF worktree files despite LF
+index files and the new attributes, and showed that forced checkout alone was
+insufficient on that runner. Windows CI now removes the disposable vendor source
+copies before restoring them from its checked-out commit, logging line endings
+before and after. A regression covers that transition; checksum, patch application
+and byte comparison remain strict. Native confirmation remains pending.
 
 ## Remaining acceptance sequence
 

@@ -142,6 +142,7 @@ class VendorIntegrityTests(unittest.TestCase):
         # Adding attributes does not rewrite the existing files on disk.
         for name in paths:
             self.assertIn(b"\r\n", (checkout / name).read_bytes())
+            (checkout / name).unlink()
         git("-c", "core.autocrlf=false", "checkout", "--force", "HEAD", "--",
             "src-tauri/vendor/wry", "src-tauri/vendor/wry-host-input.patch")
         for name in paths:
