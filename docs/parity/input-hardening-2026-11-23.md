@@ -127,6 +127,30 @@ full suite, and complete the manual/release gates below. No blind retry loop.
 
 ## Remaining acceptance sequence
 
+### Attempt 3 at 78e60c3 and cleanup containment
+
+Run 45245783015 attempt 3 reached all seven selected checks: O3/O4 passed;
+H1/H8/I1/I4/I5 failed. All 229 guard probes succeeded. H8's direct control and
+fresh non-Alt trial saved exact text. The Alt trial submitted 45 correct Unicode
+pairs but showed 25 characters in an unexpected tab; saving correctly refused that
+tab. This distinguishes delivery paths without establishing the production cause.
+H1/I1 showed corruption in Formatted editors, while I4's focus evidence showed
+the File menu. Neither observation alone proves why delivery failed.
+
+Final cleanup closed I5/I4, then failed to save dirty I1. Six subsequent fixtures
+in that same window failed tab navigation. The next harness correction records
+read-only focus evidence on the first cleanup failure and leaves the other tabs
+in that window untouched. Independently owned windows may still be cleaned up;
+any guard failure stops all further cleanup input. Screenshots require a current
+owned document and matching live PID. No dialog dismissal, save retry, unknown-tab
+closure or production sender change is introduced.
+
+Four regressions cover shared-window containment, evidence-time guard loss, wrong
+document screenshot refusal and PID changes. They and the 512-script suite pass
+locally. This cleanup change has not run on Windows. The approved bounded
+direct/hotkey-without-keyboard-delivery/type/paste comparison is being prepared
+before any further production repair; all native acceptance gates remain open.
+
 | Gate | Required evidence | State |
 | --- | --- | --- |
 | Windows/Linux CI | Both checks on final head; vendor verification and existing Rust/build suites | Pending |

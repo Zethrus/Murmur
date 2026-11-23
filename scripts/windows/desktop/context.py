@@ -150,20 +150,65 @@ class Context:
 
     def close_completed_notepads(self):
         """Retire only run-owned tabs at run end; failed activation stays an error."""
+        from guard import UserInput
+
         errors = []
+        blocked_windows = {}
         # Preserve the old 64-tab allowance for restored tabs plus this run's fixtures.
         tab_search_limit = 64 + len(self._completed_notepads)
         for pad in reversed(self._completed_notepads):
+            identity = (pad.hwnd, pad.owner_pid)
+            label = f"close Notepad {pad.path.name}"
             try:
                 self.guard.check()
+                if pad.hwnd and identity in blocked_windows:
+                    errors.append((label, f"skipped: shared window cleanup already failed for "
+                                          f"{blocked_windows[identity]}"))
+                    continue
                 pad.close_owned(max_tabs=tab_search_limit, guard_check=self.guard.check)
-            except Exception as error:  # noqa: BLE001 - try every verified fixture
-                errors.append((f"close Notepad {pad.path.name}", f"{type(error).__name__}: {error}"))
-                from guard import UserInput
+            except Exception as error:  # noqa: BLE001 - preserve failures and isolate affected windows
+                errors.append((label, f"{type(error).__name__}: {error}"))
                 if isinstance(error, UserInput):
                     break  # a latched guard failure forbids further input
+                if identity[0]:
+                    blocked_windows[identity] = pad.path.name
+                try:
+                    self._capture_notepad_cleanup_failure(pad, error)
+                except Exception as evidence_error:  # noqa: BLE001 - evidence cannot erase the failure
+                    errors.append((f"evidence for {label}",
+                                   f"{type(evidence_error).__name__}: {evidence_error}"))
+                    if isinstance(evidence_error, UserInput):
+                        break
         # Keep identities for the after-cleanup snapshot; successful pads have hwnd=0.
         return errors
+
+    def _capture_notepad_cleanup_failure(self, pad, error):
+        """Read failure state without activating, navigating, saving or dismissing anything."""
+        evidence = {"document": pad.path.name, "hwnd": pad.hwnd, "recorded_pid": pad.owner_pid,
+                    "error": f"{type(error).__name__}: {error}"}
+        path = self.artifact(f"cleanup-{pad.path.stem}.json")
+
+        def owned_window():
+            return (bool(pad.hwnd and pad.owner_pid) and pad.win32.is_window(pad.hwnd) and
+                    pad.win32.window_pid(pad.hwnd) == pad.owner_pid and
+                    pad.owner_pid in pad.win32.pids("Notepad.exe"))
+
+        try:
+            self.guard.check()
+            evidence["window_owned"] = owned_window()
+            if evidence["window_owned"]:
+                evidence["focus"] = pad.focus_diagnostic()
+                self.guard.check()  # UIA discovery may block; it cannot authorize later actions.
+                evidence["active_document"] = pad.active_document()
+                self.guard.check()
+                if evidence["active_document"] and owned_window():
+                    self.screenshot(pad.hwnd, f"cleanup-{pad.path.stem}.png")
+                    self.guard.check()
+        except Exception as capture_error:
+            evidence["capture_error"] = f"{type(capture_error).__name__}: {capture_error}"
+            raise
+        finally:
+            path.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
 
     def notepad_ownership_snapshot(self):
         """Read-only evidence around teardown; never grants permission to close a tab."""

@@ -82,6 +82,29 @@ def _focus_phase(pad, stage):
             "f9_down": "f9" in win32.keys_down(("f9",))}
 
 
+def _drive_registered_hotkey(ctx, spec, name, sample, timestamp):
+    """H8/H9's real registered hold gesture; caller owns tracing and settled readback."""
+    modifiers, key = win32.parse_combo(spec)
+    ctx.observe_delivery("A")
+    sample("before modifiers")
+    win32.key_down(*modifiers)
+    sample("before F9 down")
+    win32.key_down(key)
+    sample("F9 held")
+    if not ctx.murmur.wait_state("listening", 5):
+        raise Fail(f"{name}: dictation did not start")
+    sample("listening")
+    ctx.sleep(ctx.fixtures["A"].speech_seconds + 0.8)
+    sample("before F9 up")
+    win32.key_up(key)
+    timestamp("after F9 up")
+    ctx.sleep(0.05)
+    for modifier in reversed(modifiers):
+        win32.key_up(modifier)
+        timestamp(f"after {modifier} up")
+    ctx.mark_delivery_released()
+
+
 def _notepad_focus_trial(ctx, spec, name, phases, previous_hwnd=None):
     mark = getattr(ctx.guard, "mark", lambda _stage: None)
     mark(f"H8:{name}:ensure-begin")
@@ -94,28 +117,10 @@ def _notepad_focus_trial(ctx, spec, name, phases, previous_hwnd=None):
     # without asking Notepad for focus, descendants, status, or text during that interval.
     timestamp = lambda stage: phases.append({"stage": stage, "time": time.time(),
                                              "focus_snapshot": "deferred"})
-    modifiers, key = win32.parse_combo(spec)
-    ctx.observe_delivery("A")
     ctx.guard.start_key_trace()
     observation = None
     try:
-        sample("before modifiers")
-        win32.key_down(*modifiers)
-        sample("before F9 down")
-        win32.key_down(key)
-        sample("F9 held")
-        if not ctx.murmur.wait_state("listening", 5):
-            raise Fail(f"{name}: dictation did not start")
-        sample("listening")
-        ctx.sleep(ctx.fixtures["A"].speech_seconds + 0.8)
-        sample("before F9 up")
-        win32.key_up(key)
-        timestamp("after F9 up")
-        ctx.sleep(0.05)
-        for modifier in reversed(modifiers):
-            win32.key_up(modifier)
-            timestamp(f"after {modifier} up")
-        ctx.mark_delivery_released()
+        _drive_registered_hotkey(ctx, spec, name, sample, timestamp)
         timestamp("before delivery wait")
         try:
             expected = ctx.observed_text(timeout=NOTEPAD_OUTPUT_TIMEOUT)
@@ -276,6 +281,12 @@ def h8_focus_phases(ctx):
                    if reason]
     if differences:
         raise Fail("; ".join(differences))
+
+
+def h9_notepad_delivery(ctx):
+    """Load the isolated H9 diagnostic only when explicitly selected."""
+    from checks.notepad_delivery import h9_notepad_delivery as run
+    return run(ctx)
 
 
 def h2_release_order(ctx):

@@ -787,7 +787,7 @@ class ImportTests(unittest.TestCase):
         ctx._completed_notepads, ctx._notepad_serial = [], 0
         ctx.restorer = restore.Restorer(log=lambda _: None)
         ctx.guard = SimpleNamespace(check=lambda: None)
-        pad = SimpleNamespace(path=Path("notepad-H8-alt.txt"), close=mock.Mock(),
+        pad = SimpleNamespace(path=Path("notepad-H8-alt.txt"), hwnd=42, owner_pid=7, close=mock.Mock(),
                               close_owned=mock.Mock())
         pad.start = mock.Mock(return_value=pad)
         with mock.patch.object(targets, "Notepad", return_value=pad) as create:
@@ -1288,6 +1288,89 @@ class ImportTests(unittest.TestCase):
 
 
 class NotepadBoundaryRegressionTests(unittest.TestCase):
+    def test_cleanup_failure_blocks_only_that_shared_window_and_preserves_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
+                          goldens=None, restorer=restore.Restorer(log=lambda _: None),
+                          guard=SimpleNamespace(check=lambda: None), out=directory, work=directory,
+                          hotkey="", cache=directory)
+            pads = [SimpleNamespace(hwnd=hwnd, owner_pid=7, path=Path(directory) / name,
+                                    close_owned=mock.Mock())
+                    for hwnd, name in ((99, "separate.txt"), (42, "earlier.txt"), (42, "failed.txt"))]
+            pads[-1].close_owned.side_effect = RuntimeError("save did not complete")
+            ctx._completed_notepads = pads
+            ctx._capture_notepad_cleanup_failure = mock.Mock()
+            failures = ctx.close_completed_notepads()
+            self.assertEqual(len(failures), 2)
+            self.assertIn("save did not complete", failures[0][1])
+            self.assertIn("skipped", failures[1][1])
+            self.assertIn("failed.txt", failures[1][1])
+            pads[-1].close_owned.assert_called_once()
+            pads[1].close_owned.assert_not_called()
+            pads[0].close_owned.assert_called_once()
+            ctx._capture_notepad_cleanup_failure.assert_called_once()
+
+    def test_guard_trip_during_cleanup_evidence_stops_other_windows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
+                          goldens=None, restorer=restore.Restorer(log=lambda _: None),
+                          guard=SimpleNamespace(check=lambda: None), out=directory, work=directory,
+                          hotkey="", cache=directory)
+            untouched = SimpleNamespace(hwnd=99, owner_pid=8, path=Path(directory) / "other.txt",
+                                        close_owned=mock.Mock())
+            failed = SimpleNamespace(hwnd=42, owner_pid=7, path=Path(directory) / "failed.txt",
+                                     close_owned=mock.Mock(side_effect=RuntimeError("save failed")))
+            ctx._completed_notepads = [untouched, failed]
+            ctx._capture_notepad_cleanup_failure = mock.Mock(side_effect=guard.GuardUnavailable("trip"))
+            failures = ctx.close_completed_notepads()
+            self.assertTrue(any("GuardUnavailable" in error for _, error in failures))
+            untouched.close_owned.assert_not_called()
+
+    def test_cleanup_evidence_is_read_only_and_never_screenshots_wrong_document(self):
+        for owned in (True, False):
+            with self.subTest(owned=owned), tempfile.TemporaryDirectory() as directory:
+                ctx = Context(build=None, session=SimpleNamespace(base_config={"privacy": {}}), fixtures={},
+                              goldens=None, restorer=restore.Restorer(log=lambda _: None),
+                              guard=SimpleNamespace(check=lambda: None), out=directory, work=directory,
+                              hotkey="", cache=directory)
+                pad = SimpleNamespace(hwnd=42, owner_pid=7, path=Path(directory) / "owned.txt",
+                                      active_document=lambda: owned,
+                                      focus_diagnostic=lambda: "MenuItem File; save pending",
+                                      win32=SimpleNamespace(is_window=lambda _: True,
+                                                            window_pid=lambda _: 7, pids=lambda _: [7]))
+                ctx.screenshot = mock.Mock()
+                ctx._capture_notepad_cleanup_failure(pad, RuntimeError("save failed"))
+                records = list(Path(directory).glob("*cleanup*.json"))
+                self.assertEqual(len(records), 1)
+                evidence = json.loads(records[0].read_text())
+                self.assertIn("MenuItem File", evidence["focus"])
+                self.assertEqual(ctx.screenshot.call_count, int(owned))
+
+    def test_cleanup_evidence_refuses_changed_pid_and_propagates_guard_trip_after_uia(self):
+        for changed_pid in (True, False):
+            with self.subTest(changed_pid=changed_pid), tempfile.TemporaryDirectory() as directory:
+                check = mock.Mock(side_effect=[None, guard.GuardUnavailable("trip after UIA")])
+                ctx = Context(build=None, session=None, fixtures={}, goldens=None, restorer=None,
+                              guard=SimpleNamespace(check=check), out=directory, work=directory,
+                              hotkey="", cache=directory)
+                pad = SimpleNamespace(hwnd=42, owner_pid=7, path=Path(directory) / "owned.txt",
+                                      active_document=mock.Mock(return_value=True),
+                                      focus_diagnostic=mock.Mock(return_value="File menu"),
+                                      win32=SimpleNamespace(is_window=lambda _: True,
+                                                            window_pid=lambda _: 8 if changed_pid else 7,
+                                                            pids=lambda _: [7, 8]))
+                ctx.screenshot = mock.Mock()
+                if changed_pid:
+                    ctx._capture_notepad_cleanup_failure(pad, RuntimeError("save failed"))
+                    pad.focus_diagnostic.assert_not_called()
+                else:
+                    with self.assertRaisesRegex(guard.GuardUnavailable, "trip after UIA"):
+                        ctx._capture_notepad_cleanup_failure(pad, RuntimeError("save failed"))
+                    pad.focus_diagnostic.assert_called_once()
+                pad.active_document.assert_not_called()
+                ctx.screenshot.assert_not_called()
+                self.assertEqual(len(list(Path(directory).glob("*cleanup*.json"))), 1)
+
     def test_h8_continues_with_fresh_non_alt_trial_after_owned_save_refusal(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
