@@ -755,15 +755,19 @@ pub mod tests {
     #[test]
     fn older_certificate_cannot_undo_a_subkey_revocation() {
         let day = Duration::from_secs(86_400);
-        let mut signer = signer();
+        // The manifest and verification clock are fixed. Using wall-clock-relative key
+        // dates eventually creates B after the manifest's issue date (November 1), so
+        // the legitimate control fails before the rollback attack is even exercised.
+        let now = trust::unix(NOW);
+        let mut signer = Signer::new(now - 400 * day, 3650);
         let root = root(&signer);
         let a = signer.subkeys()[0].clone();
         // C1: newer than the root (an extra subkey), subkey A still valid.
-        signer.add_signing_subkey_at(3650, SystemTime::now() - 30 * day);
+        signer.add_signing_subkey_at(3650, now - 30 * day);
         let c1 = signer.public();
         // C2: A revoked (leaked), B added.
-        signer.revoke_subkey_at(&a, SystemTime::now() - 20 * day);
-        let b = signer.add_signing_subkey_at(3650, SystemTime::now() - 20 * day);
+        signer.revoke_subkey_at(&a, now - 20 * day);
+        let b = signer.add_signing_subkey_at(3650, now - 20 * day);
         let c2 = signer.public();
         let d = dir("cert-rollback");
         let files = Files::new(&d);

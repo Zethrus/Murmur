@@ -40,7 +40,7 @@ no style, layout, token, feature, or platform-specific UI fork was introduced.
 
 ## Local evidence
 
-- 70 UI tests passed, including the two fail-before/pass-after regressions.
+- 75 UI tests passed, including the editing regressions and the review follow-up below.
 - 499 script tests passed, including eight vendor pin/integrity tests.
 - `npm run build`: TypeScript, token lint, protocol check and Vite build passed.
 - Actual upstream archive verification: 83 files matched.
@@ -48,6 +48,25 @@ no style, layout, token, feature, or platform-specific UI fork was introduced.
   Rust is 1.92.0; CI pins 1.100.0. No Rust behavior changed in this follow-up.
 
 These are local test results, not native Windows, visual, or release acceptance.
+
+## PR review and first CI follow-up
+
+The review reproduced a stale-closure regression: retained Companion handlers sent
+the entire old network/button table, so changing Port could revert an earlier Bind
+address edit. Companion saves now send only the changed nested property, matching
+the backend's recursive table-merge contract. Page contexts expose the latest config
+to delayed actions; the excluded-app picker and live network address use that value.
+Five UI regressions cover sequential/queued edits, unrelated external updates,
+rejected saves and exclusion-list preservation. Four failed before the correction;
+all five and the full 75-test UI suite passed afterward. The UI harness now mirrors
+the backend's nested-table merge (arrays and replacement dictionaries still replace).
+
+Linux CI 45170789317 reached Rust tests and failed the certificate rollback fixture:
+its new subkey was created relative to today's date, after the fixed November 1
+manifest issue time. Only that test's key timeline is now anchored to its existing
+`NOW` constant. The legitimate-C2 acceptance, malicious-C1 rejection, cached-state
+preservation and offline revocation assertions remain intact. Production trust code
+is unchanged. The corrected Rust test still requires CI execution.
 
 ## Remaining acceptance sequence
 
