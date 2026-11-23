@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import re
+import subprocess
 import tarfile
 import tempfile
 import tomllib
@@ -112,6 +113,39 @@ class VendorIntegrityTests(unittest.TestCase):
     def test_archive_parent_traversal_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unexpected archive path"):
             self.verify(self.archive({"../outside": b"unsafe"}))
+
+    def test_reused_crlf_checkout_is_restored_before_windows_verification(self):
+        checkout = self.root / "checkout"
+        checkout.mkdir()
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True)
+
+        git("init", "-q")
+        git("config", "core.autocrlf", "true")
+        paths = ["src-tauri/vendor/wry/src/lib.rs", "src-tauri/vendor/wry-host-input.patch"]
+        for name in paths:
+            path = checkout / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"upstream\nbytes\n")
+        git("add", ".")
+        identity = ("-c", "user.name=Test", "-c", "user.email=test@invalid")
+        git(*identity, "commit", "-qm", "Original checkout")
+        for name in paths:
+            (checkout / name).unlink()
+        git("checkout-index", "--force", "--all")
+        for name in paths:
+            self.assertIn(b"\r\n", (checkout / name).read_bytes())
+        (checkout / ".gitattributes").write_bytes((ROOT / ".gitattributes").read_bytes())
+        git("add", ".gitattributes")
+        git(*identity, "commit", "-qm", "Pin vendor bytes")
+        # Adding attributes does not rewrite the existing files on disk.
+        for name in paths:
+            self.assertIn(b"\r\n", (checkout / name).read_bytes())
+        git("-c", "core.autocrlf=false", "checkout", "--force", "HEAD", "--",
+            "src-tauri/vendor/wry", "src-tauri/vendor/wry-host-input.patch")
+        for name in paths:
+            self.assertEqual((checkout / name).read_bytes(), b"upstream\nbytes\n")
 
 
 if __name__ == "__main__":

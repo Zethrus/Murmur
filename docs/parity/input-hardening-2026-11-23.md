@@ -41,7 +41,7 @@ no style, layout, token, feature, or platform-specific UI fork was introduced.
 ## Local evidence
 
 - 75 UI tests passed, including the editing regressions and the review follow-up below.
-- 499 script tests passed, including eight vendor pin/integrity tests.
+- 500 script tests passed, including nine vendor pin/integrity tests.
 - `npm run build`: TypeScript, token lint, protocol check and Vite build passed.
 - Actual upstream archive verification: 83 files matched.
 - Full Rust/MSVC and packaging validation are assigned to exact-head CI. Local
@@ -67,6 +67,13 @@ manifest issue time. Only that test's key timeline is now anchored to its existi
 `NOW` constant. The legitimate-C2 acceptance, malicious-C1 rejection, cached-state
 preservation and offline revocation assertions remain intact. Production trust code
 is unchanged. The corrected Rust test still requires CI execution.
+
+Windows CI 45172206326 stopped when applying the recorded Wry patch in the verifier.
+A local Git reproduction showed that a reused CRLF checkout retains its old bytes
+when new attributes arrive. Windows CI now restores only the tracked vendor inputs
+from its checked-out commit before running verification. A regression covers that
+transition; checksum, patch application and byte comparison remain strict. Native
+confirmation of the Windows checkout correction remains pending.
 
 ## Remaining acceptance sequence
 

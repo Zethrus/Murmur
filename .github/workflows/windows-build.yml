@@ -149,6 +149,11 @@ jobs:
         if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
         run: |
+          # Reused worktrees can retain CRLF files after .gitattributes changes. Restore
+          # only the pinned vendor inputs from this commit; the verifier stays read-only.
+          git ls-files --eol src-tauri/vendor/wry/src/lib.rs src-tauri/vendor/wry-host-input.patch
+          git -c core.autocrlf=false checkout --force HEAD -- src-tauri/vendor/wry src-tauri/vendor/wry-host-input.patch
+          if ($LASTEXITCODE -ne 0) { throw 'Could not restore pinned Wry source bytes' }
           python scripts/verify-vendored-wry.py
           if ($LASTEXITCODE -ne 0) { throw 'Vendored Wry verification failed' }
 
