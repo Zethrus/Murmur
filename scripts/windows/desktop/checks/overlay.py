@@ -104,6 +104,38 @@ def _icon_drag_point(ctx, hwnd, details):
         raise Fail(f"No unique visible status drag affordance in the overlay: {error}") from None
 
 
+def _settled_icon_drag_point(ctx, hwnd, details):
+    """O4 changes pill to icon: require two matching fresh snapshots before input."""
+    history = details.setdefault("geometry_attempts", [])
+    previous = None
+    for attempt in range(O8_GEOMETRY_ATTEMPTS):
+        ctx.guard.check()
+        if ctx.murmur.overlay_hwnd() != hwnd:
+            raise Fail("Overlay window changed during drag discovery")
+        before = win32.window_rect(hwnd)
+        row = {"attempt": attempt + 1, "native_before": before}
+        history.append(row)
+        candidate = None
+        try:
+            candidate = overlay_drag_snapshot(ctx, before, row, timeout=0)
+        except uia.NotFound as error:
+            row["error"] = str(error)
+        ctx.guard.check()
+        if ctx.murmur.overlay_hwnd() != hwnd:
+            raise Fail("Overlay window changed during drag discovery")
+        after = win32.window_rect(hwnd)
+        row["native_after"] = after
+        current = (candidate, after) if candidate is not None and before == after else None
+        if current is not None and current == previous:
+            row["result"] = "verified"
+            return candidate
+        previous = current
+        row["result"] = "not settled"
+        if attempt + 1 < O8_GEOMETRY_ATTEMPTS:
+            ctx.sleep(0.25)
+    raise Fail("No stable unique visible status drag affordance after four guarded snapshots")
+
+
 def _exstyle(hwnd):
     return win32.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
 
@@ -834,8 +866,22 @@ def o4_empty_area(ctx):
     _type_lands(ctx, pad, "a", "starta")
     ctx.murmur.ensure(ctx.fixtures["A"].path, {"overlay": {"idle_view": "icon"}})
     pad.focus()
-    before = win32.window_rect(ctx.murmur.overlay_hwnd())
-    start, _bounds = _icon_drag_point(ctx, ctx.murmur.overlay_hwnd(), {})
+    hwnd = ctx.murmur.overlay_hwnd()
+    details = {}
+    try:
+        start, _bounds = _settled_icon_drag_point(ctx, hwnd, details)
+        ctx.guard.check()
+        ctx.require(pad.owns_keyboard_focus(), "Notepad editor lost focus before the icon drag")
+        ctx.guard.check()  # editor discovery can block in UIA
+        before = win32.window_rect(hwnd)
+        ctx.require(before == details["geometry_attempts"][-1]["native_after"],
+                    "Overlay geometry changed after drag discovery")
+    except BaseException as error:
+        details["error"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        ctx.artifact("icon-discovery.json").write_text(json.dumps(details, indent=2), encoding="utf-8")
+    ctx.guard.check()
     win32.drag(start, (start[0] + 150, start[1] - 120), steps=20)
     ctx.sleep(1.0)
     after = win32.window_rect(ctx.murmur.overlay_hwnd())

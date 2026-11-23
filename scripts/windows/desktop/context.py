@@ -134,6 +134,7 @@ class Context:
         self._notepad_serial += 1
         fixture_name = f"{self.check_id}-{name}-a{self.attempt}-c{self._notepad_serial}"
         pad = targets.Notepad(self.work, fixture_name)
+        pad._guard_check = self.guard.check
         # Creation may fail after spawning Notepad. Keep the incomplete fixture for final
         # ownership-checked cleanup; the creation exception itself fails the check.
         self._completed_notepads.append(pad)

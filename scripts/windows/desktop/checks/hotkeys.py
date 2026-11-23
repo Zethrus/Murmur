@@ -192,12 +192,22 @@ def _capture_notepad_trial(ctx, name, result, pad, expected):
     captured = pad.text()
     result["capture_difference"] = golden.compare(expected, captured) if expected is not None else None
     result["capture_chars"] = len(captured)
+    capture_artifact = ctx.artifact(f"{name}-uia.txt")
+    capture_artifact.write_text(captured, encoding="utf-8")
+    result["capture_artifact"] = capture_artifact.name
+    # Observation precedes any save/focus action. A failed save must not erase the
+    # original mismatch or cause a stale on-disk file to be reported as delivered text.
+    try:
+        detail = pad.focus_diagnostic()
+    except Exception as error:  # noqa: BLE001 - read-only evidence, not authorization
+        detail = f"focus evidence unavailable: {type(error).__name__}: {error}"
+    ctx.artifact(f"{name}-focus-before-save.txt").write_text(detail, encoding="utf-8")
     try:
         before_save = pad.path.stat().st_mtime_ns
     except OSError:
         before_save = None
-    pad.save_owned()
     try:
+        pad.save_owned()
         after_save = pad.path.stat().st_mtime_ns
         result["saved_file_updated"] = before_save != after_save
         saved_bytes = pad.path.read_bytes()
@@ -207,7 +217,7 @@ def _capture_notepad_trial(ctx, name, result, pad, expected):
         saved = saved_bytes.decode("utf-8-sig")
         result["saved_file_difference"] = golden.compare(expected, saved) if expected is not None else None
         result["saved_file_chars"] = len(saved)
-    except (OSError, UnicodeError) as error:
+    except (OSError, UnicodeError, RuntimeError) as error:
         result["saved_file_error"] = f"{type(error).__name__}: {error}"
 
 
@@ -242,7 +252,7 @@ def h8_focus_phases(ctx):
                 raise Fail(f"{name}: {observation['output_error']} (overlay: {observation['overlay']})")
             _capture_notepad_trial(ctx, name, results[name], pad, expected)
             previous_hwnd = pad.hwnd
-            if name == "no-alt" and any(results[name][key] for key in
+            if name == "no-alt" and not results[name]["saved_file_error"] and any(results[name][key] for key in
                                         ("difference", "capture_difference", "saved_file_difference")):
                 # The failed trial's screenshot and saved bytes are already captured. Reuse
                 # exactly that owned editor to separate a Murmur-specific sender path from a

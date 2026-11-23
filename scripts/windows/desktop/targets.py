@@ -271,6 +271,7 @@ class Notepad:
         self.owner_pid = 0
         self.owned_tab = False
         self._startup_handoff = None
+        self._guard_check = lambda: None
 
     def _title_is_document(self, title):
         title = title.lower().lstrip("*● ")
@@ -317,16 +318,19 @@ class Notepad:
         return self.uia.document_element(self.uia.from_handle(self.hwnd), timeout=5)
 
     def focus(self, click=True, guard_check=None):
-        check = guard_check or (lambda: None)
+        check = guard_check or self._guard_check
         check()
         if self.owned_tab and not self.active_document():
             raise RuntimeError(f"Notepad active tab is not {self.path.name}")
         document = self.document()
         point = self.uia.center(document)
         check()  # discovery can block; revalidate before any activation or input
-        options = {"guard_check": check} if guard_check is not None else {}
-        self.win32.activate(self.hwnd, click_at=None if not click else point, **options)
+        if self.owned_tab and not self.active_document():
+            raise RuntimeError(f"Notepad active tab is not {self.path.name}")
+        self.win32.activate(self.hwnd, click_at=None if not click else point, guard_check=check)
         check()
+        if self.owned_tab and not self.active_document():
+            raise RuntimeError(f"Notepad active tab is not {self.path.name}")
         if click:
             self.win32.click(*point)
         else:
@@ -361,17 +365,38 @@ class Notepad:
         if not self.owned_tab:
             raise RuntimeError("Not an H8 owned Notepad tab")
         self.focus()
+        self._guard_check()
+        if not self.active_document():
+            raise RuntimeError(f"Notepad active tab is not {self.path.name}")
         self.win32.tap("ctrl", "s")
-        time.sleep(0.8)
+        if not self.win32.wait_for(lambda: self._saved_owned_document(self._guard_check), 5):
+            raise RuntimeError(f"Notepad save or ownership verification failed for {self.path.name}")
+        if not self._saved_owned_document(self._guard_check):
+            raise RuntimeError(f"Notepad changed after saving {self.path.name}")
+
+    def _saved_owned_document(self, check):
+        check()
+        return (self.win32.foreground() == self.hwnd and self.active_document() and
+                self.win32.window_pid(self.hwnd) == self.owner_pid and
+                self.owner_pid in self.win32.pids("Notepad.exe") and
+                not self.win32.window_text(self.hwnd).lstrip().startswith(("*", "●")) and
+                self.path.is_file())
 
     def clear_owned(self):
         """Clear only the verified active H8 document for a same-tab direct-input comparison."""
         if not self.owned_tab or not self.active_document():
             raise RuntimeError(f"Notepad active tab is not owned {self.path.name}")
         self.focus()
+        self._guard_check()
         self.win32.tap("ctrl", "a")
+        self._guard_check()
+        if not self.active_document():
+            raise RuntimeError(f"Notepad active tab is not owned {self.path.name}")
         self.win32.tap("delete")
-        if not self.win32.wait_for(lambda: self.active_document() and self.text() == "", 5):
+        def cleared():
+            self._guard_check()
+            return self.active_document() and self.text() == ""
+        if not self.win32.wait_for(cleared, 5):
             raise RuntimeError(f"Notepad did not clear {self.path.name}")
 
     def close_owned(self, max_tabs=64, guard_check=None):
@@ -398,22 +423,21 @@ class Notepad:
                                    + ("" if point else " (editor covered or not owned)"))
         # Restored tabs from earlier sessions can precede this run's fixtures.
         # Navigation is reversible; Ctrl+W is sent only when this run's unique title is active.
-        for _ in range(max_tabs):
+        def verify_window():
             check()
             if (self.win32.foreground() != self.hwnd or self.win32.window_pid(self.hwnd) != self.owner_pid or
                     self.owner_pid not in self.win32.pids("Notepad.exe")):
                 raise RuntimeError(f"Notepad lost foreground or ownership during cleanup of {self.path.name}")
+
+        visited = set()
+        for _ in range(max_tabs):
+            verify_window()
             if self.active_document():
                 # Checks may have only read the editor; its file can still be empty and dirty.
                 # Save at final cleanup, then require the same owned, clean document
                 # before Ctrl+W so a save prompt cannot consume the close operation.
                 def saved_owned_document():
-                    check()
-                    return (self.win32.foreground() == self.hwnd and self.active_document() and
-                            self.win32.window_pid(self.hwnd) == self.owner_pid and
-                            self.owner_pid in self.win32.pids("Notepad.exe") and
-                            not self.win32.window_text(self.hwnd).lstrip().startswith(("*", "●")) and
-                            self.path.is_file())
+                    return self._saved_owned_document(check)
 
                 check()
                 self.win32.tap("ctrl", "s")
@@ -430,8 +454,17 @@ class Notepad:
                     raise RuntimeError(f"Notepad did not close {self.path.name}")
                 self.hwnd = 0
                 return
-            check()
+            title = self.win32.window_text(self.hwnd)
+            if title in visited:
+                raise RuntimeError(f"Could not locate owned Notepad tab {self.path.name}: repeated title {title!r}")
+            visited.add(title)
+            verify_window()
             self.win32.tap("ctrl", "tab")
+            def navigated():
+                verify_window()
+                return self.win32.window_text(self.hwnd) != title
+            if not self.win32.wait_for(navigated, 3):
+                raise RuntimeError(f"Could not locate owned Notepad tab {self.path.name}: navigation did not change title")
         raise RuntimeError(f"Could not locate owned Notepad tab {self.path.name}")
 
     def _owned_editor_point(self):

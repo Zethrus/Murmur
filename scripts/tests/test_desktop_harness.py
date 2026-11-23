@@ -204,6 +204,7 @@ class ImportTests(unittest.TestCase):
 
     def test_notepad_focus_while_hotkey_held_targets_editor_without_click(self):
         pad = targets.Notepad.__new__(targets.Notepad)
+        pad._guard_check = mock.Mock()
         pad.hwnd = 42
         pad.owned_tab = False
         document = SimpleNamespace(SetFocus=mock.Mock())
@@ -214,7 +215,7 @@ class ImportTests(unittest.TestCase):
         pad.win32 = SimpleNamespace(activate=mock.Mock(), click=mock.Mock(),
                                     wait_for=lambda predicate, _: predicate(), foreground=lambda: 42)
         pad.focus(click=False)
-        pad.win32.activate.assert_called_once_with(42, click_at=None)
+        pad.win32.activate.assert_called_once_with(42, click_at=None, guard_check=pad._guard_check)
         document.SetFocus.assert_called_once_with()
         pad.win32.click.assert_not_called()
 
@@ -1284,6 +1285,171 @@ class ImportTests(unittest.TestCase):
         self.assertFalse(setup_checks._component_verified(names, "Tiny (English)"))
         names.insert(names.index("Verify Tiny (English)"), "Files verified.")
         self.assertTrue(setup_checks._component_verified(names, "Tiny (English)"))
+
+
+class NotepadBoundaryRegressionTests(unittest.TestCase):
+    def test_h8_continues_with_fresh_non_alt_trial_after_owned_save_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pads = []
+            for name in ("control", "alt", "no-alt"):
+                path = root / f"{name}.txt"
+                pads.append(SimpleNamespace(
+                    hwnd=42, path=path, text=lambda: "full", focus_diagnostic=lambda: "observed",
+                    save_owned=mock.Mock(side_effect=(RuntimeError("active tab changed") if name == "alt"
+                                         else lambda p=path: p.write_text("full")))))
+            ctx = SimpleNamespace(artifact=lambda name: root / name, screenshot=mock.Mock(),
+                                  murmur=SimpleNamespace(log=lambda: ""))
+            with mock.patch.object(hotkey_checks, "_notepad_direct_control",
+                                   return_value=(pads[0], None, "full", {})), \
+                 mock.patch.object(hotkey_checks, "_notepad_focus_trial",
+                                   side_effect=[(pads[1], None, "full", {}),
+                                                (pads[2], None, "full", {})]) as trial:
+                with self.assertRaisesRegex(Fail, "alt: RuntimeError: active tab changed"):
+                    hotkey_checks.h8_focus_phases(ctx)
+            self.assertEqual([call.args[2] for call in trial.call_args_list], ["alt", "no-alt"])
+            evidence = json.loads((root / "focus-phases.json").read_text())
+            self.assertIsNone(evidence["alt"]["saved_file_artifact"])
+            self.assertIsNone(evidence["no-alt"]["saved_file_difference"])
+            self.assertEqual((root / "no-alt-saved.txt").read_text(), "full")
+
+    def test_default_guard_stops_focus_after_blocking_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pad = targets.Notepad(directory, "focus")
+            pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+            pad.active_document = lambda: True
+            pad._guard_check = mock.Mock(side_effect=[None, guard.GuardUnavailable("trip")])
+            pad.document = lambda: object()
+            pad.uia = SimpleNamespace(center=lambda _: (10, 20))
+            pad.win32 = SimpleNamespace(activate=mock.Mock(), click=mock.Mock())
+            with self.assertRaises(guard.GuardUnavailable):
+                pad.focus()
+            pad.win32.activate.assert_not_called()
+            pad.win32.click.assert_not_called()
+
+    def test_focus_rejects_document_change_during_discovery_before_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pad = targets.Notepad(directory, "focus")
+            pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+            active = [True]
+            pad.active_document = lambda: active[0]
+            pad.document = lambda: active.__setitem__(0, False) or object()
+            pad.uia = SimpleNamespace(center=lambda _: (10, 20))
+            pad.win32 = SimpleNamespace(activate=mock.Mock(), click=mock.Mock())
+            with self.assertRaisesRegex(RuntimeError, "active tab"):
+                pad.focus()
+            pad.win32.activate.assert_not_called()
+            pad.win32.click.assert_not_called()
+
+    def test_cleanup_waits_for_navigation_and_stops_on_cycle_or_stall(self):
+        for outcome in ("owned", "cycle", "stalled"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                pad = targets.Notepad(directory, "cleanup")
+                pad.hwnd, pad.owner_pid, pad.owned_tab = 42, 7, True
+                pad.path.write_text("saved")
+                state = {"title": "other.txt - Notepad", "pending": False, "open": True}
+                actions = []
+
+                def tap(*keys):
+                    actions.append(keys)
+                    if keys == ("ctrl", "tab"):
+                        self.assertFalse(state["pending"], "navigation was queued without waiting")
+                        state["pending"] = True
+                    elif keys == ("ctrl", "w"):
+                        state["open"] = False
+
+                def wait(predicate, _timeout):
+                    if state["pending"]:
+                        self.assertFalse(predicate())  # UI has not processed Ctrl+Tab yet
+                        if outcome == "owned":
+                            state["title"] = pad.path.name + " - Notepad"
+                        elif outcome == "cycle":
+                            state["title"] = ("second.txt - Notepad" if state["title"].startswith("other")
+                                              else "other.txt - Notepad")
+                        state["pending"] = False
+                    return predicate()
+
+                pad.win32 = SimpleNamespace(
+                    is_window=lambda _: state["open"], window_pid=lambda _: 7, pids=lambda _: [7],
+                    foreground=lambda: 42, activate=lambda _: True, tap=tap, wait_for=wait,
+                    window_text=lambda _: state["title"])
+                if outcome == "owned":
+                    pad.close_owned()
+                    self.assertEqual(actions, [("ctrl", "tab"), ("ctrl", "s"), ("ctrl", "w")])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "Could not locate owned Notepad tab"):
+                        pad.close_owned()
+                    self.assertEqual(actions, [("ctrl", "tab")] * (2 if outcome == "cycle" else 1))
+                    self.assertEqual(pad.hwnd, 42)
+
+    def test_h8_save_failure_preserves_raw_capture_and_does_not_claim_saved_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pad = SimpleNamespace(hwnd=42, path=root / "owned.txt", text=lambda: "corrupt",
+                                  focus_diagnostic=lambda: "active fixture: False",
+                                  save_owned=mock.Mock(side_effect=RuntimeError("active tab changed")))
+            ctx = SimpleNamespace(artifact=lambda name: root / name, screenshot=mock.Mock())
+            result = {}
+            hotkey_checks._capture_notepad_trial(ctx, "alt", result, pad, "expected")
+            self.assertIn("active tab changed", result["saved_file_error"])
+            self.assertEqual((root / result["capture_artifact"]).read_text(), "corrupt")
+            self.assertFalse((root / "alt-saved.txt").exists())
+            self.assertIn("active fixture: False", (root / "alt-focus-before-save.txt").read_text())
+
+    def test_h8_capture_never_swallows_guard_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pad = SimpleNamespace(hwnd=42, path=root / "owned.txt", text=lambda: "text",
+                                  focus_diagnostic=lambda: "owned",
+                                  save_owned=mock.Mock(side_effect=guard.GuardUnavailable("trip")))
+            ctx = SimpleNamespace(artifact=lambda name: root / name, screenshot=mock.Mock())
+            with self.assertRaises(guard.GuardUnavailable):
+                hotkey_checks._capture_notepad_trial(ctx, "alt", {}, pad, "text")
+
+    def test_o4_geometry_retries_read_only_and_retains_rejected_observation(self):
+        ctx = SimpleNamespace(guard=SimpleNamespace(check=mock.Mock()), sleep=mock.Mock(),
+                              murmur=SimpleNamespace(overlay_hwnd=lambda: 42))
+        details = {}
+        def snapshot(_ctx, native, row, timeout):
+            row["uia_candidates"] = [{"bounds": (11, 11, 29, 29)}]
+            if native == (0, 0, 10, 10):
+                raise uia.NotFound("stale geometry")
+            return (20, 20), (11, 11, 29, 29)
+        with mock.patch.object(overlay_checks, "overlay_drag_snapshot", side_effect=snapshot), \
+             mock.patch.object(win32, "window_rect", side_effect=[(0, 0, 10, 10), (10, 10, 30, 30),
+                                                                 (10, 10, 30, 30), (10, 10, 30, 30),
+                                                                 (10, 10, 30, 30), (10, 10, 30, 30)]), \
+             mock.patch.object(win32, "mouse_up") as up, mock.patch.object(win32, "drag") as drag:
+            self.assertEqual(overlay_checks._settled_icon_drag_point(ctx, 42, details),
+                             ((20, 20), (11, 11, 29, 29)))
+        self.assertEqual(len(details["geometry_attempts"]), 3)
+        self.assertIn("stale geometry", details["geometry_attempts"][0]["error"])
+        up.assert_not_called()
+        drag.assert_not_called()
+
+    def test_o4_failed_discovery_writes_artifact_without_dragging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ctx = SimpleNamespace(murmur=SimpleNamespace(ensure=mock.Mock(), overlay_hwnd=lambda: 42),
+                                  fixtures={"A": SimpleNamespace(path="fixture.wav")},
+                                  restorer=SimpleNamespace(push=mock.Mock()), sleep=mock.Mock(),
+                                  artifact=lambda name: Path(directory) / name,
+                                  require=lambda condition, reason: self.assertTrue(condition, reason))
+            pad = SimpleNamespace(hwnd=77, focus=mock.Mock())
+            def failed(_ctx, _hwnd, details):
+                details["geometry_attempts"] = [{"uia_candidates": [{"control_type": 50022}]}]
+                raise Fail("ambiguous drag target")
+            with mock.patch.object(overlay_checks, "_notepad_with_word", return_value=pad), \
+                 mock.patch.object(overlay_checks, "_type_lands"), \
+                 mock.patch.object(overlay_checks, "_settled_icon_drag_point", side_effect=failed), \
+                 mock.patch.object(win32, "window_rect", return_value=(0, 0, 40, 40)), \
+                 mock.patch.object(win32, "foreground", return_value=77), \
+                 mock.patch.object(win32, "click"), mock.patch.object(win32, "drag") as drag:
+                with self.assertRaisesRegex(Fail, "ambiguous"):
+                    overlay_checks.o4_empty_area(ctx)
+            drag.assert_not_called()
+            evidence = json.loads((Path(directory) / "icon-discovery.json").read_text())
+            self.assertIn("ambiguous", evidence["error"])
+            self.assertEqual(evidence["geometry_attempts"][0]["uia_candidates"][0]["control_type"], 50022)
 
 
 class DesktopFollowupTests(unittest.TestCase):

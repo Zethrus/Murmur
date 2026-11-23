@@ -66,7 +66,7 @@ its new subkey was created relative to today's date, after the fixed November 1
 manifest issue time. Only that test's key timeline is now anchored to its existing
 `NOW` constant. The legitimate-C2 acceptance, malicious-C1 rejection, cached-state
 preservation and offline revocation assertions remain intact. Production trust code
-is unchanged. The corrected Rust test still requires CI execution.
+is unchanged. Linux CI 45173460502 subsequently passed on 85d7d98.
 
 Windows CI 45172206326 stopped when applying the recorded Wry patch in the verifier.
 A local Git reproduction showed that a reused CRLF checkout retains its old bytes
@@ -75,7 +75,55 @@ index files and the new attributes, and showed that forced checkout alone was
 insufficient on that runner. Windows CI now removes the disposable vendor source
 copies before restoring them from its checked-out commit, logging line endings
 before and after. A regression covers that transition; checksum, patch application
-and byte comparison remain strict. Native confirmation remains pending.
+and byte comparison remain strict. Windows CI 45173460507 and manual build
+45186150242 subsequently passed on 85d7d98, including the exact-head handoff.
+
+## November 23 native acceptance and bounded harness follow-up
+
+O8 run 45191392219 attempt 3 passed four foreground contexts, full held movement,
+unchanged sampled focus, exact Settings/Notepad typing and restart persistence.
+This remains diagnostic evidence, not full-suite acceptance.
+
+Broader run 45199949886 attempt 3 at 85d7d98 recorded 4 pass, 7 fail and 269 healthy
+guard probes. O2, O7, F11 and F13 passed. O3 lost editor focus to Notepad's File menu
+before the overlay click. O4 could not select a unique visible status affordance.
+H1/I1 showed corrupt text; I4/I5 showed empty delivery. H8's direct input control
+saved 135 exact characters, but the Alt trial had 45 correct Unicode packet pairs
+and only 19 visible characters in an unexpected active tab. Saving refused that
+tab, so the non-Alt comparison did not run. Six retained fixtures failed cleanup.
+Neither packet correctness nor the direct control establishes a production cause.
+
+The approved first repair stage changes harness behavior only:
+
+- Notepad focus rechecks the active fixture after blocking UIA discovery and
+  activation. Context-created targets carry the existing guard into focus/save/
+  clear operations. Save completion requires the same owned, clean document and
+  existing file; it does not replace the exact-byte delivery comparison.
+- Final cleanup waits for each Ctrl+Tab title transition before navigating again.
+  A stalled transition or repeated title stops that fixture's search. Duplicate
+  titles can therefore conservatively prevent cleanup; they never authorize closing
+  a different tab. No unknown tab or whole shared Notepad window is closed.
+- H8 preserves raw UIA text and focus evidence before saving. A save refusal stays
+  a failure, produces no claimed saved output, and permits the existing fresh
+  non-Alt target path to run. Target creation/focus still must verify ownership;
+  guard exceptions still abort. Failed saves never authorize a same-tab clear.
+- O4 retries observation only, up to four fresh UIA/native snapshots, requiring two
+  consecutive matches before input. Discovery failures retain candidates and
+  geometry. O2's passed gesture behavior and assertions are unchanged.
+
+Eight focused regressions cover asynchronous tab navigation, cycles/stalls, stale
+document discovery, guard loss, refused saves, continuation to a fresh non-Alt
+trial, and O4 evidence/readiness. The 508-script suite passes locally. No production
+sender, hotkey, Wry, focus hook, style, or Linux behavior changed. Native validation
+of this follow-up is pending; these are not claims that corruption or cleanup is
+fixed on Edison.
+
+Next exact-build native selection: O3,O4,H1,H8,I1,I4,I5 (one pass, with H8 retaining
+the guarded startup handoff). Inspect both Alt/non-Alt observations, original failure
+latches, raw/saved text, editor mode and final cleanup. If failures persist, use the
+approved bounded direct/hotkey-only/app typing/paste comparison before changing the
+responsible production layer. Then repeat the complete focused selection, run the
+full suite, and complete the manual/release gates below. No blind retry loop.
 
 ## Remaining acceptance sequence
 
