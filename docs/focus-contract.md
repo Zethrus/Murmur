@@ -9,24 +9,30 @@ of 0.4.7 (`src-tauri/src/focus_guard.rs`, `src-tauri/src/held.rs`,
 
 ## Rules
 
-1. **Identity.** At the hotkey press Murmur records the focused window
+1. **Identity.** On Windows, at an accepted dictation or code shortcut activation, Murmur
+   records the focused target before queuing the action. Other start paths read
+   focus when the controller handles their action. Linux retains its existing
+   controller-thread focus capture for every start path.
    (`platform::focused_target`):
    - Linux/X11: the X11 window ID from `_NET_ACTIVE_WINDOW` plus its `WM_CLASS`.
      X11 IDs are not reused while the window exists, so the PID is not compared.
-   - Windows: the foreground `HWND`, the owning process ID, and that process's
-     creation time (`GetProcessTimes`), plus the executable name. HWNDs and PIDs
-     are reused; all three must match, and a PID whose start time could not be
-     read never matches.
+   - Windows: the foreground `HWND`, owning PID and creation time, plus the
+     keyboard focus `HWND` from `GetGUIThreadInfo`, its thread ID, owning PID and
+     creation time. An embedded renderer may own the focused child in another
+     process. All identity fields must match. An absent, invalid, unrelated or
+     unverified child is blocked. The foreground executable name supplies style.
    - One of Murmur's own windows (Settings, overlay) is "Own".
 2. **Deliver only to the identical target.** Just before typing or pasting,
    focus is read again (after any overlay drag has finished). If the identity is
-   equal in every field, the transcript is delivered, whatever the mode.
+   equal in every field, the transcript is delivered, whatever the mode. Windows
+   checks the full target again before each character in the type path.
 3. **Otherwise the configured mode decides** (`injection.focus_change`,
    Behavior → When focus changes):
    - `hold` (default): keep the text in the overlay with **Insert here**,
      **Copy** and **Discard**.
-   - `refocus`: bring the original window back, then re-check rule 2; if that
-     fails or the identity differs, hold.
+   - `refocus`: bring the original top-level window back, then re-check rule 2;
+     if that fails or its focused child differs, hold. Top-level activation does
+     not restore the original child control.
    - `copy`: put the text on the clipboard; nothing is typed.
    - `insert`: type into whatever has focus now (explicit opt-in), **but never
      into an unknown or blocked target** (rule 4).
@@ -45,10 +51,16 @@ of 0.4.7 (`src-tauri/src/focus_guard.rs`, `src-tauri/src/held.rs`,
      elevated window is still held. The held text says why.
    - Windows: the foreground thread is in Win32 menu mode. An Alt hotkey can
      move focus into a menu while the top-level window identity stays the same.
+   - Windows: the focused child is missing, invalid, outside the foreground
+     window, or its process identity or integrity cannot be verified. This
+     check is separate from detecting a changed child: a custom menu whose Win32
+     menu flags remain false may have a valid HWND. Its difference from the original
+     editor is handled by the configured focus-change policy in rule 3.
 5. **Held text** lives in memory only: never logged, written to disk or put in
    history until you insert or copy it. One transcript is held at a time; it is
    cleared after **120 seconds**, on Discard, or when the next dictation starts.
-   **Insert here** types into the window focused at that moment (you chose it);
+   **Insert here** captures the current keyboard target at that retry (you chose
+   it), rather than reusing the original dictation target;
    it is refused for Murmur's own windows and for blocked targets (rule 4).
 6. **Refocus** uses only the platform's sanctioned call: `xdotool
    windowactivate` on Linux, `SetForegroundWindow` on Windows. No
@@ -90,13 +102,12 @@ of 0.4.7 (`src-tauri/src/focus_guard.rs`, `src-tauri/src/held.rs`,
 
 ## What it cannot distinguish
 
-- **Tabs inside one window** (browser tabs, terminal tabs, editor splits) share
-  one window identity: switching tabs mid-dictation is delivered to the new tab.
-- **Changes during typing.** On Windows, Murmur checks the foreground identity
-  before each character and stops if it changes. An application can still change
-  its focused control within one top-level window without a detectable Win32 menu
-  state, or move focus in the instant between check and submission; this is a
-  best-effort guard, not an atomic focus guarantee. Linux checks
+- **Tabs or editor splits within one focused child HWND** cannot be distinguished.
+- **Changes during typing.** On Windows, Murmur checks the foreground and focused
+  child identity before each character and stops if either changes. An application
+  can still change focus in the instant between check and submission, or change
+  an internal logical target without changing its HWND; this is a best-effort
+  guard, not an atomic focus guarantee. Linux checks
   focus once before typing starts.
 - **Same-integrity input filters.** Applications that ignore injected input at
   the same integrity level (some games, remote-desktop clients, password
@@ -113,7 +124,7 @@ of 0.4.7 (`src-tauri/src/focus_guard.rs`, `src-tauri/src/held.rs`,
 | 1 Identity, two windows of one app differ | `focus_guard::tests::two_windows_of_one_app_are_different_targets` | F2 | 0.4.7 X11 two-window test |
 | 1 Windows: HWND + PID + start time (a PID without a start time never matches) | `focus_guard::tests::reused_hwnd_with_another_process_is_a_different_target`, `windows_identity_without_start_time_never_matches` | F3 (close and reopen Notepad mid-dictation) | — |
 | 1 X11 ID parsing | `platform::focus_tests::active_window_id_parses_from_xprop` | — | covered |
-| 2 Same window always delivers | `focus_guard::tests::same_window_always_delivers` | F1 | covered |
+| 2 Same Windows child delivers; changed/missing child holds | `focus_guard::tests::windows_same_child_delivers_but_another_child_holds`, `windows_missing_or_reused_child_never_matches` | H9 repeat needed | n/a |
 | 2 Focus read after drag release | `controller::…::delivery_target_reads_focus_after_wait_and_keeps_busy_until_drop`, `…_cleans_up_focus_errors_and_never_reads_after_barrier_failure` | F11 | covered |
 | 3 Modes hold/refocus/copy/insert | `focus_guard::tests::different_window_follows_mode`, `mode_spellings_round_trip` | F4–F7 | covered |
 | 3 Unknown or own origin | `focus_guard::tests::unknown_or_own_start_is_a_mismatch` | F8 | covered |

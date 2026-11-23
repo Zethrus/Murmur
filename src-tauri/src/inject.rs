@@ -1000,6 +1000,53 @@ mod tests {
         assert_eq!(probes, 3);
     }
     #[test]
+    fn guarded_typing_stops_on_same_window_child_change_with_transcript_available() {
+        use crate::{
+            focus_guard::{decide, Decision, FocusMode},
+            platform::{Focus, KeyboardTarget},
+        };
+        let editor = Focus::Window {
+            id: 10,
+            pid: Some(100),
+            started: Some(5),
+            keyboard: Some(KeyboardTarget {
+                id: 11,
+                thread: 20,
+                pid: 200,
+                started: 6,
+            }),
+            class: "editor.exe".into(),
+        };
+        let mut menu = editor.clone();
+        if let Focus::Window {
+            keyboard: Some(child),
+            ..
+        } = &mut menu
+        {
+            child.id = 12;
+        }
+        let transcript = "ABCD";
+        let mut sent = String::new();
+        let mut probes = 0;
+        let error = guarded_chars(
+            transcript,
+            || {
+                probes += 1;
+                let current = if probes < 3 { &editor } else { &menu };
+                Ok(decide(Some(&editor), Some(current), FocusMode::Hold) == Decision::Deliver)
+            },
+            |ch| {
+                sent.push(ch);
+                Ok(())
+            },
+            || {},
+        )
+        .unwrap_err();
+        assert_eq!(sent, "AB");
+        assert_eq!(error.downcast_ref::<TargetChanged>().unwrap().sent_chars, 2);
+        assert_eq!(transcript, "ABCD"); // controller holds the raw transcript on this error
+    }
+    #[test]
     fn unreadable_destination_does_not_submit_a_character() {
         let mut sent = String::new();
         let error = guarded_chars(

@@ -106,7 +106,11 @@ class H9Tests(unittest.TestCase):
         self.ctx.settle = mock.Mock(return_value="done")
         self.ctx.sleep = mock.Mock()
         self.ctx.artifact = lambda suffix: self.ctx.out / suffix
-        with mock.patch.object(h9, "_drive_registered_hotkey"), \
+        def drive(_ctx, _spec, _name, sample, stamp):
+            sample("F9 held")
+            stamp("after alt up")
+        with mock.patch.object(h9, "_drive_registered_hotkey", side_effect=drive), \
+             mock.patch.object(win32, "foreground_context", return_value={"focus_hwnd": 70}) as native, \
              mock.patch.object(h9, "_focus_phase", return_value={"stage": "settled"}) as focus_phase, \
              mock.patch.object(win32, "clipboard_text", return_value=expected), \
              mock.patch.object(win32, "release_all"):
@@ -121,6 +125,9 @@ class H9Tests(unittest.TestCase):
         self.ctx.settle.assert_called_once_with(timeout=45)
         self.assertEqual([call.args[1] for call in focus_phase.call_args_list],
                          ["before modifiers", "after delivery wait"])
+        self.assertGreaterEqual(native.call_count, 2)
+        self.assertTrue(any(phase.get("stage") == "after alt up" and
+                            phase.get("native_focus", {}).get("focus_hwnd") == 70 for phase in row["phases"]))
         self.assertEqual(h9._clipboard_trace_problem({"events": [[1, 0, guard.VK_PACKET, 65, 0]],
                                                       "overflow": False}, h9.ALT_HOTKEY),
                          "clipboard-only emitted delivery keyboard events: [231]")
@@ -158,6 +165,53 @@ class H9Tests(unittest.TestCase):
         for extra in ([0, 256, guard.VK_PACKET, 65, 16], [0, 256, 0xA3, 0, 16]):
             self.assertIsNotNone(h9._clipboard_trace_problem(
                 {"events": events + [extra], "overflow": False}, h9.ALT_HOTKEY))
+
+    def test_clipboard_only_phase_stamps_record_native_focus_without_uia(self):
+        pad = SimpleNamespace(hwnd=42, owner_pid=7)
+        phases = []
+        snapshots = [{"hwnd": 42, "process_id": 7, "focus_hwnd": child,
+                      "gui_flags": 0, "gui_status": "ok", "input_desktop": "Default"}
+                     for child in (70, 71)]
+        with mock.patch.object(win32, "foreground_context", side_effect=snapshots), \
+             mock.patch.object(h9, "_focus_phase") as uia_phase, \
+             mock.patch.object(win32, "tap") as tap:
+            h9._stamp_native_focus(self.ctx, pad, phases, "before F9 up")
+            h9._stamp_native_focus(self.ctx, pad, phases, "after alt up")
+        self.assertEqual([phase["native_focus"]["focus_hwnd"] for phase in phases], [70, 71])
+        self.assertTrue(all(phase["focus_snapshot"] == "native_only" for phase in phases))
+        self.assertTrue(all(phase["expected_hwnd"] == 42 for phase in phases))
+        uia_phase.assert_not_called()
+        tap.assert_not_called()
+
+    def test_native_phase_read_failure_is_preserved_and_stops_input(self):
+        pad = SimpleNamespace(hwnd=42, owner_pid=7)
+        phases = []
+        with mock.patch.object(win32, "foreground_context", side_effect=RuntimeError("unavailable")):
+            with self.assertRaisesRegex(Fail, "native focus unavailable"):
+                h9._stamp_native_focus(self.ctx, pad, phases, "before F9 down")
+        self.assertIn("unavailable", phases[0]["native_focus_error"])
+
+    def test_typing_keeps_native_and_uia_reads_out_of_release_interval(self):
+        row = {"phases": [], "sentinel": "sentinel"}
+        self.ctx.murmur.history_after.return_value = [(11, h9.DIRECT_A)]
+        self.ctx.guard.stop_key_trace.return_value = {"events": [], "overflow": False}
+        self.ctx.observed_text = mock.Mock(return_value=h9.DIRECT_A)
+        self.ctx.settle = mock.Mock(return_value="done")
+        self.ctx.sleep = mock.Mock()
+        def drive(_ctx, _spec, _name, sample, stamp):
+            sample("F9 held")
+            stamp("after alt up")
+        with mock.patch.object(h9, "_drive_registered_hotkey", side_effect=drive), \
+             mock.patch.object(h9, "_focus_phase", return_value={"stage": "UIA snapshot"}) as uia_phase, \
+             mock.patch.object(win32, "foreground_context") as native, \
+             mock.patch.object(win32, "clipboard_text", return_value="sentinel"), \
+             mock.patch.object(win32, "release_all"):
+            h9._app_trial(self.ctx, mock.Mock(), "type-alt", "type", h9.ALT_HOTKEY, row)
+        native.assert_not_called()
+        self.assertEqual([call.args[1] for call in uia_phase.call_args_list],
+                         ["before modifiers", "after delivery wait"])
+        self.assertTrue(any(phase.get("stage") == "after alt up" and
+                            phase.get("focus_snapshot") == "deferred" for phase in row["phases"]))
 
     def test_non_text_clipboard_is_refused_before_any_input(self):
         with mock.patch.object(win32, "clipboard_text", return_value="text"), \

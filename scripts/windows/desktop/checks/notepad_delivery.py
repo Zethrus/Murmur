@@ -98,6 +98,22 @@ def _read_settled_clipboard(row):
         return None
 
 
+def _stamp_native_focus(ctx, pad, phases, stage):
+    """Clipboard-only timing evidence: read Win32 focus without consulting UIA."""
+    ctx.guard.check()
+    phase = {"stage": stage, "time": time.time(), "focus_snapshot": "native_only",
+             "expected_hwnd": pad.hwnd, "expected_pid": pad.owner_pid}
+    phases.append(phase)
+    try:
+        phase["native_focus"] = win32.foreground_context()
+    except guard.UserInput:
+        raise
+    except Exception as error:  # noqa: BLE001 - failed observation never authorizes more input
+        phase["native_focus_error"] = f"{type(error).__name__}: {error}"
+        raise Fail(f"{stage}: native focus unavailable") from error
+    ctx.guard.check()
+
+
 def _settled_capture(ctx, pad, name, expected, row):
     """Read first; save only if this exact editor still owns keyboard focus."""
     ctx.screenshot(pad.hwnd, f"{name}-notepad.png")
@@ -167,10 +183,15 @@ def _settled_capture(ctx, pad, name, expected, row):
 
 def _app_trial(ctx, pad, name, path, hotkey, row):
     phases = row["phases"]
-    # After this preflight, phase stamps do no UIA/native focus reads until settled.
+    # Keyboard-delivery trials retain timestamp-only sampling. Clipboard-only
+    # trials have no injected transcript and sample native focus at chord edges.
+    # Neither path consults target UIA between this preflight and settled output.
     phases.append(_focus_phase(pad, "before modifiers"))
-    stamp = lambda stage: phases.append({"stage": stage, "time": time.time(),
-                                         "focus_snapshot": "deferred"})
+    if path == "clipboard_only":
+        stamp = lambda stage: _stamp_native_focus(ctx, pad, phases, stage)
+    else:
+        stamp = lambda stage: phases.append({"stage": stage, "time": time.time(),
+                                             "focus_snapshot": "deferred"})
     ctx.guard.start_key_trace()
     trace = None
     expected = None
