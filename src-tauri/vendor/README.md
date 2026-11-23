@@ -27,17 +27,22 @@ reproducer showed that host input processing restores mouse delivery, drag start
 clean release
 ([run 44041874181](../../docs/parity/desktop-44041874181-o9-host-input.md)).
 
-**Verify:** unpack the official crate and compare it with this folder:
+**Verify:** both platform build workflows verify the archive's SHA-256, apply the
+recorded patch in a temporary directory, and compare every vendor file byte-for-byte:
 
 ```sh
-curl -sL https://static.crates.io/crates/wry/wry-0.57.2.crate | tar xz
-sha256sum wry-0.57.2.crate   # if downloaded separately
-diff -ru wry-0.57.2 src-tauri/vendor/wry
+python3 scripts/verify-vendored-wry.py
+# Offline, with a previously downloaded archive (the same hash is still required):
+python3 scripts/verify-vendored-wry.py --archive /path/to/wry-0.57.2.crate
 ```
 
-The diff must contain only the two `.cargo*` metadata files and the hunks in
-`wry-host-input.patch`.
+Only the two `.cargo*` metadata files are omitted. Unrecorded changes, missing or
+extra files, archive hash mismatches, and patches that do not apply fail verification.
+Git attributes preserve upstream bytes on Windows as well as Linux. Verification
+does not modify the vendor tree. Unit tests use small local archives and need no network.
 
-**Remove when:** a released Wry exposes the option (watch #1850). Then drop
-`[patch.crates-io]` and the direct `wry` dependency, and pass the option through the
-supported API.
+**Remove when:** a released Wry exposes the option (watch #1850) and Tauri exposes it
+through a supported integration. Then drop `[patch.crates-io]`, the direct `wry`
+dependency and this verifier, and pass the option through that API. Validate the
+migration independently; the released Wry focus fix alone does not replace host
+input processing.

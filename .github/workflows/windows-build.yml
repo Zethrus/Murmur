@@ -145,6 +145,13 @@ jobs:
           ref: ${{ inputs.fallback_sha || github.sha }}
           persist-credentials: false
 
+      - name: Verify pinned Wry source and patch
+        if: ${{ steps.claim.outputs.build != 'false' }}
+        shell: pwsh
+        run: |
+          python scripts/verify-vendored-wry.py
+          if ($LASTEXITCODE -ne 0) { throw 'Vendored Wry verification failed' }
+
       - name: Prepare isolated build caches
         if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
@@ -201,7 +208,7 @@ jobs:
         run: |
           # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
           Push-Location scripts/tests
-          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_ci_cache test_ci_release_stage test_cpu_audit test_embedded_manifest test_desktop_harness
+          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_ci_cache test_ci_release_stage test_cpu_audit test_embedded_manifest test_desktop_harness test_vendored_wry
           $Code = $LASTEXITCODE
           Pop-Location
           if ($Code -ne 0) { throw 'Script tests failed' }
