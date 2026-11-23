@@ -377,6 +377,63 @@ test("a deferred refresh cannot rebuild after navigation or disposal",async()=>{
   await content.dispatch("focusout");h.unload();h.timers.tick(1);await settle();
   assert.equal(h.document.getElementById("field-language"),language);
 });
+test("Companion retains editors without reverting sequential network edits",async()=>{
+  const h=await settings();await button(h.root,"Companion").dispatch("click");await settle();
+  const bind=h.document.getElementById("field-bind-address"),port=h.document.getElementById("field-port");
+  bind.value="192.168.1.20";port.focus();await bind.dispatch("change");
+  assert.ok(h.document.getElementById("field-port")===port,"the next editor stays mounted");
+  port.value="9000";bind.focus();await port.dispatch("change");
+  assert.equal(h.config.companion.network.bind,"192.168.1.20");
+  assert.equal(h.config.companion.network.port,9000);
+  assert.deepEqual(plain(h.calls.filter(c=>c.name==="set_config").map(c=>c.args.patch)),[
+    {companion:{network:{bind:"192.168.1.20"}}},{companion:{network:{port:9000}}}
+  ]);h.unload();
+});
+test("retained Companion controls preserve externally updated network and button siblings",async()=>{
+  const h=await settings();await button(h.root,"Companion").dispatch("click");await settle();
+  const bind=h.document.getElementById("field-bind-address");bind.focus();
+  Object.assign(h.config.companion.network,{bind:"192.168.1.21",port:9001,mdns:true});
+  h.config.companion.buttons.up="cancel";h.emit("config",structuredClone(h.config));
+  const enabled=h.document.getElementById("field-enable-phone-listener");enabled.checked=true;await enabled.dispatch("change");
+  const down=h.document.getElementById("field-down");down.value="enhance";await down.dispatch("change");
+  assert.deepEqual(plain(h.config.companion.network),{enabled:true,bind:"192.168.1.21",port:9001,mdns:true});
+  assert.equal(h.config.companion.buttons.up,"cancel");assert.equal(h.config.companion.buttons.down,"enhance");
+  h.timers.tick(2000);await settle();
+  assert.match(h.root.textContent,/Listening on 192\.168\.1\.21:9001/);h.unload();
+});
+test("queued Companion edits merge only their changed nested fields",async()=>{
+  let finishFirst,requests=0;
+  const h=await settings({set_config:({patch},{config,emit})=>new Promise(resolve=>{
+    const finish=()=>{Object.assign(config.companion.network,patch.companion.network);
+      emit("config",structuredClone(config));resolve(structuredClone(config));};
+    if(++requests===1)finishFirst=finish;else finish();
+  })});
+  await button(h.root,"Companion").dispatch("click");await settle();
+  const bind=h.document.getElementById("field-bind-address"),port=h.document.getElementById("field-port");
+  bind.value="192.168.1.23";port.focus();const first=bind.dispatch("change");await settle();
+  port.value="9003";const second=port.dispatch("change");await settle();
+  assert.equal(requests,1,"the second save waits for the first");finishFirst();await Promise.all([first,second]);
+  assert.equal(h.config.companion.network.bind,"192.168.1.23");assert.equal(h.config.companion.network.port,9003);
+  assert.ok(h.document.getElementById("field-port")===port);h.unload();
+});
+test("rejected Companion save cannot contaminate a later nested edit",async()=>{
+  const h=await settings({set_config:async({patch},{config,emit})=>{
+    const network=patch.companion.network;
+    if("bind" in network)throw new Error("Address refused");
+    Object.assign(config.companion.network,network);emit("config",structuredClone(config));return structuredClone(config);
+  }});
+  await button(h.root,"Companion").dispatch("click");await settle();
+  const bind=h.document.getElementById("field-bind-address"),port=h.document.getElementById("field-port");
+  bind.value="192.168.1.22";port.focus();await bind.dispatch("change");assert.match(h.root.textContent,/Address refused/);
+  port.value="9002";bind.focus();await port.dispatch("change");
+  assert.equal(h.config.companion.network.bind,"127.0.0.1");assert.equal(h.config.companion.network.port,9002);h.unload();
+});
+test("retained app picker uses the current exclusion list after an external update",async()=>{
+  const h=await settings();await button(h.root,"Behavior").dispatch("click");await settle();
+  h.root.querySelector("input").focus();h.config.injection.exclude_apps=["ExistingEditor"];
+  h.emit("config",structuredClone(h.config));await button(h.root,"Pick a focused app…").dispatch("click");await settle();
+  assert.deepEqual(plain(h.config.injection.exclude_apps),["ExistingEditor","TestEditor"]);h.unload();
+});
 test("general replaces the hide toggle with a When idle choice",async()=>{
   const h=await settings();assert.doesNotMatch(h.root.textContent,/Hide when idle/);const idle=h.document.getElementById("field-when-idle");
   assert.equal(idle.value,"icon");idle.value="pill";await idle.dispatch("change");assert.equal(h.config.overlay.idle_view,"pill");h.unload();

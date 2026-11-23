@@ -1,4 +1,4 @@
-import {call, type CompanionButtons, type CompanionConfig, type CompanionStatus, type CompanionNetworkStatus, type CompanionVerb} from "../../bridge";
+import {call, type CompanionButtons, type CompanionConfig, type CompanionPatch, type CompanionStatus, type CompanionNetworkStatus, type CompanionVerb} from "../../bridge";
 import type {PageContext} from "../context";
 import {card, row, stack, el, button, textField} from "../widgets/row";
 import {select} from "../widgets/select";
@@ -43,7 +43,7 @@ const defaults: CompanionConfig = {
 export function companion(ctx: PageContext): HTMLElement {
   const incoming = ctx.config.companion;
   const c: CompanionConfig = {...defaults, ...(incoming ?? {}), buttons: {...defaults.buttons, ...(incoming?.buttons ?? {})}, network: {...defaults.network, ...(incoming?.network ?? {})}};
-  const save = (patch: Partial<CompanionConfig>) => ctx.save({companion: patch});
+  const save = (patch: CompanionPatch) => ctx.save({companion: patch});
 
   const dot = el("i", "status-dot"), headline = el("span", "status-label", "Companion disabled");
   const detail = el("p", "card-note", "Enable the companion, then connect the Flipper with a data cable.");
@@ -68,7 +68,7 @@ export function companion(ctx: PageContext): HTMLElement {
   ctx.subscribe("companion", render);
 
   const saveVerb = (key: keyof CompanionButtons, verb: string) =>
-    save({buttons: {...c.buttons, [key]: verb as CompanionVerb}});
+    save({buttons: {[key]: verb as CompanionVerb}});
 
   const port = textField(c.usb_port, (value) => save({usb_port: value}), "auto-discover");
   const detect = button("Detect devices", async () => {
@@ -89,8 +89,9 @@ export function companion(ctx: PageContext): HTMLElement {
     if (source !== undefined) liveSource.textContent = `Live dictation source: ${source ?? "idle"}`;
   });
   const renderNetwork = (status: CompanionNetworkStatus) => {
+    const network = {...defaults.network, ...ctx.config.companion?.network};
     fingerprint.textContent = `TLS fingerprint: ${status.fingerprint ?? "—"}`;
-    networkNote.textContent = status.error ?? (status.enabled ? `Listening on ${c.network.bind}:${c.network.port} · refused peers ${status.rejected_peers} · dropped audio frames ${status.dropped_audio_frames}` : "Phone listener off");
+    networkNote.textContent = status.error ?? (status.enabled ? `Listening on ${network.bind}:${network.port} · refused peers ${status.rejected_peers} · dropped audio frames ${status.dropped_audio_frames}` : "Phone listener off");
     devices.replaceChildren(...(status.devices.length ? status.devices.map(device =>
       row(device.name || "Phone", `Paired ${new Date(device.created_at * 1000).toLocaleString()} · last seen ${device.last_seen ? new Date(device.last_seen * 1000).toLocaleString() : "never"}`,
         button("Revoke", async () => { try { await call("companion_revoke_device", {id: device.id}); await refreshNetwork(); } catch (e) { ctx.report(e); } }))) : [el("p", "card-note", "No paired phones.")]));
@@ -103,11 +104,11 @@ export function companion(ctx: PageContext): HTMLElement {
   };
   void poll();
   ctx.cleanup(() => { polling = false; clearTimeout(refresh); });
-  const bind = textField(c.network.bind, (value) => save({network: {...c.network, bind: value}}), "127.0.0.1");
+  const bind = textField(c.network.bind, (value) => save({network: {bind: value}}), "127.0.0.1");
   const networkPort = textField(String(c.network.port), async (value) => {
     const port = Number(value);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Port must be 1–65535");
-    await save({network: {...c.network, port}});
+    await save({network: {port}});
   }, "8787");
 
   return stack(
@@ -139,7 +140,7 @@ export function companion(ctx: PageContext): HTMLElement {
         select(c.source, [["auto", "Automatic"], ["local", "Built-in microphone"], ["phone", "Phone microphone"]],
           (value) => save({source: value as CompanionConfig["source"]}))),
       row("Enable phone listener", "TLS only. Connections are accepted from local addresses and require pairing.",
-        toggle(c.network.enabled, (enabled) => save({network: {...c.network, enabled}}))),
+        toggle(c.network.enabled, (enabled) => save({network: {enabled}}))),
       row("Bind address", "Use your LAN address to connect from a phone. Loopback allows local testing.", bind),
       row("Port", "Port for the phone connection.", networkPort),
       fingerprint,

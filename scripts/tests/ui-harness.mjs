@@ -14,6 +14,9 @@ export function fixture() {
     postproc:{style:"auto",code_apps:["code","kitty"],spoken_punctuation:true,allow_newlines:false,replacements:{"mur mur":"Murmur"},fillers:["um","uh"]},
     privacy:{history_enabled:false,history_retention_days:7},
     enhance:{auto_rewrite:false,rewrite_hotkey:"",accept_hotkey:"",style:"concise",model:"qwen3-1.7b-q4_k_m",accept_mode:"clipboard",rewrite_code:false,threads:0,unload_after_s:120,load_timeout_ms:30000,timeout_ms:15000},
+    companion:{enabled:false,ptt:false,transport:"auto",usb_port:"",ble_address:"",source:"auto",
+      network:{enabled:false,bind:"127.0.0.1",port:8787,mdns:false},
+      buttons:{ok:"dictate_toggle",up:"enhance",down:"accept",back:"dismiss",left:"none",right:"none",ok_long:"cancel",up_long:"none",down_long:"none"}},
     setup:{postponed:false}
   };
 }
@@ -44,7 +47,7 @@ export async function harness(overrides={}) {
   const emit=(name,data)=>{for(const fn of events.get(name)??[])fn(data);};
   const call=async(name,args)=>{calls.push({name,args});if(overrides[name])return overrides[name](args,{config,status,components,emit,enhanceModel,enhanceStatus,snapshot});
     switch(name){case "get_config":return structuredClone(config);case "get_status":return structuredClone(status);
-      case "set_config":for(const [key,values] of Object.entries(args.patch))Object.assign(config[key],values);emit("config",structuredClone(config));return structuredClone(config);
+      case "set_config":mergeConfig(config,args.patch);emit("config",structuredClone(config));return structuredClone(config);
       case "components_snapshot":return structuredClone(components);case "list_devices":return [{id:"mic",name:"Test microphone",is_default:true}];
       case "test_engine":return {text:"",language:"en",duration_ms:3000,infer_ms:12};
       case "components_install":for(const id of args.ids){const c=components.components.find(x=>x.id===id);c.state="installing";c.job={id,phase:"downloading",bytes_done:0,bytes_total:c.size_bytes,rate:0,eta:null,error:null,reason:null};}return undefined;
@@ -55,6 +58,8 @@ export async function harness(overrides={}) {
       case "remove_enhance_model":enhanceModel.installed=false;enhanceStatus.installation_state="not_installed";enhanceStatus.revision++;return undefined;
       case "rewrite_last_dictation":return {status:"no_dictation"};case "accept_enhancement":return {outcome:"copied"};case "discard_enhancement":return undefined;
       case "get_overlay_snapshot":return structuredClone(snapshot);
+      case "companion_status":return {enabled:false,connected:false,transport:"auto",port:"",device:null,protocol:4,last_button:null,error:null,rssi:null,battery:null,latency_ms:0};
+      case "companion_network_status":return {enabled:config.companion.network.enabled,fingerprint:null,error:null,rejected_peers:0,dropped_audio_frames:0,devices:[]};
       case "history_search":return [];case "pick_exclude_app":return "TestEditor";default:return undefined;}
   };
   const on=async(name,handler)=>{const listeners=events.get(name)??new Set();listeners.add(handler);events.set(name,listeners);return ()=>listeners.delete(handler);};
@@ -70,4 +75,12 @@ export async function harness(overrides={}) {
     const source=await readFile(file,"utf8"),code=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
     const mod=new vm.SourceTextModule(code,{context,identifier:file});cache.set(file,mod);await mod.link((specifier)=>load(resolve(dirname(file),specifier+".ts")));return mod;}
   return {root,document,calls,emit,timers,events,config,status,components,enhanceModel,enhanceStatus,snapshot,observers,drags,window,async module(file){const mod=await load(resolve("src",file));await mod.evaluate();return mod.namespace;},unload(){unloads.forEach(fn=>fn());}};
+}
+
+// Match config.rs: tables merge recursively, arrays/scalars and replacements replace.
+function mergeConfig(target,patch){
+  for(const [key,value] of Object.entries(patch)){
+    if(key!=="replacements"&&value&&typeof value==="object"&&!Array.isArray(value)&&target[key]&&typeof target[key]==="object"&&!Array.isArray(target[key]))mergeConfig(target[key],value);
+    else target[key]=structuredClone(value);
+  }
 }

@@ -151,7 +151,7 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
     generation++; const current = generation; pageDisposers.splice(0).forEach(f=>f());
     const focused = document.activeElement instanceof HTMLElement ? document.activeElement.id : "";
     const scroll = main.scrollTop;
-    const ctx: PageContext = {config,status,lastTranscript,save,report,openSetup,cleanup:fn=>pageDisposers.push(fn),subscribe(event,handler) {
+    const ctx: PageContext = {get config(){return config;},status,lastTranscript,save,report,openSetup,cleanup:fn=>pageDisposers.push(fn),subscribe(event,handler) {
       void on(event,data=>{if (generation === current && !disposed) handler(data);}).then(off=>{
         if (generation !== current || disposed) off(); else pageDisposers.push(off);
       }).catch(report);

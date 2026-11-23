@@ -10,7 +10,10 @@ export function behavior(ctx: PageContext): HTMLElement {
   const c = ctx.config, p = controls(ctx,"postproc"), i = controls(ctx,"injection"), transcript = el("pre","transcript",ctx.lastTranscript || "Your next completed dictation will appear here. Nothing is saved unless history is enabled.");
   ctx.subscribe("latency",event=>{ if (event.text !== undefined) transcript.textContent = event.text; });
   const exclusions = stack(listEditor(c.injection.exclude_apps,setter(ctx,"injection","exclude_apps"),"app class"),button("Pick a focused app…",async()=>{
-    try { const app = await call("pick_exclude_app"); if (app && !c.injection.exclude_apps.includes(app)) await setter(ctx,"injection","exclude_apps")([...c.injection.exclude_apps,app]); } catch(e) { ctx.report(e); }
+    try {
+      const app = await call("pick_exclude_app"), excluded = ctx.config.injection.exclude_apps;
+      if (app && !excluded.includes(app)) await setter(ctx,"injection","exclude_apps")([...excluded,app]);
+    } catch(e) { ctx.report(e); }
   }));
   return stack(card("Speak in your own style",
     p.select("style","Dictation style","Auto uses code style in the apps below; prose everywhere else.",[["auto","Auto · by focused app"],["prose","Prose"],["code","Code"]]),
