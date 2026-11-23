@@ -54,7 +54,8 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
   let config: Config, status: Status, version = "", page: Page = "General", disposed = false, saving = 0, lastTranscript = "", generation = 0;
   const disposers: (()=>void)[] = [], pageDisposers: (()=>void)[] = [];
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-  window.addEventListener("beforeunload",()=>{disposed = true; disposers.forEach(f=>f()); pageDisposers.forEach(f=>f()); clearTimeout(refreshTimer);},{once:true});
+  let editRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  window.addEventListener("beforeunload",()=>{disposed = true; disposers.forEach(f=>f()); pageDisposers.forEach(f=>f()); clearTimeout(refreshTimer); clearTimeout(editRefreshTimer);},{once:true});
   let snapshot: ComponentsSnapshot | null = null;
   [config,status,version] = await Promise.all([call("get_config"),call("get_status"),appVersion()]);
   // Local only; a failure here must not keep Settings from opening.
@@ -109,24 +110,44 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
     try { config = await call("set_config",{patch}); theme(); notice.textContent = "All changes saved"; }
     catch(e) { report(e); throw e; }
     finally { saving--; }
-    renderPage();
+    renderUnlessTyping();
   };
   // An external config change (the overlay saving its dragged position, a tray toggle…) must
   // not rebuild the page under a field the user is typing in: that discards focus, caret and
   // text. Defer the rebuild until focus leaves the field (Windows O8, run 44051172677).
   let deferredRender = false;
+  let composingField: HTMLElement | null = null;
   const typingInPage = (): boolean => {
+    if (composingField && content.contains(composingField)) return true;
     const active = document.activeElement as (HTMLElement & {type?: string}) | null;
     if (!active || !content.contains(active)) return false;
     if (active.tagName === "TEXTAREA" || active.isContentEditable) return true;
     return active.tagName === "INPUT" && !NON_TEXT_INPUTS.has(active.type ?? "text");
   };
-  const renderUnlessTyping = (): void => { if (typingInPage()) deferredRender = true; else renderPage(); };
-  content.addEventListener("focusout",()=>{ if (!deferredRender) return;
-    setTimeout(()=>{ if (deferredRender && !disposed && !typingInPage()) renderPage(); },0); });
+  const renderUnlessTyping = (): void => {
+    if (disposed) return;
+    if (typingInPage()) deferredRender = true; else renderPage();
+  };
+  const finishEditing = (): void => {
+    if (!deferredRender || disposed || editRefreshTimer !== undefined) return;
+    // Focus may move to another editor, and compositionend may follow focusout.
+    editRefreshTimer = setTimeout(()=>{
+      editRefreshTimer = undefined;
+      if (deferredRender && !disposed && !typingInPage()) renderPage();
+    },0);
+  };
+  content.addEventListener("focusout",finishEditing);
+  content.addEventListener("compositionstart",event=>{
+    if (event.target instanceof HTMLElement) composingField = event.target;
+  });
+  content.addEventListener("compositionend",event=>{
+    if (event.target === composingField) composingField = null;
+    finishEditing();
+  });
   function renderPage(): void {
     if (setupOpen) return;
     deferredRender = false;
+    composingField = null;
     generation++; const current = generation; pageDisposers.splice(0).forEach(f=>f());
     const focused = document.activeElement instanceof HTMLElement ? document.activeElement.id : "";
     const scroll = main.scrollTop;

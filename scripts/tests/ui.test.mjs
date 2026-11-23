@@ -336,6 +336,47 @@ test("an external config change never rebuilds the page under a focused text fie
   const fresh=search();h.config.overlay.scale=1.2;h.emit("config",structuredClone(h.config));await settle();
   assert.notEqual(search(),fresh);h.unload();
 });
+test("a pending save preserves the next edited field and applies the latest config on blur",async()=>{
+  let finish;
+  const h=await settings({set_config:({patch},{config,emit})=>new Promise(resolve=>{
+    finish=()=>{for(const [section,values] of Object.entries(patch))Object.assign(config[section],values);
+      emit("config",structuredClone(config));resolve(structuredClone(config));};
+  })});
+  const toggle=h.document.getElementById("field-translate-to-english");toggle.checked=true;
+  const pending=toggle.dispatch("change");await settle();
+  await button(h.root,"Privacy").dispatch("click");await settle();
+  const search=()=>h.root.querySelectorAll("input").find(i=>i.getAttribute("aria-label")==="Search history");
+  const field=search();field.value="new draft";field.selectionStart=2;field.selectionEnd=5;field.focus();
+  finish();await pending;await settle();
+  assert.ok(search()===field,"an earlier save must not replace the current editor");
+  assert.equal(field.value,"new draft");assert.equal(field.selectionStart,2);assert.equal(field.selectionEnd,5);
+  for(const days of [14,30]){h.config.privacy.history_retention_days=days;h.emit("config",structuredClone(h.config));}
+  assert.equal(search(),field);
+  h.document.activeElement=null;await h.root.querySelector(".page-content").dispatch("focusout");h.timers.tick(1);await settle();
+  assert.notEqual(search(),field);
+  assert.equal(h.document.getElementById("field-retention").value,"30");h.unload();
+});
+test("config refresh waits for composition to end even when focus leaves first",async()=>{
+  const h=await settings();await button(h.root,"Privacy").dispatch("click");await settle();
+  const content=h.root.querySelector(".page-content");
+  const search=()=>h.root.querySelectorAll("input").find(i=>i.getAttribute("aria-label")==="Search history");
+  const field=search();field.focus();await content.dispatch("compositionstart",{target:field});
+  h.emit("config",structuredClone(h.config));h.document.activeElement=null;
+  await content.dispatch("focusout");h.timers.tick(1);await settle();
+  assert.ok(search()===field,"focusout must not destroy an unfinished composition");
+  await content.dispatch("compositionend",{target:field});h.timers.tick(1);await settle();
+  assert.notEqual(search(),field);h.unload();
+});
+test("a deferred refresh cannot rebuild after navigation or disposal",async()=>{
+  const h=await settings();await button(h.root,"Privacy").dispatch("click");await settle();
+  const content=h.root.querySelector(".page-content"),field=content.querySelector("input");field.focus();
+  h.emit("config",structuredClone(h.config));h.document.activeElement=null;await content.dispatch("focusout");
+  await button(h.root,"General").dispatch("click");const language=h.document.getElementById("field-language");
+  h.timers.tick(1);await settle();assert.equal(h.document.getElementById("field-language"),language);
+  language.focus();h.emit("config",structuredClone(h.config));h.document.activeElement=null;
+  await content.dispatch("focusout");h.unload();h.timers.tick(1);await settle();
+  assert.equal(h.document.getElementById("field-language"),language);
+});
 test("general replaces the hide toggle with a When idle choice",async()=>{
   const h=await settings();assert.doesNotMatch(h.root.textContent,/Hide when idle/);const idle=h.document.getElementById("field-when-idle");
   assert.equal(idle.value,"icon");idle.value="pill";await idle.dispatch("change");assert.equal(h.config.overlay.idle_view,"pill");h.unload();
