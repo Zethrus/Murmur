@@ -260,6 +260,35 @@ unlocked, 60 s without input, no other `murmur.exe`, Notepad closed), shows a
 (same folder layout): `python scripts\windows\desktop\run.py --build <verified
 copy> --out <dir> [--only H1,F2] [--group focus] [--repeat 3]`.
 
+### Read-only clipboard metadata diagnostic
+
+If H9/H10 refuses a clipboard that appears to contain plain text, use
+`windows-desktop.yml` with matching `--ref` and `sha`, and
+`-f clipboard_diagnostic=true`. Leave every other diagnostic flag false.
+This owner-only mode uses the existing interactive desktop runner and hash-locked
+venv; it needs no app build, handoff, countdown, focus click, idle period, or input
+guard. It refuses session 0, a noninteractive window station, or a locked desktop.
+It opens no test windows and launches no Murmur process.
+
+The probe takes at most three metadata snapshots, two seconds apart, closing the
+clipboard before each pause. It records session/window-station/desktop identity,
+format IDs and standard or registered names, Unicode availability, sequence
+numbers, and API errors. Enumeration errors, repeated IDs, excessive counts,
+failed names, and potentially truncated names remain explicit failures. Sequence
+changes are reported; they are not attributed to a process. No clipboard payload
+is retrieved, logged, hashed, replaced, or restored. Registered format names are
+metadata supplied by applications and must be treated as untrusted evidence.
+
+`clipboard-diagnostic.json` is saved in the normal report directory, printed in
+the job log, and included in the summary and best-effort artifact upload. An
+`ok` result means metadata collection completed, not that H9/H10 preflight or
+delivery passed. The reported `unsupported_format_ids` use the current text-only
+allowlist without changing it; metadata cannot prove Unicode data is readable.
+Current snapshots cannot reconstruct clipboard formats from an earlier failed
+run. Native API call duration is not bounded by the snapshot count; the workflow
+retains its existing job timeout. Do not clear the clipboard or relax restoration
+checks merely because a registered format has a familiar name.
+
 ### Read-only idle diagnostic
 
 If the 60-second preflight reports recent input despite the owner leaving Edison
