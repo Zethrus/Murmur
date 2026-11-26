@@ -217,7 +217,7 @@ jobs:
         run: |
           # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
           Push-Location scripts/tests
-          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_ci_cache test_ci_release_stage test_cpu_audit test_embedded_manifest test_desktop_harness test_notepad_delivery_diagnostic test_vendored_wry
+          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_ci_cache test_ci_release_stage test_cpu_audit test_embedded_manifest test_desktop_harness test_notepad_delivery_diagnostic test_alt_release_diagnostic test_vendored_wry
           $Code = $LASTEXITCODE
           Pop-Location
           if ($Code -ne 0) { throw 'Script tests failed' }

@@ -24,11 +24,32 @@ The Windows reader rechecks foreground/thread/PID, child focus, menu flags and
 child ownership after gathering process metadata. These checks remain best effort,
 not an atomic guarantee between reading the destination and sending input.
 
-This is designed to contain the observed same-window menu transition in default
-hold mode; native effectiveness remains unverified. It does not repair Alt
-menu activation or prove exact delivery. H9 remains unresolved until native
-hardware validation confirms the Alt paths and text/clipboard result. A held
-transcript is an interruption, not a passing exact-delivery result.
+Native run 45282636518 on `1da9804f7550e8b2f7f0456244321b3784f7d3b8`
+confirmed containment for its three Alt trials: clipboard-only, typing and paste
+all held 44-character transcripts when keyboard focus changed to File. The
+editors remained empty, typing emitted no Unicode packets, and paste emitted no
+Ctrl+V. No Alt trial produced an output history row. This is containment evidence
+for this run, not an Alt-delivery pass or proof for every activation timing.
+
+Direct Unicode and all three non-Alt paths passed their exact assertions. The
+guard observed 221 successful probes without a miss; final cleanup retired all
+seven owned tabs without a cleanup failure. Evidence is in the run's
+`H9-notepad-delivery.json`, app logs and `desktop-report.json`:
+https://github.com/Zethrus/Murmur/actions/runs/45282636518
+
+The clipboard-only Alt trial retained editor HWND 2495130 through the snapshot
+after Alt-up, then reported HWND 2360254 after Ctrl-up, approximately 7 ms later.
+The settled UIA read identified File. These samples bracket the observed change;
+they do not establish which release or queued message caused it. The non-Alt
+control retained its editor HWND throughout. Guard probes remained active in
+both cases, so the comparison does not independently exclude a probe interaction.
+
+The approved next comparison varies Murmur registration and explicit release
+order on fresh owned documents, with native focus stamps and exact event traces.
+It must distinguish "not configured in Murmur" from proven OS registration and
+must retain failed observations. Ordinary H9 and release assertions stay intact.
+No menu-cancellation or synthetic masking repair is justified by this timing
+evidence alone. A held transcript remains an interruption, not successful delivery.
 
 Parent review restricted callback capture to Windows and added the final native
 identity recheck. Independent review found no additional behavior blocker; its
@@ -37,4 +58,5 @@ cross-check. Local validation passes 527 Python script tests, 13 focus-policy
 tests, and the full no-default-features Rust suite. The executor also reported
 the full default-feature Rust suite passing before those scoped parent changes.
 Lifecycle tests establish action/helper ownership, not native cancel/rebind queue
-timing. All Windows hardware behavior remains to be checked on the resulting build.
+timing. The bounded native result above does not replace those lifecycle checks,
+ordinary insertion acceptance, or full-suite and manual release validation.

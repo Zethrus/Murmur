@@ -48,6 +48,8 @@ CHECKS = (
           "h8_focus_phases", diagnostic=True),
     Check("H9", "hotkeys", "Diagnostic: Notepad clipboard, type and paste delivery matrix",
           "h9_notepad_delivery", diagnostic=True),
+    Check("H10", "hotkeys", "Diagnostic: Alt release order and Murmur registration matrix",
+          "h10_alt_release", diagnostic=True),
     Check("I1", "insertion", "Sentence A into Notepad (type)", "i1_notepad"),
     Check("I2", "insertion", "Sentence B into the editor", "i2_editor"),
     Check("I3", "insertion", "Sentence A into Windows Terminal", "i3_terminal", best_effort=True),

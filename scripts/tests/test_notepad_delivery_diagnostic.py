@@ -236,7 +236,10 @@ class H9Tests(unittest.TestCase):
 
     def test_windows_ci_selects_new_offline_module(self):
         workflow = (HARNESS.parents[2] / ".github" / "workflows" / "windows-build.yml").read_text()
-        self.assertIn("test_desktop_harness test_notepad_delivery_diagnostic test_vendored_wry", workflow)
+        test_command = next(line for line in workflow.splitlines()
+                            if "python -m unittest " in line)
+        for module in ("test_desktop_harness", "test_notepad_delivery_diagnostic", "test_vendored_wry"):
+            self.assertIn(module, test_command.split())
 
     def test_earlier_mismatch_remains_failure_after_later_trials(self):
         with mock.patch.object(win32, "clipboard_text", return_value="original"), \

@@ -639,6 +639,10 @@ class Guard:
         if self.tripped.is_set():
             raise (GuardUnavailable if self.unavailable else UserInput)(self.reason)
 
+    def block_input(self, reason):
+        """Permanently inhibit harness input after unsafe owned-input cleanup."""
+        self._trip(reason, unavailable=True)
+
     def diagnostics(self):
         result = dict(self._diagnostics)
         if self._diagnostic:

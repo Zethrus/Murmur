@@ -417,6 +417,40 @@ desktop. These fields are captured before the hook thread stops. If the valid
 packet is not seen by either the window or the hook, the cause remains
 unresolved; do not run the desktop checks.
 
+### Bounded Alt release-order comparison (H10)
+
+H10 is opt-in and accepts only `--only H10 --repeat 1`. After the matching
+Windows build and fresh owner availability, dispatch `windows-desktop.yml`
+with that full `sha`, `only=H10` and `repeat=1`. It uses the normal idle/session
+preflight, continuous input guard and passive startup-window handoff. It refuses
+clipboard formats that the text restorer cannot preserve. It does not run as part
+of the default acceptance suite.
+
+The fixed ten-trial matrix compares four explicit Alt release sequences and a
+non-Alt control with the tested chord present or absent from Murmur's disposable
+configuration. F9 is released first or last; Alt is released before or after
+Ctrl; Shift is always the first modifier released. Each trial gets a fresh owned
+Notepad tab. Configured-chord trials request clipboard-only output, so transcript
+typing cannot explain a menu transition. Configuration/readiness checks do not
+prove that no other application owns the chord: the report deliberately says
+"not configured in Murmur". Actual OS registration remains unverified;
+configuration and a live overlay alone do not prove RegisterHotKey succeeded.
+
+Read `H10-alt-release.json`, the per-trial app logs and settled captures. Compare
+native keyboard-focus snapshots, exact traced key order and guard-probe timing.
+UI Automation is deferred until the chord and output have settled. The guard
+continues to send its normal probes in both contexts; this experiment does not
+independently exclude a probe interaction or establish physical-key behaviour.
+Sampling brackets a transition but does not establish the causal Windows message.
+
+Earlier failures remain failures when later trials pass. Unknown foreground
+ownership or unsettled delivery stops further trial input. Saving requires the
+same verified owned editor; the diagnostic must not refocus or cancel a menu to
+turn a failed observation into a pass. H10 final cleanup additionally requires fresh owned-editor focus before saving
+and closing; a menu-focused tab is preserved as a cleanup failure. Failed
+release of an owned synthetic key permanently blocks subsequent harness input,
+including tab cleanup. H10 cannot clear H9, ordinary insertion checks, or any release gate.
+
 ### Reading the report
 
 The job summary shows `desktop-report.md`: one row per checklist id with

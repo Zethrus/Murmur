@@ -439,10 +439,19 @@ class Notepad:
                 def saved_owned_document():
                     return self._saved_owned_document(check)
 
+                def verify_cleanup_editor():
+                    check()
+                    if getattr(self, "require_editor_cleanup", False):
+                        if not self.owns_keyboard_focus():
+                            raise RuntimeError(f"Cleanup refused: owned editor lacks keyboard focus for {self.path.name}")
+                        check()  # UIA discovery cannot authorize input after a guard trip.
+
+                verify_cleanup_editor()
                 check()
                 self.win32.tap("ctrl", "s")
                 if not self.win32.wait_for(saved_owned_document, 5) or not saved_owned_document():
                     raise RuntimeError(f"Notepad save or ownership verification failed for {self.path.name}")
+                verify_cleanup_editor()
                 check()
                 self.win32.tap("ctrl", "w")
 

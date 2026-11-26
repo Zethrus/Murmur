@@ -289,6 +289,12 @@ def h9_notepad_delivery(ctx):
     return run(ctx)
 
 
+def h10_alt_release(ctx):
+    """Load the isolated H10 diagnostic only when explicitly selected."""
+    from checks.alt_release import h10_alt_release as run
+    return run(ctx)
+
+
 def h2_release_order(ctx):
     ctx.murmur.ensure(ctx.fixtures["A"].path)
     app = ctx.target("A")

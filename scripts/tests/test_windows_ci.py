@@ -202,6 +202,8 @@ class DesktopHandoffTests(unittest.TestCase):
     def test_desktop_harness_tests_run_on_windows_ci(self):
         block = step("windows-build.yml", "Script tests")
         self.assertIn("test_desktop_harness", block)
+        self.assertIn("test_notepad_delivery_diagnostic", block)
+        self.assertIn("test_alt_release_diagnostic", block)
         self.assertIn("test_embedded_manifest", block)
 
 
