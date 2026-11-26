@@ -1,0 +1,3 @@
+# Preserve the exact upstream bytes used by verify-vendored-wry.py on every OS.
+src-tauri/vendor/wry/** -text
+src-tauri/vendor/wry-host-input.patch text eol=lf

@@ -30,11 +30,11 @@ DEFAULT_HOTKEY = "Ctrl+Alt+Shift+F9"
 IDLE_SECONDS = 60
 BANNER_SECONDS = 10
 # Checks that drive Notepad: Windows 11 Notepad restores its tabs, so it must not be running.
-NOTEPAD_CHECKS = {"O3", "O4", "O8", "O9", "H1", "H8", "I1", "I4", "I5", "I6"}
+NOTEPAD_CHECKS = {"O3", "O4", "O8", "O9", "H1", "H8", "H9", "H10", "I1", "I4", "I5", "I6"}
 REPRO_EXE = "webview2-input-repro.exe"  # O9 only; scripts/windows/desktop/repro.py
 # Run-alone diagnostics whose first guard probe stays passive until Notepad is verified (run
 # 44037195020: O9 on the ordinary guard start lost its first probe before any input).
-LEASED_ALONE = ("O8", "O9")
+LEASED_ALONE = ("O8", "O9", "H9", "H10")
 
 
 def base_config(hotkey):
@@ -75,6 +75,16 @@ def preflight(build_dir, selected, win32, idle_needed=IDLE_SECONDS):
     problems.extend(preflight_desktop(win32, idle_needed))
     if NOTEPAD_CHECKS & {c.id for c in selected} and win32.pids("Notepad.exe"):
         problems.append("Notepad is running; close it (the Notepad checks open and close their own windows)")
+    if any(c.id in ("H9", "H10") for c in selected):
+        if any(c.id == "H10" for c in selected):
+            from checks.alt_release import restorable_clipboard_text
+        else:
+            from checks.notepad_delivery import restorable_clipboard_text
+        from context import Fail
+        try:
+            restorable_clipboard_text()
+        except Fail as error:
+            problems.append(str(error))
     if any(c.id == "O9" for c in selected):
         if not (Path(build_dir) / REPRO_EXE).is_file():
             problems.append(f"{REPRO_EXE} is not in the verified build (manual windows-build.yml runs hand it over)")
@@ -161,7 +171,7 @@ class StartupProbeLease:
 
 
 def start_input_guard(guard, selected, win32, meta):
-    """For H8, or O8/O9 alone, keep the first probe passive until a verified target focuses."""
+    """For H8, or O8/O9/H9 alone, keep the first probe passive until a verified target focuses."""
     if not (any(check.id == "H8" for check in selected) or
             len(selected) == 1 and selected[0].id in LEASED_ALONE):
         guard.start()
@@ -329,6 +339,10 @@ def main(argv=None):
         parser.error("O8 requires --only O8 and --repeat 1 (four observations maximum)")
     if any(check.id == "O9" for check in selected) and (len(selected) != 1 or args.repeat != 1):
         parser.error("O9 requires --only O9 and --repeat 1 (one baseline and one candidate)")
+    if any(check.id == "H9" for check in selected) and (len(selected) != 1 or args.repeat != 1):
+        parser.error("H9 requires --only H9 and --repeat 1 (seven observations maximum)")
+    if any(check.id == "H10" for check in selected) and (len(selected) != 1 or args.repeat != 1):
+        parser.error("H10 requires --only H10 and --repeat 1 (ten observations maximum)")
 
     import win32
     win32.require_windows()
@@ -373,7 +387,14 @@ def main(argv=None):
         session = MurmurSession(build, work, guard, base_config(args.hotkey)).prepare()
         restorer.push("stop Murmur", session.stop)
         # Run-wide safety net (checks that touch the clipboard also snapshot it themselves).
-        clipboard_before = win32.clipboard_text()
+        if selected[0].id in ("H9", "H10"):
+            if selected[0].id == "H10":
+                from checks.alt_release import restorable_clipboard_text
+            else:
+                from checks.notepad_delivery import restorable_clipboard_text
+            clipboard_before = restorable_clipboard_text()
+        else:
+            clipboard_before = win32.clipboard_text()
         restorer.push("restore the clipboard text", lambda: win32.set_clipboard_text(clipboard_before))
         session.install_engine()
         session.install(fetch_model(build, cache / "models"))

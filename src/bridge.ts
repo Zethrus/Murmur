@@ -78,7 +78,12 @@ export interface Config {
   /** First-run component setup; `postponed` = "Set up later" was chosen. */
   setup: { postponed: boolean };
 }
-export type ConfigPatch = { [K in keyof Config]?: Partial<Config[K]> };
+/** Nested Companion tables are merged by the backend; never resend untouched siblings. */
+export type CompanionPatch = Omit<Partial<CompanionConfig>, "network" | "buttons"> & {
+  network?: Partial<CompanionConfig["network"]>;
+  buttons?: Partial<CompanionButtons>;
+};
+export type ConfigPatch = { [K in keyof Config]?: K extends "companion" ? CompanionPatch : Partial<Config[K]> };
 export type ComponentKind = "engine" | "cuda" | "speech-model" | "enhance-model";
 export type ComponentState = "available" | "queued" | "installing" | "installed" | "active" | "paused" | "failed" | "unverified" | "corrupt";
 export type JobPhase = "queued" | "downloading" | "verifying" | "extracting" | "testing" | "activating" | "paused" | "failed";

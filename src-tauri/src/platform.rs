@@ -177,9 +177,17 @@ impl Blocked {
         }
     }
 }
+/// Verified Windows keyboard recipient. Its owning process may be an embedded renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardTarget {
+    pub id: u64,
+    pub thread: u32,
+    pub pid: u32,
+    pub started: u64,
+}
 /// The window that has keyboard focus: one of Murmur's own windows, a native window, or a window
 /// Murmur cannot deliver to. Native windows are identified by their X11 window ID (Linux) or
-/// HWND plus owning process ID and process start time (Windows; HWNDs and PIDs are reused).
+/// foreground HWND/process and focused child HWND/thread/process (Windows).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Focus {
     Own,
@@ -189,6 +197,9 @@ pub enum Focus {
         pid: Option<u32>,
         /// Owning process creation time as a FILETIME (Windows), so a reused PID differs.
         started: Option<u64>,
+        /// Windows keyboard recipient, including foreign-process embedded renderer controls.
+        /// `None` on Linux; an unreadable Windows recipient is blocked before delivery.
+        keyboard: Option<KeyboardTarget>,
         class: String,
     },
     /// Focused, but synthetic input would not arrive (elevated target, secure desktop).
@@ -212,6 +223,7 @@ struct Native {
     id: u64,
     pid: Option<u32>,
     started: Option<u64>,
+    keyboard: Option<KeyboardTarget>,
     class: String,
     blocked: Option<Blocked>,
 }
@@ -234,6 +246,7 @@ pub fn focused_target(app: &AppHandle) -> Result<Focus> {
             id: native.id,
             pid: native.pid,
             started: native.started,
+            keyboard: native.keyboard,
             class: native.class,
         },
     })
@@ -310,6 +323,7 @@ fn native_focus() -> Result<Native> {
         id,
         pid: None,
         started: None,
+        keyboard: None,
         class: class.to_owned(),
         blocked: None,
     })
@@ -344,6 +358,7 @@ fn native_focus() -> Result<Native> {
             id: 0,
             pid: None,
             started: None,
+            keyboard: None,
             class: String::new(),
             blocked: Some(reason),
         });
@@ -355,10 +370,11 @@ fn native_focus() -> Result<Native> {
             bail!("No foreground window");
         }
         let thread = GetWindowThreadProcessId(window, &mut pid);
-        if pid == 0 {
-            bail!("Foreground window has no process");
+        if thread == 0 || pid == 0 {
+            bail!("Foreground window has no owning thread or process");
         }
-        let menu_active = win::menu_active(thread).context("Read foreground menu state")?;
+        let (menu_active, focused_child) =
+            win::gui_focus(thread).context("Read foreground keyboard focus")?;
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if process.is_null() {
             return Err(io::Error::last_os_error()).context("Open foreground process");
@@ -380,13 +396,38 @@ fn native_focus() -> Result<Native> {
             .to_string_lossy()
             .into_owned();
         let own_level = win::integrity_level(GetCurrentProcess());
+        let keyboard = win::keyboard_target(window, focused_child, own_level);
+        let (keyboard, child_block) = match keyboard {
+            Ok((target, block)) => (Some(target), block),
+            Err(error) => {
+                tracing::debug!(%error, "Cannot verify focused keyboard child");
+                (None, Some(Blocked::Unreadable))
+            }
+        };
+        let mut final_pid = 0;
+        let final_thread = GetWindowThreadProcessId(window, &mut final_pid);
+        let (final_menu_active, final_child) = win::gui_focus(thread)?;
+        if GetForegroundWindow() != window
+            || final_pid != pid
+            || final_thread != thread
+            || final_child != focused_child
+            || final_menu_active != menu_active
+            || keyboard
+                .as_ref()
+                .is_some_and(|target| !win::keyboard_still_owned(window, target))
+        {
+            bail!("Foreground changed while reading keyboard focus");
+        }
         Ok(Native {
             id: window as usize as u64,
             pid: Some(pid),
             started,
+            keyboard,
             class: name,
             blocked: integrity_block(target_level, own_level)
-                .or(menu_active.then_some(Blocked::Menu)),
+                .or(menu_active.then_some(Blocked::Menu))
+                .or(started.is_none().then_some(Blocked::Unreadable))
+                .or(child_block),
         })
     }
 }
@@ -406,10 +447,11 @@ mod win {
             Threading::{GetProcessTimes, OpenProcessToken},
         },
         UI::WindowsAndMessaging::{
-            GetGUIThreadInfo, GUITHREADINFO, GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
+            GetAncestor, GetGUIThreadInfo, GetWindowThreadProcessId, IsWindow, GA_ROOT,
+            GUITHREADINFO, GUI_INMENUMODE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE,
         },
     };
-    pub fn menu_active(thread: u32) -> std::io::Result<bool> {
+    pub fn gui_focus(thread: u32) -> std::io::Result<(bool, windows_sys::Win32::Foundation::HWND)> {
         let mut info = GUITHREADINFO {
             cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
             flags: 0,
@@ -424,7 +466,67 @@ mod win {
         if unsafe { GetGUIThreadInfo(thread, &mut info) } == 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE) != 0)
+        Ok((
+            info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE) != 0,
+            info.hwndFocus,
+        ))
+    }
+    /// The focused HWND may belong to an embedded renderer process, so verify its own process
+    /// identity and integrity instead of assuming the foreground window's PID owns it.
+    pub fn keyboard_target(
+        foreground: windows_sys::Win32::Foundation::HWND,
+        focused: windows_sys::Win32::Foundation::HWND,
+        own_level: Option<u32>,
+    ) -> std::io::Result<(super::KeyboardTarget, Option<super::Blocked>)> {
+        use std::io;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        if focused.is_null()
+            || unsafe { IsWindow(focused) } == 0
+            || unsafe { GetAncestor(focused, GA_ROOT) } != foreground
+        {
+            return Err(io::Error::other(
+                "Focused child is missing or outside foreground window",
+            ));
+        }
+        let mut pid = 0;
+        let thread = unsafe { GetWindowThreadProcessId(focused, &mut pid) };
+        if thread == 0 || pid == 0 {
+            return Err(io::Error::other(
+                "Focused child has no owning thread or process",
+            ));
+        }
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let started = start_time(process);
+        let level = integrity_level(process);
+        unsafe { CloseHandle(process) };
+        let started = started
+            .ok_or_else(|| io::Error::other("Focused child process start time unavailable"))?;
+        Ok((
+            super::KeyboardTarget {
+                id: focused as usize as u64,
+                thread,
+                pid,
+                started,
+            },
+            super::integrity_block(level, own_level),
+        ))
+    }
+    /// Final ownership check after process metadata reads; no focus or activation mutation.
+    pub fn keyboard_still_owned(
+        foreground: windows_sys::Win32::Foundation::HWND,
+        target: &super::KeyboardTarget,
+    ) -> bool {
+        let focused = target.id as usize as windows_sys::Win32::Foundation::HWND;
+        let mut pid = 0;
+        let thread = unsafe { GetWindowThreadProcessId(focused, &mut pid) };
+        (unsafe { IsWindow(focused) != 0 && GetAncestor(focused, GA_ROOT) == foreground })
+            && pid == target.pid
+            && thread == target.thread
     }
     /// Name of the desktop receiving input; `None` when it cannot be opened, which is what a
     /// normal process sees while the secure desktop is up.

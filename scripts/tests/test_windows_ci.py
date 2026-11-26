@@ -202,6 +202,8 @@ class DesktopHandoffTests(unittest.TestCase):
     def test_desktop_harness_tests_run_on_windows_ci(self):
         block = step("windows-build.yml", "Script tests")
         self.assertIn("test_desktop_harness", block)
+        self.assertIn("test_notepad_delivery_diagnostic", block)
+        self.assertIn("test_alt_release_diagnostic", block)
         self.assertIn("test_embedded_manifest", block)
 
 
@@ -236,7 +238,7 @@ class DesktopWorkflowTests(unittest.TestCase):
         for name in ("Verify the handed-over build (SHA256SUMS and the build's own job log)",
                      "Preflight (unlocked session, idle 60 s, no other Murmur or Notepad)",
                      "Run the desktop checks (takes the keyboard and mouse; real input aborts)"):
-            self.assertIn("if: ${{ !inputs.guard_diagnostic && !inputs.guard_teardown_diagnostic && !inputs.idle_diagnostic }}",
+            self.assertIn("if: ${{ !inputs.guard_diagnostic && !inputs.guard_teardown_diagnostic && !inputs.idle_diagnostic && !inputs.clipboard_diagnostic }}",
                           step("windows-desktop.yml", name))
         diagnostic = step("windows-desktop.yml", "Diagnose the input guard (harness Python; no app launch)")
         self.assertEqual(condition(diagnostic), "${{ inputs.guard_diagnostic || inputs.guard_teardown_diagnostic }}")
@@ -247,8 +249,8 @@ class DesktopWorkflowTests(unittest.TestCase):
     def test_idle_diagnostic_is_isolated_read_only_and_mutually_exclusive(self):
         validation = step("windows-desktop.yml", "Only the dispatched commit can be tested")
         self.assertIn("IDLE_DIAGNOSTIC: ${{ inputs.idle_diagnostic }}", validation)
-        self.assertIn("$env:GUARD_DIAGNOSTIC -eq 'true' -and $env:IDLE_DIAGNOSTIC -eq 'true'", validation)
-        self.assertIn("$env:TEARDOWN_DIAGNOSTIC -eq 'true' -and $env:IDLE_DIAGNOSTIC -eq 'true'", validation)
+        self.assertIn("$Modes = @($env:GUARD_DIAGNOSTIC, $env:TEARDOWN_DIAGNOSTIC, $env:IDLE_DIAGNOSTIC, $env:CLIPBOARD_DIAGNOSTIC)", validation)
+        self.assertIn("@($Modes | Where-Object { $_ -eq 'true' }).Count -gt 1", validation)
         idle = step("windows-desktop.yml", "Sample last-input idle state (read-only; no app launch)")
         self.assertEqual(condition(idle), "${{ inputs.idle_diagnostic }}")
         self.assertIn("& $env:MURMUR_DESKTOP_PYTHON scripts/windows/desktop/idle_diagnostic.py", idle)
@@ -260,6 +262,18 @@ class DesktopWorkflowTests(unittest.TestCase):
         guard_step = step("windows-desktop.yml", "Diagnose the input guard (harness Python; no app launch)")
         self.assertEqual(condition(guard_step),
                          "${{ inputs.guard_diagnostic || inputs.guard_teardown_diagnostic }}")
+
+    def test_clipboard_metadata_mode_has_no_build_or_input_path(self):
+        self.assertIn("      clipboard_diagnostic:\n", self.text)
+        validation = step("windows-desktop.yml", "Only the dispatched commit can be tested")
+        self.assertIn("CLIPBOARD_DIAGNOSTIC: ${{ inputs.clipboard_diagnostic }}", validation)
+        probe = step("windows-desktop.yml", "Inspect clipboard metadata")
+        self.assertEqual(condition(probe), "${{ inputs.clipboard_diagnostic }}")
+        self.assertIn("scripts/windows/desktop/clipboard_diagnostic.py", probe)
+        for forbidden in ("handoff.py", "run.py", "guard_diagnostic.py", "Set-Clipboard"):
+            self.assertNotIn(forbidden, probe)
+        self.assertIn("'clipboard-diagnostic.json'", probe)
+        self.assertIn("test_clipboard_diagnostic", step("windows-build.yml", "Script tests"))
 
     def test_build_workflows_never_target_the_desktop_runner(self):
         for workflow in WORKFLOWS.glob("*.yml"):

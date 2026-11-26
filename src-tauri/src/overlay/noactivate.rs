@@ -1,6 +1,7 @@
 //! Windows: clicking the overlay must never take keyboard focus from the dictation target (B7).
 //!
-//! What actually protects the target (verified in source, not run on hardware):
+//! Layered protection; native evidence is recorded in docs/parity/test-ledger.md
+//! (overlay input repair, 2026-11-17). Later builds still require their own validation:
 //!
 //! 1. `focusable: false` (tauri.conf.json) gives the top-level overlay `WS_EX_NOACTIVATE`
 //!    through tao, so a click does not activate it in the first place.
@@ -13,13 +14,12 @@
 //!    WebView2's own focus change would otherwise cause while Settings is active. The hook is
 //!    local to the UI thread, forwards every other code, and is removed when the overlay goes away.
 //!
-//! The `WM_MOUSEACTIVATE` → `MA_NOACTIVATE` subclass is kept because it is harmless, but expect
-//! it to cover only the top-level window: with default WebView2 hosting the `Chrome_WidgetWin_*`
-//! and `Chrome_RenderWidgetHostHWND` windows belong to `msedgewebview2.exe`, not to this thread,
-//! so `EnumChildWindows` is expected to find no child this thread may subclass, and Chromium's
-//! `LegacyRenderWidgetHostHWND` answers `WM_MOUSEACTIVATE` itself. The number of subclassed
-//! windows is logged at info level ("Overlay no-activate subclass") so the Edison checklist
-//! (docs/parity/windows-checklist.md, O3/O4/O7) records what really happened.
+//! The `WM_MOUSEACTIVATE` → `MA_NOACTIVATE` subclass covers the root and only descendants
+//! owned by this process and UI thread. Renderer topology depends on WebView2 hosting:
+//! foreign `msedgewebview2.exe` windows are never subclassed. The renderer's immediate
+//! parent was foreign-owned in run 44030456571, so modifying its styles was ruled out.
+//! The actual owned subclass count is logged ("Overlay no-activate subclass") for O7;
+//! do not infer renderer coverage from a root style or a child count.
 
 // The decision helpers are used by the Windows subclass and by tests on every platform.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -152,8 +152,7 @@ pub fn veto_activation(code: i32, target: usize, overlay: usize) -> bool {
 }
 
 /// Only windows owned by this thread can be subclassed (`SetWindowSubclass` refuses others).
-/// WebView2's renderer windows belong to `msedgewebview2.exe`, so in practice this excludes all
-/// of them; see the module documentation.
+/// Foreign WebView2 renderer windows are excluded; owned host children are checked individually.
 pub fn can_subclass(owner_process: u32, owner_thread: u32, process: u32, thread: u32) -> bool {
     owner_process == process && owner_thread == thread
 }
@@ -488,8 +487,8 @@ mod native {
             qa_log_webview_host(window, top);
         }
         if LOGGED.swap(key, Ordering::Relaxed) != key {
-            // Evidence for the Edison checklist (O7): children=0 is expected when all of
-            // WebView2's windows live in msedgewebview2.exe.
+            // Evidence for O7; the child count describes owned host windows, not coverage
+            // of foreign renderer windows.
             tracing::info!(
                 top_level,
                 children,

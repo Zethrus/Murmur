@@ -1,5 +1,19 @@
 # Linux / Windows parity matrix
 
+## Current follow-up, November 23, 2026
+
+The November 8 table below is a historical baseline, not current acceptance status.
+The [November 17 ledger](test-ledger.md#overlay-input-repair-on-edison-2026-11-17)
+records 48/48 automated Windows checks and four foreground drag cases passing on
+`faf54085`. That repair is present in the 0.5.1 baseline `ffa6222`; it does not prove
+the result on a newer build or complete the manual visual/accessibility checks.
+
+The [input hardening follow-up](input-hardening-2026-11-23.md) tracks current source,
+shared UI fixes, local evidence, and the remaining exact-build Windows/Linux gates.
+No new feature/style parity claim is made from unit tests alone.
+
+## Historical baseline, November 8, 2026
+
 Status, November 8, 2026 (PR-C, `windows-parity`). Linux behaviour is what the
 current Linux build does. Windows CI now runs on Edison (RTX 3060): build, all
 automated tests, packaging, startup smoke and GPU inference pass (see the

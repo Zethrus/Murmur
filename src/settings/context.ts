@@ -1,6 +1,7 @@
 import type { Config, ConfigPatch, Events, Status } from "../bridge";
 export interface PageContext {
-  config: Config;
+  /** Latest saved/backend configuration, even when the current editor is retained. */
+  readonly config: Config;
   status: Status;
   lastTranscript: string;
   save(patch: ConfigPatch): Promise<void>;

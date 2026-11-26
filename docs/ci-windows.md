@@ -260,6 +260,35 @@ unlocked, 60 s without input, no other `murmur.exe`, Notepad closed), shows a
 (same folder layout): `python scripts\windows\desktop\run.py --build <verified
 copy> --out <dir> [--only H1,F2] [--group focus] [--repeat 3]`.
 
+### Read-only clipboard metadata diagnostic
+
+If H9/H10 refuses a clipboard that appears to contain plain text, use
+`windows-desktop.yml` with matching `--ref` and `sha`, and
+`-f clipboard_diagnostic=true`. Leave every other diagnostic flag false.
+This owner-only mode uses the existing interactive desktop runner and hash-locked
+venv; it needs no app build, handoff, countdown, focus click, idle period, or input
+guard. It refuses session 0, a noninteractive window station, or a locked desktop.
+It opens no test windows and launches no Murmur process.
+
+The probe takes at most three metadata snapshots, two seconds apart, closing the
+clipboard before each pause. It records session/window-station/desktop identity,
+format IDs and standard or registered names, Unicode availability, sequence
+numbers, and API errors. Enumeration errors, repeated IDs, excessive counts,
+failed names, and potentially truncated names remain explicit failures. Sequence
+changes are reported; they are not attributed to a process. No clipboard payload
+is retrieved, logged, hashed, replaced, or restored. Registered format names are
+metadata supplied by applications and must be treated as untrusted evidence.
+
+`clipboard-diagnostic.json` is saved in the normal report directory, printed in
+the job log, and included in the summary and best-effort artifact upload. An
+`ok` result means metadata collection completed, not that H9/H10 preflight or
+delivery passed. The reported `unsupported_format_ids` use the current text-only
+allowlist without changing it; metadata cannot prove Unicode data is readable.
+Current snapshots cannot reconstruct clipboard formats from an earlier failed
+run. Native API call duration is not bounded by the snapshot count; the workflow
+retains its existing job timeout. Do not clear the clipboard or relax restoration
+checks merely because a registered format has a familiar name.
+
 ### Read-only idle diagnostic
 
 If the 60-second preflight reports recent input despite the owner leaving Edison
@@ -416,6 +445,40 @@ alone is insufficient: a noninteractive window station can also have a default
 desktop. These fields are captured before the hook thread stops. If the valid
 packet is not seen by either the window or the hook, the cause remains
 unresolved; do not run the desktop checks.
+
+### Bounded Alt release-order comparison (H10)
+
+H10 is opt-in and accepts only `--only H10 --repeat 1`. After the matching
+Windows build and fresh owner availability, dispatch `windows-desktop.yml`
+with that full `sha`, `only=H10` and `repeat=1`. It uses the normal idle/session
+preflight, continuous input guard and passive startup-window handoff. It refuses
+clipboard formats that the text restorer cannot preserve. It does not run as part
+of the default acceptance suite.
+
+The fixed ten-trial matrix compares four explicit Alt release sequences and a
+non-Alt control with the tested chord present or absent from Murmur's disposable
+configuration. F9 is released first or last; Alt is released before or after
+Ctrl; Shift is always the first modifier released. Each trial gets a fresh owned
+Notepad tab. Configured-chord trials request clipboard-only output, so transcript
+typing cannot explain a menu transition. Configuration/readiness checks do not
+prove that no other application owns the chord: the report deliberately says
+"not configured in Murmur". Actual OS registration remains unverified;
+configuration and a live overlay alone do not prove RegisterHotKey succeeded.
+
+Read `H10-alt-release.json`, the per-trial app logs and settled captures. Compare
+native keyboard-focus snapshots, exact traced key order and guard-probe timing.
+UI Automation is deferred until the chord and output have settled. The guard
+continues to send its normal probes in both contexts; this experiment does not
+independently exclude a probe interaction or establish physical-key behaviour.
+Sampling brackets a transition but does not establish the causal Windows message.
+
+Earlier failures remain failures when later trials pass. Unknown foreground
+ownership or unsettled delivery stops further trial input. Saving requires the
+same verified owned editor; the diagnostic must not refocus or cancel a menu to
+turn a failed observation into a pass. H10 final cleanup additionally requires fresh owned-editor focus before saving
+and closing; a menu-focused tab is preserved as a cleanup failure. Failed
+release of an owned synthetic key permanently blocks subsequent harness input,
+including tab cleanup. H10 cannot clear H9, ordinary insertion checks, or any release gate.
 
 ### Reading the report
 

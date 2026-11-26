@@ -1,3 +1,5 @@
+#[cfg(any(windows, test))]
+use crate::platform::Focus;
 use crate::{app::AppState, config::Config, controller::Action};
 use anyhow::{bail, Context, Result};
 use std::{
@@ -128,7 +130,17 @@ pub fn register(app: &AppHandle, accel: &str) -> Result<()> {
                     {
                         return;
                     }
-                    action_for(&config.general.hotkey_mode, down, purpose == Purpose::Code)
+                    #[cfg(windows)]
+                    let action = shortcut_action(&config.general.hotkey_mode, down, purpose == Purpose::Code, || {
+                        crate::platform::focused_target(app)
+                            .inspect_err(|error| tracing::info!(%error, "Shortcut target window unknown"))
+                            .ok()
+                    });
+                    // Linux keeps its existing controller-thread focus read. In particular,
+                    // do not move synchronous xprop calls into the shortcut callback.
+                    #[cfg(not(windows))]
+                    let action = action_for(&config.general.hotkey_mode, down, purpose == Purpose::Code);
+                    action
                 }
                 None => None,
             };
@@ -176,6 +188,29 @@ fn action_for(mode: &str, down: bool, code: bool) -> Option<Action> {
         }),
         _ => None,
     }
+}
+/// The snapshot is owned by this accepted shortcut action; Stop has none, and a toggle-off
+/// action drops its snapshot when handled. Nothing persists across repeats, cancellation or rebind.
+#[cfg(any(windows, test))]
+fn shortcut_action(
+    mode: &str,
+    down: bool,
+    code: bool,
+    capture: impl FnOnce() -> Option<Focus>,
+) -> Option<Action> {
+    action_for(mode, down, code).map(|action| match action {
+        Action::Start | Action::StartCode => Action::Shortcut {
+            code,
+            toggle: false,
+            origin: capture(),
+        },
+        Action::Toggle | Action::ToggleCode => Action::Shortcut {
+            code,
+            toggle: true,
+            origin: capture(),
+        },
+        other => other,
+    })
 }
 /// Transactional: on any failure, registrations are restored to the old set.
 pub fn rebind(app: &AppHandle, old: &Config, new: &Config) -> Result<()> {
@@ -255,6 +290,44 @@ mod tests {
         assert!(matches!(
             action_for("toggle", true, false),
             Some(Action::Toggle)
+        ));
+    }
+    #[test]
+    fn shortcut_snapshot_is_owned_only_by_activation_action() {
+        let mut reads = 0;
+        assert!(matches!(
+            shortcut_action("hold", false, false, || {
+                reads += 1;
+                Some(Focus::Own)
+            }),
+            Some(Action::Stop)
+        ));
+        assert_eq!(reads, 0);
+        assert!(shortcut_action("toggle", false, false, || {
+            reads += 1;
+            Some(Focus::Own)
+        })
+        .is_none());
+        assert_eq!(reads, 0);
+        assert!(matches!(
+            shortcut_action("hold", true, true, || {
+                reads += 1;
+                Some(Focus::Own)
+            }),
+            Some(Action::Shortcut {
+                code: true,
+                toggle: false,
+                origin: Some(Focus::Own)
+            })
+        ));
+        assert_eq!(reads, 1);
+        assert!(matches!(
+            shortcut_action("toggle", true, false, || None),
+            Some(Action::Shortcut {
+                code: false,
+                toggle: true,
+                origin: None
+            })
         ));
     }
     #[test]

@@ -145,6 +145,22 @@ jobs:
           ref: ${{ inputs.fallback_sha || github.sha }}
           persist-credentials: false
 
+      - name: Verify pinned Wry source and patch
+        if: ${{ steps.claim.outputs.build != 'false' }}
+        shell: pwsh
+        run: |
+          # Reused worktrees can retain CRLF files after .gitattributes changes. Remove
+          # these disposable CI source copies first so Git cannot reuse their stat cache.
+          # Restore only the pinned vendor inputs; the verifier stays read-only.
+          git ls-files --eol src-tauri/vendor/wry/src/lib.rs src-tauri/vendor/wry-host-input.patch
+          Remove-Item -LiteralPath src-tauri/vendor/wry -Recurse -Force
+          Remove-Item -LiteralPath src-tauri/vendor/wry-host-input.patch -Force
+          git -c core.autocrlf=false checkout --force HEAD -- src-tauri/vendor/wry src-tauri/vendor/wry-host-input.patch
+          if ($LASTEXITCODE -ne 0) { throw 'Could not restore pinned Wry source bytes' }
+          git ls-files --eol src-tauri/vendor/wry/src/lib.rs src-tauri/vendor/wry-host-input.patch
+          python scripts/verify-vendored-wry.py
+          if ($LASTEXITCODE -ne 0) { throw 'Vendored Wry verification failed' }
+
       - name: Prepare isolated build caches
         if: ${{ steps.claim.outputs.build != 'false' }}
         shell: pwsh
@@ -201,7 +217,7 @@ jobs:
         run: |
           # The Linux packaging tests need readelf, symlinks and dpkg; they run in linux-build.yml.
           Push-Location scripts/tests
-          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_ci_cache test_ci_release_stage test_cpu_audit test_embedded_manifest test_desktop_harness
+          python -m unittest test_release test_engine_imports test_windows_components test_inference_common test_windows_ci test_ci_cache test_ci_release_stage test_cpu_audit test_embedded_manifest test_desktop_harness test_notepad_delivery_diagnostic test_alt_release_diagnostic test_clipboard_diagnostic test_vendored_wry
           $Code = $LASTEXITCODE
           Pop-Location
           if ($Code -ne 0) { throw 'Script tests failed' }

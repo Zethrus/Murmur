@@ -1,9 +1,9 @@
 //! Decide whether a finished dictation may go to the window that has focus now.
 //!
 //! Pure: callers read focus through `platform` and act on the decision. Windows are compared by
-//! native identity (X11 window ID on Linux; HWND + PID + process start time on Windows), so two
-//! windows of one application are different targets. Tabs inside a single window cannot be told
-//! apart. A target Murmur cannot type into (elevated window, secure desktop) or cannot identify is
+//! native identity (X11 window ID on Linux; foreground and keyboard-child identity on Windows),
+//! so two windows or focused controls of one application are different targets. Tabs within one
+//! HWND still cannot be told apart. A target Murmur cannot type into or cannot identify is
 //! never typed into: see docs/focus-contract.md.
 use crate::platform::Focus;
 
@@ -48,7 +48,7 @@ pub fn decide(origin: Option<&Focus>, current: Option<&Focus>, mode: FocusMode) 
     if same_target(origin, current) {
         return Decision::Deliver;
     }
-    let deliverable = matches!(current, Some(Focus::Window { .. } | Focus::Own));
+    let deliverable = current.is_some_and(valid_target);
     match mode {
         FocusMode::Insert if deliverable => Decision::Deliver,
         FocusMode::Insert | FocusMode::Hold => Decision::Hold,
@@ -61,9 +61,27 @@ pub fn decide(origin: Option<&Focus>, current: Option<&Focus>, mode: FocusMode) 
     }
 }
 
-/// Windows identities carry a PID, and then the process start time must be known too: a PID
-/// without a start time cannot rule out a reused PID. Linux has neither (X11 IDs are not reused
-/// while the window exists), so `None`/`None` still matches there.
+/// Windows foreground and keyboard-child identities must both be complete. A child can belong to
+/// an embedded renderer in another process. Linux retains its X11-window-only identity.
+fn valid_target(focus: &Focus) -> bool {
+    match focus {
+        Focus::Own => true,
+        Focus::Blocked { .. } => false,
+        Focus::Window {
+            pid: None,
+            started: None,
+            keyboard: None,
+            ..
+        } => true,
+        Focus::Window {
+            pid: Some(pid),
+            started: Some(_),
+            keyboard: Some(child),
+            ..
+        } => *pid != 0 && child.id != 0 && child.thread != 0 && child.pid != 0,
+        _ => false,
+    }
+}
 fn same_target(origin: Option<&Focus>, current: Option<&Focus>) -> bool {
     match (origin, current) {
         (
@@ -71,15 +89,24 @@ fn same_target(origin: Option<&Focus>, current: Option<&Focus>) -> bool {
                 id: a,
                 pid: pa,
                 started: sa,
+                keyboard: ka,
                 ..
             }),
             Some(Focus::Window {
                 id: b,
                 pid: pb,
                 started: sb,
+                keyboard: kb,
                 ..
             }),
-        ) => a == b && pa == pb && sa == sb && (pa.is_none() || sa.is_some()),
+        ) => {
+            a == b
+                && pa == pb
+                && sa == sb
+                && ka == kb
+                && origin.is_some_and(valid_target)
+                && current.is_some_and(valid_target)
+        }
         // Blocked targets never match, so even an unchanged elevated window is held.
         // Started and finished in Murmur: delivery skips its own windows, as before.
         (Some(Focus::Own), Some(Focus::Own)) => true,
@@ -97,6 +124,7 @@ mod tests {
             id,
             pid: None,
             started: None,
+            keyboard: None,
             class: class.into(),
         }
     }
@@ -106,8 +134,117 @@ mod tests {
             id,
             pid: Some(pid),
             started: Some(started),
+            keyboard: Some(crate::platform::KeyboardTarget {
+                id: id + 1,
+                thread: 20,
+                pid,
+                started,
+            }),
             class: "notepad.exe".into(),
         }
+    }
+
+    #[test]
+    fn windows_same_child_delivers_but_another_child_holds() {
+        let editor = windows_window(0x1234, 100, 5);
+        assert_eq!(
+            decide(Some(&editor), Some(&editor), FocusMode::Hold),
+            Decision::Deliver
+        );
+        let mut menu = editor.clone();
+        if let Focus::Window {
+            keyboard: Some(child),
+            ..
+        } = &mut menu
+        {
+            child.id += 1;
+        }
+        assert_eq!(
+            decide(Some(&editor), Some(&menu), FocusMode::Hold),
+            Decision::Hold
+        );
+        assert_eq!(
+            decide(Some(&editor), Some(&menu), FocusMode::Refocus),
+            Decision::Refocus(0x1234)
+        );
+        assert_eq!(
+            decide(Some(&editor), Some(&menu), FocusMode::Copy),
+            Decision::Copy
+        );
+        assert_eq!(
+            decide(Some(&editor), Some(&menu), FocusMode::Insert),
+            Decision::Deliver
+        );
+    }
+
+    #[test]
+    fn windows_missing_or_reused_child_never_matches() {
+        let editor = windows_window(0x1234, 100, 5);
+        let mut missing = editor.clone();
+        if let Focus::Window { keyboard, .. } = &mut missing {
+            *keyboard = None;
+        }
+        assert_eq!(
+            decide(Some(&editor), Some(&missing), FocusMode::Hold),
+            Decision::Hold
+        );
+        assert_eq!(
+            decide(Some(&editor), Some(&missing), FocusMode::Insert),
+            Decision::Hold
+        );
+        let mut reused = editor.clone();
+        if let Focus::Window {
+            keyboard: Some(child),
+            ..
+        } = &mut reused
+        {
+            child.thread += 1;
+        }
+        assert_eq!(
+            decide(Some(&editor), Some(&reused), FocusMode::Hold),
+            Decision::Hold
+        );
+        if let Focus::Window {
+            keyboard: Some(child),
+            ..
+        } = &mut reused
+        {
+            child.pid -= 1;
+            child.started += 1;
+        }
+        assert_eq!(
+            decide(Some(&editor), Some(&reused), FocusMode::Hold),
+            Decision::Hold
+        );
+        if let Focus::Window {
+            keyboard: Some(child),
+            ..
+        } = &mut reused
+        {
+            child.thread -= 1;
+            child.pid += 1;
+        }
+        assert_eq!(
+            decide(Some(&editor), Some(&reused), FocusMode::Hold),
+            Decision::Hold
+        );
+    }
+
+    #[test]
+    fn verified_foreign_process_child_can_match() {
+        let mut editor = windows_window(0x1234, 100, 5);
+        if let Focus::Window {
+            keyboard: Some(child),
+            ..
+        } = &mut editor
+        {
+            child.pid = 200;
+            child.started = 6;
+        }
+        assert_eq!(
+            decide(Some(&editor), Some(&editor), FocusMode::Hold),
+            Decision::Deliver
+        );
     }
 
     fn blocked(reason: Blocked) -> Focus {
@@ -218,6 +355,7 @@ mod tests {
             id: 0x1234,
             pid: Some(pid),
             started: None,
+            keyboard: None,
             class: "notepad.exe".into(),
         };
         // GetProcessTimes failed both times: the PID may have been reused, so this is not the
@@ -285,6 +423,7 @@ mod tests {
             id: 0x1234,
             pid: Some(100),
             started: None,
+            keyboard: None,
             class: "notepad.exe".into(),
         };
         assert_eq!(

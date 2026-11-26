@@ -30,6 +30,12 @@ pub enum Action {
     Start,
     StartCode,
     ToggleCode,
+    /// Shortcut activation owns the focus read in the callback, before queued handling.
+    Shortcut {
+        code: bool,
+        toggle: bool,
+        origin: Option<Focus>,
+    },
     Stop,
     Cancel,
     Toggle,
@@ -140,6 +146,21 @@ struct Delivery {
 const FOCUS_TARGET_FIRST: &str = "Focus the app you want, then insert.";
 const COPIED: &str = "Focus changed during dictation. Copied to the clipboard instead.";
 const COPIED_HELD: &str = "Copied to the clipboard.";
+enum StartOrigin {
+    ReadNow,
+    Captured(Option<Focus>),
+}
+impl StartOrigin {
+    fn resolve(self, read_now: impl FnOnce() -> Option<Focus>) -> Option<Focus> {
+        match self {
+            Self::ReadNow => read_now(),
+            Self::Captured(origin) => origin,
+        }
+    }
+}
+fn shortcut_starts(active: bool, toggle: bool) -> bool {
+    !active || !toggle
+}
 struct Controller {
     audio: Option<AudioCapture>,
     local_audio: Option<AudioCapture>,
@@ -227,16 +248,17 @@ impl Controller {
         }
         Ok(())
     }
-    fn start(&mut self, state: &AppState, code: bool) -> Result<()> {
+    fn start(&mut self, state: &AppState, code: bool, origin: StartOrigin) -> Result<()> {
         if self.active || state.status()?.state == "transcribing" {
             return Ok(());
         }
         self.config = state.config()?;
         self.force_code = code;
-        // Bind this dictation to the window focused at the hotkey press.
-        self.origin = platform::focused_target(&state.app)
-            .inspect_err(|error| tracing::info!(%error, "Dictation target window unknown"))
-            .ok();
+        self.origin = origin.resolve(|| {
+            platform::focused_target(&state.app)
+                .inspect_err(|error| tracing::info!(%error, "Dictation target window unknown"))
+                .ok()
+        });
         if state.held.clear() {
             state.enhance.refresh_overlay(state);
         }
@@ -338,6 +360,7 @@ impl Controller {
         self.local_events_enabled.store(true, Ordering::Relaxed);
         state.audio_source(None);
         self.active = false;
+        self.origin = None;
         self.epoch += 1;
         self.stopped_preview_epoch = None;
         self.reset_at = None;
@@ -354,6 +377,7 @@ impl Controller {
             self.idle(state)?;
         } else {
             self.stopped_preview_epoch = None;
+            self.origin = None;
         }
         Ok(())
     }
@@ -461,6 +485,7 @@ impl Controller {
         state.transition(if held { "idle" } else { "done" })?;
         state.audio_source(None);
         self.active = false;
+        self.origin = None;
         self.stopped_preview_epoch = self.preview.as_ref().map(|_| self.epoch);
         self.epoch += 1;
         if held {
@@ -730,6 +755,7 @@ impl Controller {
             audio.cancel();
         }
         self.active = false;
+        self.origin = None;
         self.epoch += 1;
         self.stopped_preview_epoch = None;
         let _ = hotkey::escape(&state.app, false);
@@ -838,15 +864,30 @@ impl Controller {
     }
     fn action(&mut self, state: &AppState, action: Action) -> Result<()> {
         match action {
-            Action::Start => self.start(state, false)?,
-            Action::StartCode => self.start(state, true)?,
+            Action::Start => self.start(state, false, StartOrigin::ReadNow)?,
+            Action::StartCode => self.start(state, true, StartOrigin::ReadNow)?,
             Action::Stop => self.stop(state)?,
             Action::Cancel => self.cancel(state)?,
             Action::Toggle | Action::ToggleCode => {
                 if self.active {
                     self.stop(state)?;
                 } else {
-                    self.start(state, matches!(action, Action::ToggleCode))?;
+                    self.start(
+                        state,
+                        matches!(action, Action::ToggleCode),
+                        StartOrigin::ReadNow,
+                    )?;
+                }
+            }
+            Action::Shortcut {
+                code,
+                toggle,
+                origin,
+            } => {
+                if shortcut_starts(self.active, toggle) {
+                    self.start(state, code, StartOrigin::Captured(origin))?;
+                } else {
+                    self.stop(state)?;
                 }
             }
             Action::Level(rms) => {
@@ -1068,9 +1109,36 @@ pub fn run(app: AppHandle, receiver: mpsc::Receiver<Action>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{preview_due, preview_valid, remote_action, Controller, Policy, RemoteAction};
+    use super::{
+        preview_due, preview_valid, remote_action, shortcut_starts, Controller, Policy,
+        RemoteAction, StartOrigin,
+    };
     use crate::{audio::AudioCapture, config::Config};
     use std::time::Duration;
+
+    #[test]
+    fn queued_shortcut_uses_activation_snapshot_even_after_focus_moves() {
+        let at_activation = crate::platform::Focus::Own;
+        let mut later_reads = 0;
+        let origin = StartOrigin::Captured(Some(at_activation.clone())).resolve(|| {
+            later_reads += 1;
+            None
+        });
+        assert_eq!(origin, Some(at_activation));
+        assert_eq!(later_reads, 0);
+        assert_eq!(StartOrigin::ReadNow.resolve(|| None), None);
+    }
+
+    #[test]
+    fn toggle_off_drops_its_snapshot_and_next_start_owns_its_own() {
+        assert!(!shortcut_starts(true, true));
+        assert!(shortcut_starts(false, true));
+        assert!(shortcut_starts(false, false));
+        let first = StartOrigin::Captured(Some(crate::platform::Focus::Own));
+        drop(first); // toggle-off/cancel/rebind never stores a pending origin
+        let second = StartOrigin::Captured(None).resolve(|| Some(crate::platform::Focus::Own));
+        assert_eq!(second, None);
+    }
 
     #[test]
     fn modifier_timeout_has_a_retry_reason_distinct_from_focus_change() {
@@ -1115,6 +1183,7 @@ mod tests {
             id: 2,
             pid: None,
             started: None,
+            keyboard: None,
             class: "editor".into(),
         });
         assert_eq!(super::hold_reason(&other), None);
@@ -1147,6 +1216,7 @@ mod tests {
                     id: worker_focus.load(Ordering::SeqCst),
                     pid: None,
                     started: None,
+                    keyboard: None,
                     class: "editor".into(),
                 },
             )
@@ -1155,6 +1225,7 @@ mod tests {
                 id: 1,
                 pid: None,
                 started: None,
+                keyboard: None,
                 class: "editor".into(),
             };
             assert_eq!(

@@ -82,6 +82,29 @@ def _focus_phase(pad, stage):
             "f9_down": "f9" in win32.keys_down(("f9",))}
 
 
+def _drive_registered_hotkey(ctx, spec, name, sample, timestamp):
+    """H8/H9's real registered hold gesture; caller owns tracing and settled readback."""
+    modifiers, key = win32.parse_combo(spec)
+    ctx.observe_delivery("A")
+    sample("before modifiers")
+    win32.key_down(*modifiers)
+    sample("before F9 down")
+    win32.key_down(key)
+    sample("F9 held")
+    if not ctx.murmur.wait_state("listening", 5):
+        raise Fail(f"{name}: dictation did not start")
+    sample("listening")
+    ctx.sleep(ctx.fixtures["A"].speech_seconds + 0.8)
+    sample("before F9 up")
+    win32.key_up(key)
+    timestamp("after F9 up")
+    ctx.sleep(0.05)
+    for modifier in reversed(modifiers):
+        win32.key_up(modifier)
+        timestamp(f"after {modifier} up")
+    ctx.mark_delivery_released()
+
+
 def _notepad_focus_trial(ctx, spec, name, phases, previous_hwnd=None):
     mark = getattr(ctx.guard, "mark", lambda _stage: None)
     mark(f"H8:{name}:ensure-begin")
@@ -94,28 +117,10 @@ def _notepad_focus_trial(ctx, spec, name, phases, previous_hwnd=None):
     # without asking Notepad for focus, descendants, status, or text during that interval.
     timestamp = lambda stage: phases.append({"stage": stage, "time": time.time(),
                                              "focus_snapshot": "deferred"})
-    modifiers, key = win32.parse_combo(spec)
-    ctx.observe_delivery("A")
     ctx.guard.start_key_trace()
     observation = None
     try:
-        sample("before modifiers")
-        win32.key_down(*modifiers)
-        sample("before F9 down")
-        win32.key_down(key)
-        sample("F9 held")
-        if not ctx.murmur.wait_state("listening", 5):
-            raise Fail(f"{name}: dictation did not start")
-        sample("listening")
-        ctx.sleep(ctx.fixtures["A"].speech_seconds + 0.8)
-        sample("before F9 up")
-        win32.key_up(key)
-        timestamp("after F9 up")
-        ctx.sleep(0.05)
-        for modifier in reversed(modifiers):
-            win32.key_up(modifier)
-            timestamp(f"after {modifier} up")
-        ctx.mark_delivery_released()
+        _drive_registered_hotkey(ctx, spec, name, sample, timestamp)
         timestamp("before delivery wait")
         try:
             expected = ctx.observed_text(timeout=NOTEPAD_OUTPUT_TIMEOUT)
@@ -192,12 +197,22 @@ def _capture_notepad_trial(ctx, name, result, pad, expected):
     captured = pad.text()
     result["capture_difference"] = golden.compare(expected, captured) if expected is not None else None
     result["capture_chars"] = len(captured)
+    capture_artifact = ctx.artifact(f"{name}-uia.txt")
+    capture_artifact.write_text(captured, encoding="utf-8")
+    result["capture_artifact"] = capture_artifact.name
+    # Observation precedes any save/focus action. A failed save must not erase the
+    # original mismatch or cause a stale on-disk file to be reported as delivered text.
+    try:
+        detail = pad.focus_diagnostic()
+    except Exception as error:  # noqa: BLE001 - read-only evidence, not authorization
+        detail = f"focus evidence unavailable: {type(error).__name__}: {error}"
+    ctx.artifact(f"{name}-focus-before-save.txt").write_text(detail, encoding="utf-8")
     try:
         before_save = pad.path.stat().st_mtime_ns
     except OSError:
         before_save = None
-    pad.save_owned()
     try:
+        pad.save_owned()
         after_save = pad.path.stat().st_mtime_ns
         result["saved_file_updated"] = before_save != after_save
         saved_bytes = pad.path.read_bytes()
@@ -207,7 +222,7 @@ def _capture_notepad_trial(ctx, name, result, pad, expected):
         saved = saved_bytes.decode("utf-8-sig")
         result["saved_file_difference"] = golden.compare(expected, saved) if expected is not None else None
         result["saved_file_chars"] = len(saved)
-    except (OSError, UnicodeError) as error:
+    except (OSError, UnicodeError, RuntimeError) as error:
         result["saved_file_error"] = f"{type(error).__name__}: {error}"
 
 
@@ -242,7 +257,7 @@ def h8_focus_phases(ctx):
                 raise Fail(f"{name}: {observation['output_error']} (overlay: {observation['overlay']})")
             _capture_notepad_trial(ctx, name, results[name], pad, expected)
             previous_hwnd = pad.hwnd
-            if name == "no-alt" and any(results[name][key] for key in
+            if name == "no-alt" and not results[name]["saved_file_error"] and any(results[name][key] for key in
                                         ("difference", "capture_difference", "saved_file_difference")):
                 # The failed trial's screenshot and saved bytes are already captured. Reuse
                 # exactly that owned editor to separate a Murmur-specific sender path from a
@@ -266,6 +281,18 @@ def h8_focus_phases(ctx):
                    if reason]
     if differences:
         raise Fail("; ".join(differences))
+
+
+def h9_notepad_delivery(ctx):
+    """Load the isolated H9 diagnostic only when explicitly selected."""
+    from checks.notepad_delivery import h9_notepad_delivery as run
+    return run(ctx)
+
+
+def h10_alt_release(ctx):
+    """Load the isolated H10 diagnostic only when explicitly selected."""
+    from checks.alt_release import h10_alt_release as run
+    return run(ctx)
 
 
 def h2_release_order(ctx):

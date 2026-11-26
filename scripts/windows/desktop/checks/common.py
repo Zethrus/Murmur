@@ -106,6 +106,14 @@ def overlay_drag_snapshot(ctx, native_bounds, details, timeout=0.5):
             if not reasons:
                 valid.append(candidate)
         details["uia_candidates"] = candidates
+        # Preserve bounded polling evidence rather than replacing all rejected candidates
+        # with the final empty snapshot. Older observations are diagnostic only.
+        polls = details.setdefault("uia_candidate_history", [])
+        if len(polls) < 32:
+            polls.append({"native_bounds": native_bounds, "uia_root_hwnd": root_hwnd,
+                          "candidates": candidates})
+        else:
+            details["uia_candidate_history_capped"] = True
         ctx.guard.check()  # enumeration and property reads can block in COM
         if len(valid) > 1:
             raise Fail(f"O8 drag affordance is ambiguous: {len(valid)} valid UIA candidates")

@@ -336,6 +336,104 @@ test("an external config change never rebuilds the page under a focused text fie
   const fresh=search();h.config.overlay.scale=1.2;h.emit("config",structuredClone(h.config));await settle();
   assert.notEqual(search(),fresh);h.unload();
 });
+test("a pending save preserves the next edited field and applies the latest config on blur",async()=>{
+  let finish;
+  const h=await settings({set_config:({patch},{config,emit})=>new Promise(resolve=>{
+    finish=()=>{for(const [section,values] of Object.entries(patch))Object.assign(config[section],values);
+      emit("config",structuredClone(config));resolve(structuredClone(config));};
+  })});
+  const toggle=h.document.getElementById("field-translate-to-english");toggle.checked=true;
+  const pending=toggle.dispatch("change");await settle();
+  await button(h.root,"Privacy").dispatch("click");await settle();
+  const search=()=>h.root.querySelectorAll("input").find(i=>i.getAttribute("aria-label")==="Search history");
+  const field=search();field.value="new draft";field.selectionStart=2;field.selectionEnd=5;field.focus();
+  finish();await pending;await settle();
+  assert.ok(search()===field,"an earlier save must not replace the current editor");
+  assert.equal(field.value,"new draft");assert.equal(field.selectionStart,2);assert.equal(field.selectionEnd,5);
+  for(const days of [14,30]){h.config.privacy.history_retention_days=days;h.emit("config",structuredClone(h.config));}
+  assert.equal(search(),field);
+  h.document.activeElement=null;await h.root.querySelector(".page-content").dispatch("focusout");h.timers.tick(1);await settle();
+  assert.notEqual(search(),field);
+  assert.equal(h.document.getElementById("field-retention").value,"30");h.unload();
+});
+test("config refresh waits for composition to end even when focus leaves first",async()=>{
+  const h=await settings();await button(h.root,"Privacy").dispatch("click");await settle();
+  const content=h.root.querySelector(".page-content");
+  const search=()=>h.root.querySelectorAll("input").find(i=>i.getAttribute("aria-label")==="Search history");
+  const field=search();field.focus();await content.dispatch("compositionstart",{target:field});
+  h.emit("config",structuredClone(h.config));h.document.activeElement=null;
+  await content.dispatch("focusout");h.timers.tick(1);await settle();
+  assert.ok(search()===field,"focusout must not destroy an unfinished composition");
+  await content.dispatch("compositionend",{target:field});h.timers.tick(1);await settle();
+  assert.notEqual(search(),field);h.unload();
+});
+test("a deferred refresh cannot rebuild after navigation or disposal",async()=>{
+  const h=await settings();await button(h.root,"Privacy").dispatch("click");await settle();
+  const content=h.root.querySelector(".page-content"),field=content.querySelector("input");field.focus();
+  h.emit("config",structuredClone(h.config));h.document.activeElement=null;await content.dispatch("focusout");
+  await button(h.root,"General").dispatch("click");const language=h.document.getElementById("field-language");
+  h.timers.tick(1);await settle();assert.equal(h.document.getElementById("field-language"),language);
+  language.focus();h.emit("config",structuredClone(h.config));h.document.activeElement=null;
+  await content.dispatch("focusout");h.unload();h.timers.tick(1);await settle();
+  assert.equal(h.document.getElementById("field-language"),language);
+});
+test("Companion retains editors without reverting sequential network edits",async()=>{
+  const h=await settings();await button(h.root,"Companion").dispatch("click");await settle();
+  const bind=h.document.getElementById("field-bind-address"),port=h.document.getElementById("field-port");
+  bind.value="192.168.1.20";port.focus();await bind.dispatch("change");
+  assert.ok(h.document.getElementById("field-port")===port,"the next editor stays mounted");
+  port.value="9000";bind.focus();await port.dispatch("change");
+  assert.equal(h.config.companion.network.bind,"192.168.1.20");
+  assert.equal(h.config.companion.network.port,9000);
+  assert.deepEqual(plain(h.calls.filter(c=>c.name==="set_config").map(c=>c.args.patch)),[
+    {companion:{network:{bind:"192.168.1.20"}}},{companion:{network:{port:9000}}}
+  ]);h.unload();
+});
+test("retained Companion controls preserve externally updated network and button siblings",async()=>{
+  const h=await settings();await button(h.root,"Companion").dispatch("click");await settle();
+  const bind=h.document.getElementById("field-bind-address");bind.focus();
+  Object.assign(h.config.companion.network,{bind:"192.168.1.21",port:9001,mdns:true});
+  h.config.companion.buttons.up="cancel";h.emit("config",structuredClone(h.config));
+  const enabled=h.document.getElementById("field-enable-phone-listener");enabled.checked=true;await enabled.dispatch("change");
+  const down=h.document.getElementById("field-down");down.value="enhance";await down.dispatch("change");
+  assert.deepEqual(plain(h.config.companion.network),{enabled:true,bind:"192.168.1.21",port:9001,mdns:true});
+  assert.equal(h.config.companion.buttons.up,"cancel");assert.equal(h.config.companion.buttons.down,"enhance");
+  h.timers.tick(2000);await settle();
+  assert.match(h.root.textContent,/Listening on 192\.168\.1\.21:9001/);h.unload();
+});
+test("queued Companion edits merge only their changed nested fields",async()=>{
+  let finishFirst,requests=0;
+  const h=await settings({set_config:({patch},{config,emit})=>new Promise(resolve=>{
+    const finish=()=>{Object.assign(config.companion.network,patch.companion.network);
+      emit("config",structuredClone(config));resolve(structuredClone(config));};
+    if(++requests===1)finishFirst=finish;else finish();
+  })});
+  await button(h.root,"Companion").dispatch("click");await settle();
+  const bind=h.document.getElementById("field-bind-address"),port=h.document.getElementById("field-port");
+  bind.value="192.168.1.23";port.focus();const first=bind.dispatch("change");await settle();
+  port.value="9003";const second=port.dispatch("change");await settle();
+  assert.equal(requests,1,"the second save waits for the first");finishFirst();await Promise.all([first,second]);
+  assert.equal(h.config.companion.network.bind,"192.168.1.23");assert.equal(h.config.companion.network.port,9003);
+  assert.ok(h.document.getElementById("field-port")===port);h.unload();
+});
+test("rejected Companion save cannot contaminate a later nested edit",async()=>{
+  const h=await settings({set_config:async({patch},{config,emit})=>{
+    const network=patch.companion.network;
+    if("bind" in network)throw new Error("Address refused");
+    Object.assign(config.companion.network,network);emit("config",structuredClone(config));return structuredClone(config);
+  }});
+  await button(h.root,"Companion").dispatch("click");await settle();
+  const bind=h.document.getElementById("field-bind-address"),port=h.document.getElementById("field-port");
+  bind.value="192.168.1.22";port.focus();await bind.dispatch("change");assert.match(h.root.textContent,/Address refused/);
+  port.value="9002";bind.focus();await port.dispatch("change");
+  assert.equal(h.config.companion.network.bind,"127.0.0.1");assert.equal(h.config.companion.network.port,9002);h.unload();
+});
+test("retained app picker uses the current exclusion list after an external update",async()=>{
+  const h=await settings();await button(h.root,"Behavior").dispatch("click");await settle();
+  h.root.querySelector("input").focus();h.config.injection.exclude_apps=["ExistingEditor"];
+  h.emit("config",structuredClone(h.config));await button(h.root,"Pick a focused app…").dispatch("click");await settle();
+  assert.deepEqual(plain(h.config.injection.exclude_apps),["ExistingEditor","TestEditor"]);h.unload();
+});
 test("general replaces the hide toggle with a When idle choice",async()=>{
   const h=await settings();assert.doesNotMatch(h.root.textContent,/Hide when idle/);const idle=h.document.getElementById("field-when-idle");
   assert.equal(idle.value,"icon");idle.value="pill";await idle.dispatch("change");assert.equal(h.config.overlay.idle_view,"pill");h.unload();
